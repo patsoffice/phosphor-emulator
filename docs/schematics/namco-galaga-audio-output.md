@@ -328,10 +328,37 @@ comfortable had it been wrong.
 - **Whether a third 54XX filter output joins Galaga's summing node.** Two were
   followed onto it, R21 and R36; the sheet has a third section with a 10k output
   resistor whose destination was not traced.
-- **Which of the sixteen multiplex slots carry voice output.** The `2K/L`
-  136007-X09 sequencer PROM was not read, so the 96 kHz figure is the frame rate
-  and not a per-voice duty cycle. The scale factor between the board's average
-  and the model's sum follows from that and is therefore unknown.
+- ~~**Which of the sixteen multiplex slots carry voice output.**~~ **Read
+  2026-09-18**, and it turned out the PROM was dumped all along. It is
+  byte-identical in every ROM set of this family, SHA-1
+  `0c4d0bee858b97632411c440bea6948a74759746`: `82s126.3m` on Pac-Man and Ms.
+  Pac-Man, `prom-2.5c` on all four Galaga revisions, `xvi-1.5n` on Xevious,
+  `136007.109` on the three Dig Dugs, `bos1-2.5c` on Bosconian. MAME loads it in
+  every one of those drivers and labels it "timing - not used", because it
+  high-level-emulates the WSG and never decodes it.
+
+  It is a 256x4 bipolar part, outputs active low, upper half blank. Addresses
+  `0x40-0x7f` are one 96 kHz frame at one address per dot clock, which is the
+  64-dot frame described above. Its four outputs partition that frame: two strobe
+  in thirteen slots each, and the other two strobe three times each, at slots 5,
+  10 and 15 (and one slot later, at 0, 6 and 11). **Those three are the voice
+  slots**, and since the `74LS273` holds until it is next clocked, the gaps
+  between them are the per-voice duty cycles: **5, 5 and 6 slots, summing to 16
+  of 16**, so the latch is never idle.
+
+  So the voices are **not** weighted evenly: one sits 1.02 dB above an even third
+  and the other two 0.56 dB below. The scale factor this section used to call
+  unknown is therefore not a scale factor at all, because the duties sum to one;
+  what the multiplex actually changes is that the node mixes by charge balance
+  rather than by summing three independent dividers. Modeled in
+  `machines/src/namco_wsg_output.rs`; see `SLOT_DUTY`.
+
+  **Still not established:** which voice gets the six. The PROM gives the multiset
+  and the slot order, but mapping a slot to voice 0, 1 or 2 needs the register-RAM
+  address mapping or a measurement, and WSG voice order is assumed in the model.
+  Nor was the address line that selects `0x40-0x7f` over the other half traced;
+  the other half is a single output strobing once in all sixteen slots, which
+  cannot run a three-voice multiplex, so the sequencer is clearly this one.
 - **Galaga's control-bit to switch mapping**, which was read in detail only on
   the Dig Dug sheet. The Galaga sheet shows the same topology and the same ten
   resistor values, and its four control lines nest the same way, but at 150 dpi

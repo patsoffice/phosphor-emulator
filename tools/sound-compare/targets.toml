@@ -394,24 +394,41 @@ reference cancels:
 into a game by a Lua autoboot script, ours from the committed movie. Galaga's
 WSG is silent in attract, so a from-reset capture cannot show it.)
 
-The balance our model produces is the one the summing-node legs imply. The WSG
-and explosion channel 3 both reach that node through 10k against the same 3.3k
-of feedback, so they enter at equal weight, and channels 1 and 2 at 33k enter a
-third of that. The WSG node swings to about 0.64 of the 5 V rail at one voice's
-full volume, while the band-pass outputs are rail-limited to roughly 1.75 V of
-AC, the op-amp being single-supply with a 2.0 V reference and clipping 1.5 V
-below the positive rail. So the WSG belongs ABOVE the explosion, which is what
-our -6.6 dB says.
+THE ARITHMETIC IN THIS PARAGRAPH WAS RIGHT AND THE MODEL DID NOT MATCH IT. The
+reasoning stands unchanged: the WSG and explosion channel 3 both reach that node
+through 10k against the same 3.3k of feedback, so they enter at equal weight, and
+channels 1 and 2 at 33k enter a third of that. The WSG node swings to about 0.64
+of the 5 V rail AT ONE VOICE'S FULL VOLUME, while the band-pass outputs are
+rail-limited to roughly 1.75 V of AC, the op-amp being single-supply with a 2.0 V
+reference and clipping 1.5 V below the positive rail. So the WSG belongs ABOVE the
+explosion.
 
-The reference's +7.9 dB does not come from the circuit: its explosion sits at
--1.9 dBFS, all but clipping, because `galaga_final_mixer` carries a hand gain of
-40800 while the WSG reaches the mix on a separate 0.90 * 10/16 route. Those are
-two independently tuned constants, and matching them would mean overriding the
-drawing with somebody's ear.
+WHAT WAS WRONG, CORRECTED 2026-09-18, is that the model's WSG node did not carry
+that 0.64. It carried three times it, because `namco_wsg_output` gave each voice
+its own divider and summed the three, and the normalization that took the level
+back out sits DOWNSTREAM of this summing junction. So the WSG entered this node
+9.55 dB hot against the explosion legs, and the -6.6 dB this row recorded was that
+error and not the drawing's ratio. The phrase 'at one voice's full volume' is
+exactly where the two parted company, and it was sitting in this paragraph the
+whole time.
 
-What IS still open is our WSG's own absolute level, which is 5.7 dB above the
-reference's and belongs to `namco-galaga-output`, not here. That does not move
-the balance above, which is a ratio.
+Fixed by modeling the multiplex (phosphor-emulator-mn5w): the node now carries
+the charge-balance average that one shared network produces, which is the 0.64 the
+paragraph above always assumed. Measured on the attract demo against the
+reference, ours went from 8.7 dB BELOW it to 0.83 dB above it.
+
+THAT RETIRES THE EXPLANATION THIS ROW GAVE FOR THE REFERENCE'S +7.9 dB.
+`galaga_final_mixer`'s hand gain of 40800 and the separate 0.90 * 10/16 WSG route
+are still two independently tuned constants, but they are not what the gap was
+made of: most of it was ours. A hand-tuned constant in the reference is a
+comfortable thing to blame, and it was the wrong answer here. The -6.6 and +7.9
+pair should be RE-MEASURED rather than adjusted by 9.55 on paper, because they
+came from the self-test explosion scenario and the figures above are attract-demo
+peaks.
+
+Our WSG's own absolute level was the other half of this and is answered in
+`namco-galaga-output`: 3.86 dB above the reference content-free, decomposing into
+normalization convention and the volume law, neither of them a defect.
 
 NOT EXERCISED: the 100k / 2.5 kHz channel, on R-Port #1, is never driven during
 the self-test explosion; over the 560 frames measured its code never leaves 0
@@ -695,12 +712,29 @@ the whole time, it is worth 2.19 dB there, and it is what a linear multiply
 cannot produce. Measured against the drawing rather than against the reference,
 ours is the one that is right.
 
-RULED OUT, AND IT SHOULD NOT BE RE-OPENED: `full_swing`'s three voices. The
-board time-multiplexes one DAC, so the node carries the MEAN of the voices and
-not their sum, and three looks like a 9.5 dB overestimate. It is not one,
-because `output_gain` divides by it: summing three and normalizing against a
-three-voice swing is the same arithmetic as averaging three and normalizing
-against one voice's. Noted at `full_swing` in the source as well.
+THE MULTIPLEX IS NOW MODELED, 2026-09-18, and it was not the level after all.
+`full_swing`'s three voices was the right normalization and the wrong topology.
+The board has ONE latch, ONE DAC and ONE switched network with the bias arm
+permanently connected, so the node settles by charge balance over a frame rather
+than by superposition, and a sum of three independent dividers only equals that
+when all three voices carry the same conductance. Galaga's music is three voices
+at code 10, which is exactly that case, which is why the level comparison above
+could not see it. A voice playing ALONE was up to 7.2 dB quiet on Pac-Man.
+
+The twelve switched legs now meet at one node against one bias arm, each scaled
+by its voice's duty cycle. THE DUTY CYCLES ARE READ, not assumed: the sequencer
+PROM is byte-identical in all eleven ROM sets of this family (`prom-2.5c` on the
+four Galaga revisions, `xvi-1.5n`, `136007.109`, `82s126.3m`, `bos1-2.5c`, SHA-1
+`0c4d0bee858b97632411c440bea6948a74759746`), and its four outputs partition a
+64-dot frame into thirteen slots and three. The three voice slots are 5, 10 and
+15, so the holds are 5, 5 and 6 of sixteen: NOT even thirds, a 1.58 dB spread.
+Full working at `SLOT_DUTY` in the source and in phosphor-emulator-mn5w.
+
+The corner came with it, because it falls out of the same node: the model used to
+run about twice high, which is out of band on Galaga and squarely in it on
+Pac-Man. Every machine in the family got darker, Ms. Pac-Man's centroid by 272 Hz.
+`RECONSTRUCTION_HEADROOM` went 0.8 to 0.6 to clear the rail. JUDGED BY EAR AND
+SIGNED OFF before landing, which is this epic's step 4.
 
 WHAT THE CAPTURE DID SHOW is the explosion balance, in the other direction: over
 the attract demo the reference peaks 8.7 dB ABOVE ours. That is the
@@ -738,11 +772,9 @@ Also unmodelled: a shunt capacitor at the node on each board whose corner MOVES
 WITH THE VOLUME CODE, 3.3 to 6.0 kHz on Dig Dug and 8 to 20 kHz on Galaga; a
 differential output pair on Dig Dug and an MB3730 bridge amplifier on Galaga,
 where the model is mono; and the three voices reaching the node as a 96 kHz time
-multiplex averaged by that capacitor, where the model sums them instantaneously.
-What that last one costs is the CORNER and not the level: the model puts three
-volume networks across the shunt where the board only ever has one, so the
-corner runs about twice as high as the board's. The level is unaffected, for the
-reason given under the reference comparison above.
+multiplex averaged by that capacitor. THAT ONE IS NOW MODELED; see the entry
+above. It cost both the corner and the balance between voices, and the reading
+that settled its duty cycles is the sequencer PROM rather than any drawing.
 
 NOTE FOR THE 54XX ROW: on Galaga the WSG and two 54XX filter outputs sum at one
 LM324 inverting node, R19 10k against R21 33k and R36 33k. The junction belongs
@@ -773,6 +805,21 @@ MODELED 2026-09-17 in machines/src/namco_pac_sound.rs, on the DiscreteCircuit
 runtime: both resistor ladders, C1, and the C46 coupling. The WSG's voices reach
 it as the two latch fields through `NamcoWsg::tick_voices`, because the product
 `sample * volume` is the one quantity this board never forms.
+
+THE MULTIPLEX WAS MODELED 2026-09-18 and this is the board it mattered most on.
+The shared stage used to give each voice its own divider and sum the three, where
+the board has one latch, one DAC and one switched network against a permanently
+connected bias arm. Pac-Man has the smallest bias arm in the family, 32.3 uS, so
+it had the largest error: A VOICE PLAYING ALONE CAME OUT 7.2 dB QUIET, and the
+shunt's corner ran at 8.95 kHz where the drawing gives 3.33 kHz at full volume,
+which on this board is squarely in the audible band rather than above it. Both are
+one topology change, described in the `namco-galaga-output` row and at `SLOT_DUTY`
+in machines/src/namco_wsg_output.rs, with duty cycles read off the sequencer PROM
+(`82s126.3m` here, the same part as the rest of the family).
+
+Ms. Pac-Man's spectral centroid fell 272 Hz and Pac-Man's 27 Hz over the committed
+movies; the difference between them is the two games' own content. Judged by ear
+and signed off before landing.
 
 STILL `partial`, not `implemented-needs-validation`: nothing has been compared
 against a reference capture, there is no adapter and no scenario, R5 is still

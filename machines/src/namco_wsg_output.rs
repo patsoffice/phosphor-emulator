@@ -46,15 +46,28 @@
 //! board family: the epic this belongs to has four counterexamples where a
 //! shared board loaded its DAC differently.
 //!
-//! # Where this departs from the boards
+//! # The multiplex, and why the voices are not summed
 //!
-//! The real boards time-multiplex one latch, one DAC and one switched network
-//! across the three voices, so only one voice's legs are in circuit at a time.
-//! Here the three voices have a network each and are summed, because that is
-//! the shape the WSG presents. The shunt is still one capacitor: its corner is
-//! set from the conductance of every closed leg, which is what the shared node
-//! sees. What this cannot show is the per-slot corner stepping at the multiplex
-//! rate, which is above the audio band in any case.
+//! The boards time-multiplex one latch, one DAC and one switched network across
+//! the three voices, so only one voice's legs are ever in circuit, while the
+//! bias arm is permanently connected. The node therefore settles by charge
+//! balance over a frame rather than by superposition:
+//!
+//! ```text
+//! V = sum(d_i * V_i * g_i) / (bias + sum(d_i * g_i))
+//! ```
+//!
+//! where `d_i` is a voice's share of the frame. **That is not a sum of
+//! per-voice dividers**, and the two only agree when every voice carries the
+//! same conductance. Summing three independent dividers, which is what this
+//! module used to do, runs up to 7.2 dB quiet on Pac-Man for a voice playing
+//! alone and sets the shunt's corner about twice too high. So the twelve
+//! switched legs meet at [`one node`](DiscreteCircuitBuilder::resistor_mixer_switched)
+//! against a single bias arm, each leg scaled by its voice's duty, and the
+//! shunt's conductance falls out of the same node.
+//!
+//! What this still cannot show is the per-slot stepping at the multiplex rate,
+//! which is above the audio band in any case.
 //!
 //! Both Galaga-family boards leave the PCB differentially, Dig Dug and Xevious
 //! as op-amp pairs and Galaga as a bridge amplifier. All of them are mono here.
@@ -76,6 +89,35 @@ const SAMPLE_LEGS: [f64; 4] = [470.0, 1_000.0, 2_200.0, 4_700.0];
 /// The 4066-switched volume legs, MSB (latch pin 2) first. Also common to all
 /// four boards.
 const VOLUME_LEGS: [f64; 4] = [10_000.0, 22_000.0, 47_000.0, 100_000.0];
+
+/// Each voice's share of the 96 kHz multiplex frame, read off the sequencer
+/// PROM.
+///
+/// Sixteen slots of four dot clocks pass in one 64-dot frame, and the 74LS273
+/// holds its contents until the next clock, so a voice's weight at the node is
+/// how many slots pass before the latch is reloaded. The PROM's four outputs
+/// partition the frame: two of them strobe in thirteen slots, and the other two
+/// strobe three times each, at slots 5, 10 and 15. Those three are the voice
+/// slots, and the gaps between them are **5, 5 and 6 slots, summing to 16 of
+/// 16**, which is also what confirms the latch never sits idle.
+///
+/// So the voices are **not** weighted evenly: one sits 1.02 dB above an even
+/// third and the other two 0.56 dB below, a 1.58 dB spread. They still sum to
+/// one, which is why [`full_swing`] does not depend on the split.
+///
+/// The same 256x4 part is in every ROM set this stage serves, byte for byte:
+/// `82s126.3m` on Pac-Man and Ms. Pac-Man, `prom-2.5c` on all four Galaga
+/// revisions, `xvi-1.5n` on Xevious, `136007.109` on the three Dig Dugs and
+/// `bos1-2.5c` on Bosconian, SHA-1 `0c4d0bee858b97632411c440bea6948a74759746`.
+/// It is a reading rather than a family resemblance, which matters on a board
+/// family that has four counterexamples.
+///
+/// **Which voice gets the six is the unread part.** The PROM gives the multiset
+/// and the slot order; mapping a slot to voice 0, 1 or 2 needs the register-RAM
+/// address mapping or a measurement. WSG voice order is assumed here. If that
+/// is ever established and disagrees, this is the line to rotate, and nothing
+/// else changes: the spread is real even where the assignment is a guess.
+const SLOT_DUTY: [f64; 3] = [5.0 / 16.0, 5.0 / 16.0, 6.0 / 16.0];
 
 /// What separates one board in this family from another.
 ///
@@ -258,22 +300,39 @@ const LEGACY_FULL_SCALE: f64 = 315.0 * 80.0 / 32767.0 * RECONSTRUCTION_HEADROOM;
 /// the stage inherits that and lands on the rail, where Dig Dug and Xevious
 /// both measured -0.00 dBFS.
 ///
-/// 0.8 is measured rather than chosen for taste, and what it is measured
-/// against is the path it replaces. With it, every machine in the family lands
-/// within about a decibel of where the integer multiply put it over the same
-/// committed movie:
+/// It is measured rather than chosen for taste. It was 0.8 while the voices
+/// were summed, which put the family within about a decibel of the integer
+/// multiply it replaced. **Modeling the multiplex invalidated that
+/// calibration**, in two ways that both push the level up:
 ///
-/// | machine | integer path | this stage |
-/// |---|---|---|
-/// | pacman | -4.67 dBFS | -3.66 |
-/// | galaga | -4.41 | -4.07 |
-/// | digdug | -0.91 | -1.04 |
-/// | xevious | -1.21 | -0.07 |
+/// - Sparse passages got louder, because a voice playing alone is no longer a
+///   third of three. That is the fix, not a side effect.
+/// - The WSG node now carries its physical value rather than three times it,
+///   so the 0.33 leg into the summing amplifier and the 54XX's own legs are
+///   finally on a common footing. That moved the explosion path up by 9.55 dB
+///   relative to the WSG, which is a 3x that had been hiding in the old
+///   topology, and it is what put Galaga and Xevious on the rail.
 ///
-/// The spread between boards is the games' own content and was there before:
-/// Dig Dug and Xevious have always run close to the rail. One factor for the
-/// whole family, rather than a per-board trim nobody could later tie to a part.
-const RECONSTRUCTION_HEADROOM: f64 = 0.8;
+/// 0.6 restores the margin. Peaks over the committed movies:
+///
+/// | machine | summed voices, 0.8 | multiplexed, 0.8 | multiplexed, 0.6 |
+/// |---|---|---|---|
+/// | pacman | -3.66 dBFS | -1.08 | -3.58 |
+/// | mspacman | - | -1.95 | -4.45 |
+/// | galaga | -4.07 | 0.00, clipping | -1.35 |
+/// | digdug | -1.04 | -1.19 | -3.69 |
+/// | xevious | -0.07 | -0.00, clipping | -1.35 |
+///
+/// Galaga and Xevious land higher than scaling their clipped column would
+/// suggest, because a clipped peak does not say how far past the rail the
+/// content went. Their 1.35 dB is the thinnest margin in the family and it is
+/// still wider than the 0.07 dB Xevious used to run at.
+///
+/// The family comes out more uniform than it was, which is the multiplex
+/// removing a voice-count dependence rather than a trim being applied: this is
+/// still one factor for the whole family and not a per-board number nobody
+/// could later tie to a part.
+const RECONSTRUCTION_HEADROOM: f64 = 0.6;
 
 // ---------------------------------------------------------------------------
 // The two ladders, as arithmetic
@@ -326,6 +385,13 @@ pub fn volume_gain(code: u8, params: BoardParams) -> f64 {
 
 /// Where the shunt capacitor's corner sits for one volume code, in Hz. The code
 /// chooses the node's resistance, so the corner is a function of the volume.
+///
+/// This is the **per-slot** figure, which is what the transcriptions compute
+/// and what the drawing's Thevenin resistance gives: the corner while that one
+/// voice holds the node. The corner the audio band actually sees is the
+/// duty-weighted average over a frame, so it also depends on what the other two
+/// voices are doing, and it only coincides with this when all three carry the
+/// same code. One voice playing alone sits well below it; see [`SLOT_DUTY`].
 pub fn corner_hz(code: u8, params: BoardParams) -> f64 {
     let g = volume_conductance(code) + params.bias_g;
     g / (std::f64::consts::TAU * params.shunt_c)
@@ -409,11 +475,12 @@ fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, 
         .with_sim_rate(MIN_SIM_RATE);
 
     let weights = sample_weights();
-    let mut legs = Vec::with_capacity(3);
-    let mut corner_inputs = Vec::with_capacity(4);
+    // Every voice's legs land on one node, because the board has one network.
+    let mut taps: Vec<(NodeId, f64, Option<NodeId>)> = Vec::with_capacity(12);
+    let mut corner_inputs = Vec::with_capacity(3);
     let mut voices = Vec::with_capacity(3);
 
-    for v in 0..3 {
+    for (v, &duty) in SLOT_DUTY.iter().enumerate() {
         // The latch's two fields. The sample field is unsigned here, exactly as
         // 5Q-8Q are: the DC it carries is C46's to remove, further down.
         let sample = b.data_input(&format!("SAMPLE{v}"), 1.0);
@@ -424,28 +491,26 @@ fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, 
         // The four 4066 sections tap that one node. Gating the sources instead
         // would leave every resistor in the divider, which is the error
         // `resistor_mixer_switched` exists to prevent.
-        let taps: Vec<(NodeId, f64, Option<NodeId>)> = VOLUME_LEGS
-            .iter()
-            .enumerate()
-            .map(|(i, ohms)| {
-                let bit = 3 - i as u8;
-                let sw = b.bit_decode(&format!("VOL{v}_B{bit}"), volume, bit);
-                (node, *ohms, Some(sw))
-            })
-            .collect();
-        legs.push(b.resistor_mixer_switched(&format!("LEG{v}"), &taps, Some(1.0 / params.bias_g)));
+        //
+        // A leg is only in circuit for this voice's slots, so over a frame it
+        // averages `duty / ohms` of conductance. Scaling the resistance is what
+        // turns three networks that would each fight the bias arm on their own
+        // into the one network the board has.
+        for (i, ohms) in VOLUME_LEGS.iter().enumerate() {
+            let bit = 3 - i as u8;
+            let sw = b.bit_decode(&format!("VOL{v}_B{bit}"), volume, bit);
+            taps.push((node, ohms / duty, Some(sw)));
+        }
 
-        // What C1 sees through this voice's closed legs.
-        corner_inputs.push(b.dac_weighted(
-            &format!("VOL{v}_G"),
-            volume,
-            &conductances(VOLUME_LEGS),
-        ));
+        // What C1 sees through this voice's closed legs, on the same average.
+        let g: Vec<f64> = conductances(VOLUME_LEGS).iter().map(|g| g * duty).collect();
+        corner_inputs.push(b.dac_weighted(&format!("VOL{v}_G"), volume, &g));
 
         voices.push(VoiceInputs { sample, volume });
     }
 
-    let sound = b.add("SOUND", &legs);
+    // The shared node, and the bias arm that is never switched out.
+    let sound = b.resistor_mixer_switched("SOUND", &taps, Some(1.0 / params.bias_g));
     let mut c1_inputs = vec![sound];
     c1_inputs.extend(corner_inputs);
     let filtered = b.custom(
@@ -532,28 +597,18 @@ fn output_gain(params: BoardParams) -> f64 {
 }
 
 /// The largest excursion the stage can present to [`OutputGain`], in circuit
-/// units: three voices at full volume, each swinging the larger half of the
-/// sample ladder.
+/// units: every voice at full volume, swinging the larger half of the sample
+/// ladder.
 ///
-/// # Three voices is not the wrong estimate for a time multiplex
-///
-/// The obvious objection is that the board never has three voices on the node
-/// at once: one latch and one DAC are shared, and the shunt averages the
-/// slots, so the audio-band signal is the *mean* of the three voices and its
-/// largest value is one voice's. Measured against that, summing three looks
-/// like a 9.5 dB error, and `phosphor-emulator-l6ds` was filed on the
-/// suspicion that it was one.
-///
-/// It is not, because [`output_gain`] divides by whatever this returns. Summing
-/// three voices and normalizing against a three-voice swing is the same
-/// arithmetic as averaging three and normalizing against one voice's: the 3
-/// cancels. Changing it moves the board's loudness and nothing else, because
-/// the whole stage reaches [`OutputGain`] through this one scalar. The real
-/// departure from the multiplex is the shunt's corner, which this module's
-/// header already states, and it is a timbre difference rather than a level.
+/// There is no voice count in this. [`SLOT_DUTY`] sums to one, so three voices
+/// at full volume drive the node exactly as one voice holding it for the whole
+/// frame would, and the board's loudest state is one code-15 divider rather
+/// than three. That is what keeps [`LEGACY_FULL_SCALE`] meaning the same thing
+/// across the topology change, and it is also why the duty split can be
+/// rotated without moving the family's level.
 fn full_swing(params: BoardParams) -> f64 {
     let zero = sample_level(8);
-    let wsg = 3.0 * zero.max(1.0 - zero) * volume_gain(15, params);
+    let wsg = zero.max(1.0 - zero) * volume_gain(15, params);
     match params.explosion {
         // The summing amplifier scales the WSG by its own leg, so full scale
         // has to be measured after it or the boards with one come out quiet by
@@ -996,6 +1051,79 @@ mod tests {
         assert!(
             peak < 32_000,
             "the loudest drive should stay off the rail, peaked at {peak}"
+        );
+    }
+
+    /// The sequencer PROM's reading, as arithmetic. The 74LS273 holds until it
+    /// is next clocked, so the three gaps between the strobes have to account
+    /// for the whole frame; a set that did not sum to one would mean a slot
+    /// where the DAC drives nothing, which the part cannot do.
+    #[test]
+    fn the_sequencer_proms_slots_account_for_the_whole_frame() {
+        let total: f64 = SLOT_DUTY.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "the latch holds, so the slots must cover the frame: {total}"
+        );
+
+        let mut slots: Vec<f64> = SLOT_DUTY.iter().map(|d| d * 16.0).collect();
+        slots.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+        assert_eq!(slots, vec![5.0, 5.0, 6.0], "strobes at slots 5, 10 and 15");
+
+        // The whole point of reading the PROM rather than assuming thirds.
+        let spread = db(slots[2] / slots[0]);
+        assert!(
+            (spread - 1.58).abs() < 0.01,
+            "the long voice should sit 1.58 dB above the short ones, got {spread:.2}"
+        );
+    }
+
+    /// The mix is compressive, which is the mechanism the shared network adds.
+    ///
+    /// One voice holds the node for its own slots against a bias arm that is
+    /// never switched out, so it is worth far more than a third of three
+    /// voices. A model that summed three independent dividers puts it at
+    /// exactly a third, and that is the error this topology exists to remove:
+    /// on Pac-Man it was 7 dB on every sparse passage.
+    #[test]
+    fn a_voice_playing_alone_is_worth_more_than_a_third_of_three() {
+        let peak = |active: usize| {
+            let mut out = WsgOutputStage::new(P, TIMING.cpu_clock_hz);
+            let mut buf = [0i16; 4096];
+            let mut samples = Vec::new();
+            let half_period = TIMING.cpu_clock_hz / 2_000;
+            for cycle in 0..(TIMING.cpu_clock_hz / 4) {
+                let s = if (cycle / half_period).is_multiple_of(2) {
+                    7
+                } else {
+                    -8
+                };
+                let mut voices = [(0i32, 0u8); 3];
+                for slot in voices.iter_mut().take(active) {
+                    *slot = (s, 15);
+                }
+                out.tick(voices);
+                let n = out.fill_audio(&mut buf);
+                samples.extend_from_slice(&buf[..n]);
+            }
+            let settled = &samples[samples.len() / 5..];
+            f64::from(
+                settled
+                    .iter()
+                    .map(|s| s.unsigned_abs())
+                    .max()
+                    .expect("no audio"),
+            )
+        };
+
+        let share = peak(1) / peak(3);
+        assert!(
+            share > 0.6,
+            "a lone voice should be most of the node, not a third: {share:.3}"
+        );
+        assert!(
+            share < 1.0,
+            "but still below three voices, which is full scale: {share:.3}"
         );
     }
 
