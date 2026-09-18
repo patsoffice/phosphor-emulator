@@ -292,3 +292,44 @@ from pin 8 to ground.
 
 This is a hand transcription and can be wrong. Nothing in it is checked by a
 test; the section above it is what keeps that honest.
+
+## The Empire Strikes Back, checked 2026-09-18
+
+| | |
+|---|---|
+| Document | `THE EMPIRE STRIKES BACK: Instructions to Convert STAR WARS Cockpit and Upright Games`, Atari Games, (c) 1985 |
+| Read from | `arcade-museum.com/manuals-videogames/S/StarWarsESBAtariarcademanual.pdf`, PDF p15-17, section `E. MODIFY THE SOUND PCB` |
+
+Checked for `phosphor-emulator-20f3`, because `esb` rides this row and no ESB
+drawing had been read. **There is no ESB audio schematic to read, and there does
+not need to be one.** ESB shipped only as a conversion kit for a Star Wars
+cabinet, so the Sound PCB is this Sound PCB, and the kit's own instructions say
+exactly what it does to it. The whole of section E is:
+
+1. Cut the traces at pin 26 of the IC sockets at `1H` and `1J/K`, on the back of
+   the board.
+2. Jumper pin 26 of `1J/K` to pin 23 of `3K`.
+3. Jumper pin 26 of `1J/K` to pin 26 of `1H`.
+4. Pull the ICs at `1H` and `1J/K` and fit `136031-012` and `136031-013` from the
+   kit, keeping the originals "for possible use in another STAR WARS game".
+
+**Nothing analog is touched.** No resistor, capacitor, op-amp, POKEY, delay line,
+speech chip or speaker connection appears anywhere in the procedure, and no part
+of the kit's parts list is a passive. So every value in this file applies to ESB
+unchanged: the five unequal summing legs, the two Butterworth sections, the
+bucket-brigade delay and its swept clock, and the stereo matrix.
+
+That is now read rather than assumed, which is the whole point of the issue: a
+shared board has repeatedly not meant a shared output stage elsewhere in this
+sweep, and the only way to know is to look.
+
+### What this does NOT establish
+
+- **What the modification is for.** It reads like a ROM capacity change, since
+  cutting pin 26 and feeding it from a decode output is what a 2764 to 27128 swap
+  needs, pin 26 being Vcc on the smaller part and A13 on the larger. That is an
+  inference from the shape of the change; the socket types were not checked and
+  it does not matter here, because either way it is digital.
+- **The rest of the kit.** Sections A to D modify the Main PCB and the Analog
+  Vector-Generator PCB, and the display sections change deflection and
+  high-voltage components. None of that is audio, and none of it was read closely.

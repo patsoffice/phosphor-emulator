@@ -801,8 +801,17 @@ status = "missing"
 notes = """
 EXAMINED, AND IT IS THE LARGEST GAP THIS SWEEP HAS FOUND. Off `unexamined` as
 `missing`. Atari SP-225 sheets 16A and 16B, the cleanest drawings in the phase.
-Only Star Wars was read; The Empire Strikes Back is in this row, runs on the
-same device file, and had no drawing read.
+
+BOTH MACHINES ARE COVERED, checked 2026-09-18. There is no ESB audio schematic
+and there does not need to be one: ESB shipped only as a conversion kit for a
+Star Wars cabinet, so its Sound PCB is this Sound PCB, and the kit's own
+instructions say what it does to it. All of section `E. MODIFY THE SOUND PCB` is
+to cut the pin-26 traces at the `1H` and `1J/K` sockets, jumper `1J/K` pin 26 to
+`3K` pin 23 and to `1H` pin 26, and fit two new ICs, `136031-012` and
+`136031-013`. That is digital, it reads like a ROM capacity change, and nothing
+analog is touched anywhere in the kit. So every value below applies to ESB
+unchanged. Written up in the ESB section of
+docs/schematics/starwars-audio-output.md.
 
 The row's own guess was right: the mixer has its own balance and speech does not
 arrive at the same level by accident. It is worse than that.
