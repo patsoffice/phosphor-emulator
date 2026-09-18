@@ -649,9 +649,62 @@ carries its own parameters.
 
 EXAMINED, ON THREE DRAWINGS, AND IT IS THE PAC-MAN CIRCUIT.
 
-STILL `partial`: no adapter, no scenario, nothing compared against a reference
-capture, and every board here still leaves the PCB differentially where the
-model is mono. What the model is checked against is the drawings' arithmetic.
+STILL `partial`: no adapter, no scenario, and every board here still leaves the
+PCB differentially where the model is mono. Galaga has now been compared against
+a reference capture, below; Dig Dug and Xevious have not.
+
+COMPARED ON GALAGA 2026-09-18, the first reference capture this row has ever
+had. Coin and 1 player start driven into both emulators from reset with nothing
+firing, so the 54XX stays out of the window.
+
+OUR WSG DOES SIT ABOVE THE REFERENCE'S, BUT NOT BY 5.7 dB AND NOT BY AN ERROR.
+That figure came from the peaks of two whole captures, which is the one thing
+these two runs cannot share: a game driven from reset diverges within a second
+or two, and by 32 s ours was silent while the reference was still playing.
+Driving both output models with the SAME voice stream instead removes the
+content entirely:
+
+| volume code | ours | reference | gap |
+|---|---|---|---|
+| 15 | -3.75 dBFS | -5.56 | 1.80 dB |
+| 10 | -5.22 | -9.08 | 3.86 |
+| 4 | -10.67 | -17.04 | 6.37 |
+| 1 | -21.71 | -29.08 | 7.37 |
+
+Two terms, and neither is a defect:
+
+- 1.8 dB IS THE TWO EMULATORS' FULL-SCALE CONVENTIONS and nothing else. Ours is
+  `LEGACY_FULL_SCALE`, which pins this board's loudness to the integer path the
+  stage replaced. The reference's is a mix resolution of 128 * 3 voices behind a
+  route of 0.90 * 10/16. Both are house numbers, so an absolute dBFS comparison
+  of this path decides nothing on its own; the scale-invariant band energies are
+  what to read.
+- THE REST IS THE VOLUME LAW, which is the reason this stage exists. The
+  reference multiplies sample by volume linearly where the board divides against
+  its bias arm, so the gap is a function of the code rather than a constant:
+  2.19 dB at code 10 and 6.59 dB at code 1 from the divider alone. The table's
+  residual above the 1.8 dB is a little under each of those, 2.06 and 5.57,
+  because the shunt's corner falls with the code too and takes the edges off a
+  square at the bottom of the range.
+
+WHICH CODE GALAGA ACTUALLY USES SETTLES IT: volume code 10 and almost nothing
+else, 2900 of 2942 non-silent voice-frames over the committed movie, the
+remaining 42 stepping down through 8, 6, 4 and 2 on one effect. So the
+compression this row records is not a detail of decay tails. It is in the signal
+the whole time, it is worth 2.19 dB there, and it is what a linear multiply
+cannot produce. Measured against the drawing rather than against the reference,
+ours is the one that is right.
+
+RULED OUT, AND IT SHOULD NOT BE RE-OPENED: `full_swing`'s three voices. The
+board time-multiplexes one DAC, so the node carries the MEAN of the voices and
+not their sum, and three looks like a 9.5 dB overestimate. It is not one,
+because `output_gain` divides by it: summing three and normalizing against a
+three-voice swing is the same arithmetic as averaging three and normalizing
+against one voice's. Noted at `full_swing` in the source as well.
+
+WHAT THE CAPTURE DID SHOW is the explosion balance, in the other direction: over
+the attract demo the reference peaks 8.7 dB ABOVE ours. That is the
+`namco-54xx-explosion` row's settled finding and not this one's.
 
 Measured over the committed movies, against the integer multiply it replaced:
 peak -4.41 to -4.07 dBFS on Galaga, -0.91 to -1.04 on Dig Dug, -1.21 to -0.07 on
@@ -686,6 +739,10 @@ WITH THE VOLUME CODE, 3.3 to 6.0 kHz on Dig Dug and 8 to 20 kHz on Galaga; a
 differential output pair on Dig Dug and an MB3730 bridge amplifier on Galaga,
 where the model is mono; and the three voices reaching the node as a 96 kHz time
 multiplex averaged by that capacitor, where the model sums them instantaneously.
+What that last one costs is the CORNER and not the level: the model puts three
+volume networks across the shunt where the board only ever has one, so the
+corner runs about twice as high as the board's. The level is unaffected, for the
+reason given under the reference comparison above.
 
 NOTE FOR THE 54XX ROW: on Galaga the WSG and two 54XX filter outputs sum at one
 LM324 inverting node, R19 10k against R21 33k and R36 33k. The junction belongs

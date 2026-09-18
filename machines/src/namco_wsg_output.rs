@@ -534,6 +534,23 @@ fn output_gain(params: BoardParams) -> f64 {
 /// The largest excursion the stage can present to [`OutputGain`], in circuit
 /// units: three voices at full volume, each swinging the larger half of the
 /// sample ladder.
+///
+/// # Three voices is not the wrong estimate for a time multiplex
+///
+/// The obvious objection is that the board never has three voices on the node
+/// at once: one latch and one DAC are shared, and the shunt averages the
+/// slots, so the audio-band signal is the *mean* of the three voices and its
+/// largest value is one voice's. Measured against that, summing three looks
+/// like a 9.5 dB error, and `phosphor-emulator-l6ds` was filed on the
+/// suspicion that it was one.
+///
+/// It is not, because [`output_gain`] divides by whatever this returns. Summing
+/// three voices and normalizing against a three-voice swing is the same
+/// arithmetic as averaging three and normalizing against one voice's: the 3
+/// cancels. Changing it moves the board's loudness and nothing else, because
+/// the whole stage reaches [`OutputGain`] through this one scalar. The real
+/// departure from the multiplex is the shunt's corner, which this module's
+/// header already states, and it is a timbre difference rather than a level.
 fn full_swing(params: BoardParams) -> f64 {
     let zero = sample_level(8);
     let wsg = 3.0 * zero.max(1.0 - zero) * volume_gain(15, params);
