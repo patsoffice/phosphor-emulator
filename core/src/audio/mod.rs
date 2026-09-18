@@ -656,7 +656,11 @@ mod tests {
         let mut r = AudioResampler::<f32>::new(input_rate, 44_100);
         // 0.2 s of input: the first half is discarded so the filter's delay
         // line and the analysis are both looking at steady state.
-        let ticks = input_rate / 5;
+        //
+        // Rounded UP, because the slice below needs a full 4410 samples in the
+        // second half and a truncating divide leaves a low input rate two short
+        // of that: 8018 / 5 is 1603 ticks, which is 0.19993 s.
+        let ticks = input_rate.div_ceil(5);
         for i in 0..ticks {
             let t = i as f64 / input_rate as f64;
             r.tick((2.0 * std::f64::consts::PI * hz * t).sin() as f32);
@@ -758,18 +762,192 @@ mod tests {
         // ENDORSEMENT OF IT. `with_sim_rate` now rounds so no discrete circuit
         // can ask for an incommensurate rate, but `AudioResampler::new` is
         // public and every device driven from a raw CPU clock still passes one.
-        // Those ratios are large (3.072 MHz over 176400 is 17.4, a window of 17
-        // or 18 samples) so the modulation is a few percent rather than the
-        // 100% swing a near-1 ratio gives, which is why only these boards showed
-        // it. Fixing stage one to handle any ratio is the open half of 6ykk and
-        // needs benching, since it is the per-cycle path of every board here.
-        // When that lands this assertion is what should fail.
+        //
+        // That residue was priced in `phosphor-emulator-iceq` and left alone:
+        // measured at every ratio the tree uses, it runs 9.8 to 32.8 dB under
+        // the noise those devices' own 4-bit DACs make, so it is masked. See
+        // `the_raw_cpu_clock_ratios_jitter_below_the_source_dacs_own_noise`,
+        // which is where the numbers live. Fixing stage one anyway would be a
+        // change to the per-cycle path of every board in the tree.
+        //
+        // If it is ever fixed, this assertion is what should fail.
         assert!(
             dirty_stray > clean_stray * 10.0,
             "the incommensurate rate no longer looks worse ({:.4}% against \
              {:.4}%), so stage one has been fixed and this test is stale",
             dirty_stray * 100.0,
             clean_stray * 100.0
+        );
+    }
+
+    /// Stage one's box jitter, on every ratio the tree actually uses, stays
+    /// below the noise the source device's own DAC makes, so rewriting stage
+    /// one for it would change nothing anybody can hear.
+    ///
+    /// `phosphor-emulator-iceq` asked for this as a number rather than an
+    /// argument, because the fix is in the per-cycle path of every board in the
+    /// tree and the last two changes there cost 17 to 38 percent of a frame.
+    ///
+    /// **The floor is the source, not the sink.** An `i16` output is the wrong
+    /// comparison and was the first one tried: its floor is around 1.7e-10 and
+    /// every ratio here is four to six orders of magnitude above it. But none of
+    /// these devices carries 16 bits of signal. They are all 4-bit parts (the
+    /// WSG's sample and volume nibbles, the AY8910's 16-step envelope, POKEY's
+    /// 4-bit per-channel volume), so a 4-bit quantisation noise is already in
+    /// the signal, authentically, and anything below it is masked.
+    ///
+    /// The margin is narrowest at the top of the band, where the box modulation
+    /// has the most to scramble, and widens quickly below it. At the worst ratio
+    /// in the tree the jitter runs 9.8 dB under the source's own noise at
+    /// 19 kHz and 32.8 dB under it at 1 kHz.
+    #[test]
+    fn the_raw_cpu_clock_ratios_jitter_below_the_source_dacs_own_noise() {
+        const OUTPUT: f64 = 44_100.0;
+        const TONE: f64 = 19_000.0; // the worst case: highest, so most to scramble
+
+        let stray = |s: &[f32], hz: f64| {
+            let total = total_energy(s);
+            ((total - tone_energy(s, OUTPUT, hz)) / total).max(0.0)
+        };
+        // A 4-bit DAC's own noise, measured the same way through a commensurate
+        // resample so only the quantisation differs.
+        let four_bit_floor = |hz: f64| {
+            let q: Vec<f32> = resample_tone(hz, 352_800)
+                .iter()
+                .map(|&v| (v * 8.0).round() / 8.0)
+                .collect();
+            stray(&q, hz)
+        };
+
+        let floor = four_bit_floor(TONE);
+
+        // Every distinct rate the tree passes to `AudioResampler::new` from a
+        // raw clock. The discrete runtime is not here: `with_sim_rate` rounds
+        // it to a whole multiple already, which was option 1 of `-6ykk`.
+        for (what, rate) in [
+            ("namco wsg, pac and galaga families", 3_072_000u64),
+            ("congo bongo cpu", 3_041_250),
+            ("ssio and its ay8910s", 2_000_000),
+            ("pokey, jsa", 1_789_772),
+            ("pokey, default ntsc", 1_789_773),
+            ("pokey, astdelux", 1_512_000),
+            ("ay8910, btime", 1_500_000),
+            ("pokey, missile command", 1_250_000),
+        ] {
+            let s = stray(&resample_tone(TONE, rate), TONE);
+            let ratio = rate as f64 / (OUTPUT * fir::DECIMATION as f64);
+            println!(
+                "{what:36} {rate:>9} Hz  ratio {ratio:6.3}  stray {s:.3e}  \
+                 margin {:+.1} dB",
+                10.0 * (floor / s).log10()
+            );
+            assert!(
+                s < floor,
+                "{what} ({rate} Hz, ratio {ratio:.3}) strays {s:.3e}, at or \
+                 above the 4-bit source floor of {floor:.3e}. iceq was closed \
+                 on this being masked; if a new device brings a ratio this \
+                 small, stage one may now be worth fixing after all."
+            );
+        }
+
+        // The smallest ratio in the tree, swept down the band. The margin only
+        // grows away from Nyquist, which is what makes the 19 kHz row above the
+        // worst case rather than a typical one.
+        println!("\nmissile command's 1.25 MHz, the smallest ratio, by tone:");
+        for hz in [1_000.0, 4_000.0, 8_000.0, 12_000.0, 19_000.0] {
+            let s = stray(&resample_tone(hz, 1_250_000), hz);
+            let src = four_bit_floor(hz);
+            println!(
+                "  {hz:>6.0} Hz  jitter {:+.1} dB  4-bit source {:+.1} dB  \
+                 margin {:+.1} dB",
+                10.0 * s.log10(),
+                10.0 * src.log10(),
+                10.0 * (src / s).log10()
+            );
+            assert!(s < src, "jitter reaches the source floor at {hz} Hz");
+        }
+    }
+
+    /// The two devices that resample UPWARD are the case iceq flagged as
+    /// possibly behaving differently, and one of them does, badly enough to be
+    /// its own defect.
+    ///
+    /// IT IS NOT THE BOX JITTER. Stage one's box cannot average less than one
+    /// input sample, so at a ratio below 1 it degenerates to a zero-order hold
+    /// and the artifact is that hold's images, not a modulated window. Giving
+    /// the box a fractional phase, which is what iceq would have done, does not
+    /// touch this.
+    ///
+    /// **The TMS5220 measures badly and it is not our defect.** At 8135 Hz into
+    /// 176400 the ratio is 0.046, and a 1 kHz tone comes out with 3.8e-2 of its
+    /// energy off the tone, about -14 dB, with images at 7 and 9 kHz that sit
+    /// inside the band where stage two's filter will not reach them.
+    ///
+    /// The jitter is not what puts them there, which the commensurate rates
+    /// below are here to prove. 8018, 8400 and 8820 Hz all divide 176400
+    /// exactly, so their holds are a clean 22, 21 and 20 samples with no
+    /// alternation at all, and they measure -14.0, -14.5 and -14.9 dB against
+    /// the jittered -14.2. THE JITTER IS WORTH UNDER HALF A DECIBEL OF IT. The
+    /// rest is the zero-order hold, and **the real chip has that too**: the
+    /// TMS5220 updates its DAC at 8 kHz and holds between updates, so a real
+    /// board's speech pin carries the same images. Interpolating them away here
+    /// would make the model LESS faithful, not more.
+    ///
+    /// What a real board does next is filter them, and that is where the gap
+    /// actually is. Star Wars puts an R5106 bucket-brigade delay line clocked
+    /// at 37.8 kHz between two active filters, and the `starwars-audio` row of
+    /// `tools/sound-compare/targets.toml` already records the whole stage as
+    /// unmodeled. That belongs to the board-level analog epic, not here.
+    ///
+    /// The SC-01 is fine: at 52778 Hz the ratio is 0.30 and the stray is
+    /// 1.1e-4, comfortably masked.
+    #[test]
+    fn resampling_upward_is_a_zero_order_hold_and_the_tms5220_shows_it() {
+        const OUTPUT: f64 = 44_100.0;
+        // Well inside what an 8 kHz source can carry. 4 kHz sits within a
+        // hair of that source's own Nyquist and reads 55 percent stray for
+        // that reason alone, which says nothing about the resampler.
+        const TONE: f64 = 1_000.0;
+
+        let stray = |s: &[f32]| {
+            let total = total_energy(s);
+            ((total - tone_energy(s, OUTPUT, TONE)) / total).max(0.0)
+        };
+
+        // TMS5220 at its nominal 5220C rate, and the SC-01's sclock.
+        let tms = stray(&resample_tone(TONE, 8_135));
+        let sc01 = stray(&resample_tone(TONE, 52_778));
+        println!(
+            "tms5220      8135 Hz  stray {tms:.3e} ({:+.1} dB)",
+            10.0 * tms.log10()
+        );
+        println!(
+            "votrax sc01 52778 Hz  stray {sc01:.3e} ({:+.1} dB)",
+            10.0 * sc01.log10()
+        );
+
+        // How much of the TMS5220's stray is the hold itself, which the real
+        // chip also has, and how much is OUR hold jittering between 21 and 22
+        // intermediate samples, which it does not? 8820 Hz is the nearest rate
+        // that divides 176400 exactly, so its hold is a clean 20 every time and
+        // its imaging is otherwise the same shape.
+        for rate in [8_018u64, 8_400, 8_820] {
+            let s = stray(&resample_tone(TONE, rate));
+            println!(
+                "  commensurate {rate:>5} Hz (hold {:>2})  stray {s:.3e} ({:+.1} dB)",
+                176_400 / rate,
+                10.0 * s.log10()
+            );
+        }
+
+        assert!(
+            tms > 1e-2,
+            "the TMS5220's hold images have gone ({tms:.3e}); stage one has \
+             gained a fractional phase and this test is stale"
+        );
+        assert!(
+            sc01 < 1e-3,
+            "the SC-01 used to be masked and is not any more ({sc01:.3e})"
         );
     }
 }
