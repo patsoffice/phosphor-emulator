@@ -1,0 +1,141 @@
+{
+  "modules": {
+    "dkong jump: NE556 half B, its 4049 wobble, and the mix": {
+      "ports": {
+        "to jump mix node": { "direction": "output", "bits": [20] }
+      },
+      "cells": {
+        "u8Nb": {
+          "type": "8N NE556b",
+          "port_directions": {
+            "R40 47k / R41 27k (13,12)": "input",
+            "C27 47n (8)": "input",
+            "CV (11)": "input",
+            "out (9)": "output"
+          },
+          "connections": {
+            "R40 47k / R41 27k (13,12)": [2],
+            "C27 47n (8)": [2],
+            "CV (11)": [10],
+            "out (9)": [15]
+          },
+          "attributes": {}
+        },
+        "uC24": {
+          "type": "C24 10u",
+          "port_directions": { "on CV (11)": "output" },
+          "connections": { "on CV (11)": [10] },
+          "attributes": {}
+        },
+        "uR49": {
+          "type": "R49 1.2k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [11], "out": [10] },
+          "attributes": {}
+        },
+        "u8La": {
+          "type": "8L 4049a",
+          "port_directions": { "in (2)": "input", "out (3)": "output" },
+          "connections": { "in (2)": [4], "out (3)": [5] },
+          "attributes": {}
+        },
+        "u8Lb": {
+          "type": "8L 4049b",
+          "port_directions": { "in (4)": "input", "out (5)": "output" },
+          "connections": { "in (4)": [5], "out (5)": [6] },
+          "attributes": {}
+        },
+        "u8Lc": {
+          "type": "8L 4049c",
+          "port_directions": { "in (6)": "input", "out (7)": "output" },
+          "connections": { "in (6)": [6], "out (7)": [7] },
+          "attributes": {}
+        },
+        "uR38": {
+          "type": "R38 10k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [7], "out": [4] },
+          "attributes": {}
+        },
+        "uR39": {
+          "type": "R39 3.3M",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [7], "out": [4] },
+          "attributes": {}
+        },
+        "uC26": {
+          "type": "C26 3.3u",
+          "port_directions": { "on ring": "output" },
+          "connections": { "on ring": [4] },
+          "attributes": {}
+        },
+        "uR51": {
+          "type": "R51 10k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [7], "out": [11] },
+          "attributes": {}
+        },
+        "uD8": {
+          "type": "D8 1SS53",
+          "port_directions": { "anode": "input", "cathode": "output" },
+          "connections": { "anode": [11], "cathode": [10] },
+          "attributes": {}
+        },
+        "u6L": {
+          "type": "6L LS05 (13,12)",
+          "port_directions": { "from 7H PB": "input", "open collector": "output" },
+          "connections": { "from 7H PB": [16], "open collector": [17] },
+          "attributes": {}
+        },
+        "uR32": {
+          "type": "R32 10k pull-up",
+          "port_directions": { "on 6L.12": "output" },
+          "connections": { "on 6L.12": [17] },
+          "attributes": {}
+        },
+        "uEnvRC": {
+          "type": "envelope RC",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [17], "out": [18] },
+          "attributes": {}
+        },
+        "uQ5": {
+          "type": "Q5 2SC1815",
+          "port_directions": { "base via C18 1u / R31 10k": "input", "collector": "output" },
+          "connections": { "base via C18 1u / R31 10k": [18], "collector": [19] },
+          "attributes": {}
+        },
+        "uR30": {
+          "type": "R30 100k load",
+          "port_directions": { "on collector": "output" },
+          "connections": { "on collector": [19] },
+          "attributes": {}
+        },
+        "uR29": {
+          "type": "R29 10k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [19], "out": [21] },
+          "attributes": {}
+        },
+        "uD6": {
+          "type": "D6 1SS53 envelope",
+          "port_directions": { "anode": "input", "cathode": "output" },
+          "connections": { "anode": [21], "cathode": [20] },
+          "attributes": {}
+        },
+        "uD7": {
+          "type": "D7 1SS53 source",
+          "port_directions": { "anode": "input", "cathode": "output" },
+          "connections": { "anode": [15], "cathode": [20] },
+          "attributes": {}
+        },
+        "uC17": {
+          "type": "C17 4.7u",
+          "port_directions": { "on mix node": "output" },
+          "connections": { "on mix node": [20] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}
