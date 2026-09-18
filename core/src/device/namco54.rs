@@ -27,17 +27,23 @@ use phosphor_macros::Saveable;
 /// Three ladders, fed from two ports:
 ///
 /// ```text
-/// O, bit 4 clear → the 150k leg, the 168 Hz filter
-/// O, bit 4 set   → the 47k leg, the 452 Hz filter
-/// R1             → the 100k leg, the 2.5 kHz filter
+/// O port, low nibble  (pins 7-4)   → the 150k leg, the 168 Hz filter
+/// O port, high nibble (pins 11-8)  → the 47k leg, the 452 Hz filter
+/// R port #1, R7-R4    (pins 20-17) → the 100k leg, the 2.5 kHz filter
 /// ```
 ///
-/// The O port carries two of them **in time**, not as two nibbles: `OUTO` puts
-/// the level on the low four bits and the carry on bit 4, and bit 4 says which
-/// ladder the level is for, so each holds while the other is written. Which
-/// port feeds which ladder is not on the schematic and is taken from the
-/// reference; see [`Namco54Lle::channels`], which reports them in ladder order
-/// rather than port order.
+/// The O port is **two independently latched nibbles**, not one: `OUTO` writes
+/// the accumulator to the low nibble or the high one according to the carry
+/// flag, so each holds while the other is written. That is a documented mode of
+/// the part rather than a trick, which is why one instruction can drive two
+/// ladders. This model keeps them as two latches and takes bit 4 of the raw
+/// `OUTO` value, which is the carry, as the selector.
+///
+/// Which port feeds which ladder is read from the MB8844's package pinout laid
+/// over the pin numbers on the Xevious sheet; both the pinout and the nibble
+/// rule are transcribed in `docs/schematics/namco-54xx-explosion.md`. See
+/// [`Namco54Lle::channels`], which reports the three in ladder order rather
+/// than port order.
 #[derive(Saveable)]
 #[save_version(1)]
 #[save_tlv]
@@ -119,14 +125,15 @@ impl Namco54Lle {
 
         self.mcu.execute_cycle();
 
-        // R1 drives the ladder with the 100k series resistor, which is the
-        // highest of the three filters.
+        // R-Port #1 is R7-R4, pins 20-17, and drives the ladder with the 100k
+        // series resistor, which is the highest of the three filters.
         self.channels[2] = self.mcu.read_r_output(1) & 0x0F;
 
-        // Channels 1 and 2 share the O port in time: `OUTO` puts the level on
-        // the low four bits and the carry on bit 4, and bit 4 says which of the
-        // two ladders the level is for. So each write updates one channel and
-        // the other holds, which is why these are latches here.
+        // Channels 1 and 2 are the O port's two nibbles, O3-O0 on pins 7-4 and
+        // O7-O4 on pins 11-8. `OUTO` writes the accumulator to one of them
+        // according to the carry, which arrives here as bit 4, so each write
+        // updates one channel and the other holds its last value. That is why
+        // these are latches rather than reads.
         //
         // This has to read the raw port write rather than the MCU's eight-bit
         // O register. That register is kept the way the *51XX* wants it, with
@@ -144,11 +151,14 @@ impl Namco54Lle {
     /// then the 47k, then the 150k, matching the order
     /// `docs/schematics/namco-54xx-explosion.md` tabulates them.
     ///
-    /// The ports do not arrive in that order. Which output pin group feeds
-    /// which ladder is not on the sheet, which shows only that there are three
-    /// groups of four; the assignment comes from the reference's own discrete
-    /// network, where the O port's two halves drive the 150k and 47k legs and
-    /// R1 drives the 100k one.
+    /// The ports do not arrive in that order, and that is the whole hazard. The
+    /// sheet shows three groups of four output pins and names none of them,
+    /// because the 54XX is drawn as a custom block with pin numbers; the groups
+    /// run in order down the package (R7-R4, then O7-O4, then O3-O0) while the
+    /// ladders they feed do not (100k, then 47k, then 150k). Reading the
+    /// MB8844's pinout against those pin numbers is what settles it: pins 20-17
+    /// are R-Port #1 on the 100k leg, pins 11-8 the O port's high nibble on the
+    /// 47k, pins 7-4 its low nibble on the 150k.
     ///
     /// **Getting this backwards is most of what a wrong explosion sounds like.**
     /// It puts the busy, loud O-port channel through the 2.5 kHz filter and

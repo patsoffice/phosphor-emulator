@@ -381,13 +381,18 @@ quiet**, which is a gain question in the summing stage rather than a spectral
 one, and is why this is not `implemented-needs-validation`: there is no adapter
 and no scenario, so nothing here is reproducible from the catalog yet.
 
-THE PORT-TO-LADDER ASSIGNMENT IS THE SOFT SPOT. The sheet shows three groups of
-four output pins and three ladders but does not say which group is which MCU
-port; the model takes that from the reference's discrete network. Assuming they
-ran in pin order, which is the natural reading, is what made the explosion thin
-and high: it puts the busy O-port channels through the 2.5 kHz filter and leaves
-the near-idle R1 driving the 168 Hz one. Worth confirming against the MB8844
-pinout.
+THE PORT-TO-LADDER ASSIGNMENT WAS THE SOFT SPOT AND IS NOW READ. It used to come
+from the reference's discrete network, because the sheet draws the 54XX as a
+custom block with pin numbers and no port names. Confirmed 2026-09-17 against
+Table 1 of the Fujitsu MB8840 series datasheet laid over the Xevious sheet, and
+the reference's assignment was right: pins 20-17 are R-Port #1 into the 100k leg
+and the 2.5 kHz filter, pins 11-8 the O port's upper nibble into the 47k and
+452 Hz, pins 7-4 its lower nibble into the 150k and 168 Hz. Nothing changed. The
+natural reading, that the groups run in ladder order, is what made the explosion
+thin and high: the pin groups do run in order down the package but the ladders
+they feed do not, so it puts the busy O-port channels through the 2.5 kHz filter
+and leaves the near-idle R port driving the 168 Hz one. Written up in
+docs/schematics/namco-54xx-explosion.md.
 
 A known CPU discrepancy sits under this: phosphor-emulator-8mez. It does not
 change what this row sounds like."""
