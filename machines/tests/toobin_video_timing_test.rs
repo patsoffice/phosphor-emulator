@@ -34,6 +34,8 @@ use phosphor_core::gfx::GfxLayout;
 use phosphor_machines::registry;
 use phosphor_machines::toobin::{ALPHA_LAYOUT, MO_LAYOUT, PLAYFIELD_LAYOUT, ToobinSystem};
 
+mod common;
+
 // --- Synthetic graphics -----------------------------------------------------
 //
 // A ROM-less board has no tiles at all, so every playfield, object and alpha
@@ -290,17 +292,10 @@ fn run_machine() -> (Box<dyn FrontendMachine>, Run) {
     sys.board.load_mo_gfx(&mo_rom());
     sys.board.load_alpha_gfx(&alpha_rom());
     let mut m: Box<dyn FrontendMachine> = Box::new(sys);
-    {
-        let bus = m
-            .debug_bus_mut()
-            .unwrap_or_else(|| panic!("{MACHINE} exposes no debug bus"));
-        for (i, b) in PROGRAM.iter().enumerate() {
-            bus.write(0, LOAD_ADDR + i as u32, *b);
-        }
-    }
     // The 68010 fetches the supervisor stack pointer from 0 and the program
-    // counter from 4 through the bus, so this picks up the vectors just poked.
-    m.reset();
+    // counter from 4 through the bus, so the reset inside here picks up the
+    // vectors just poked.
+    common::load_and_reset(&mut *m, MACHINE, PROGRAM, LOAD_ADDR);
 
     let mut frames = 0;
     for _ in 0..MAX_FRAMES {
@@ -1231,79 +1226,16 @@ fn both_probes_changed_to_the_pen_they_were_pointed_at() {
 /// than a skip. CI has no dev shell, sets nothing, and skips with a printed note.
 #[test]
 fn the_committed_binary_matches_its_source() {
-    use std::path::Path;
-    use std::process::Command;
-
-    let roms = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/roms");
-    let asm = roms.join("toobin_video.asm");
-    let tmp = std::env::temp_dir();
-    let code = tmp.join("phosphor_toobin_video_check.p");
-    let out = tmp.join("phosphor_toobin_video_check.bin");
-    // asl appends to an existing code file rather than truncating it, so a
-    // leftover from an earlier run would be re-read by p2bin.
-    let _ = std::fs::remove_file(&code);
-
-    let expected = std::env::var_os("PHOSPHOR_ASM").is_some();
-
-    let assembled = Command::new("asl")
-        .arg("-q")
-        .arg("-o")
-        .arg(&code)
-        .arg(&asm)
-        .status();
-    let assembled = match assembled {
-        Ok(status) => status,
-        Err(e) => {
-            assert!(
-                !expected,
-                "PHOSPHOR_ASM is set, so `asl` is supposed to be on PATH here, \
-                 but running it failed: {e}. The dev shell provides it; a skip \
-                 at this point would report green while guarding nothing."
-            );
-            eprintln!("skipping: `asl` is not on PATH and PHOSPHOR_ASM is unset");
-            return;
-        }
-    };
-    assert!(assembled.success(), "asl failed on {}", asm.display());
-
-    let range = format!("0x0000-0x{:04X}", IMAGE_LEN - 1);
-    let converted = Command::new("p2bin")
-        .arg(&code)
-        .arg(&out)
-        .args(["-r", &range, "-l", "0xA5"])
-        .status()
-        .expect("p2bin runs when asl did");
-    assert!(converted.success(), "p2bin failed on {}", code.display());
-
-    let built = std::fs::read(&out).expect("read re-assembled image");
-    let _ = std::fs::remove_file(&code);
-    let _ = std::fs::remove_file(&out);
-
-    let stale = format!(
-        "tests/roms/toobin_video.bin is stale. Rebuild it with\n  \
-         asl -q -o out.p toobin_video.asm\n  \
-         p2bin out.p toobin_video.bin -r {range} -l 0xA5"
-    );
-    assert_eq!(
-        built.len(),
-        PROGRAM.len(),
-        "re-assembled image is {} bytes, committed is {}. {stale}",
-        built.len(),
-        PROGRAM.len()
-    );
-    let differs = built
-        .iter()
-        .zip(PROGRAM)
-        .position(|(a, b)| a != b)
-        .map(|i| {
-            format!(
-                "first difference at ${:06X}: built {:#04X}, committed {:#04X}",
-                i, built[i], PROGRAM[i]
-            )
-        });
-    assert!(
-        differs.is_none(),
-        "{}. {stale}",
-        differs.unwrap_or_default()
+    common::assert_binary_matches_source(
+        "toobin_video.asm",
+        "toobin_video",
+        &[common::Image {
+            committed: PROGRAM,
+            name: "toobin_video.bin",
+            base: LOAD_ADDR,
+            len: IMAGE_LEN,
+            fill: 0xA5,
+            define: None,
+        }],
     );
 }

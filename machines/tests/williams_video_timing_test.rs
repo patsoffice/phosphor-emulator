@@ -22,6 +22,8 @@
 use phosphor_core::core::machine::FrontendMachine;
 use phosphor_machines::registry;
 
+mod common;
+
 /// The assembled test program, `$D000-$FFFF` inclusive.
 ///
 /// Built from `tests/roms/williams_video.asm` with `asl` and `p2bin`, both in
@@ -153,18 +155,10 @@ fn run(machine: &str) -> Run {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
     let mut m = (entry.create_bare)();
 
-    {
-        let bus = m
-            .debug_bus_mut()
-            .unwrap_or_else(|| panic!("{machine} exposes no debug bus"));
-        let (program, load_addr) = image_for(machine);
-        for (i, b) in program.iter().enumerate() {
-            bus.write(0, load_addr + i as u32, *b);
-        }
-    }
-    // The M6809 fetches its reset vector through the bus, so this picks up the
-    // vector the program just installed at $FFFE.
-    m.reset();
+    // The M6809 fetches its reset vector through the bus, so the reset inside
+    // here picks up the vector the program just installed at $FFFE.
+    let (program, load_addr) = image_for(machine);
+    common::load_and_reset(&mut *m, machine, program, load_addr);
 
     let mut shots: [Option<Shot>; 3] = [None, None, None];
     let mut frames = 0;
@@ -480,93 +474,31 @@ fn a_mid_frame_vram_write_only_affects_rows_the_beam_has_not_reached() {
 /// and skips with a printed note.
 #[test]
 fn the_committed_binary_matches_its_source() {
-    use std::path::Path;
-    use std::process::Command;
-
-    let roms = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/roms");
-    let asm = roms.join("williams_video.asm");
-    let tmp = std::env::temp_dir();
-    let code = tmp.join("phosphor_williams_video_check.p");
-    let out = tmp.join("phosphor_williams_video_check.bin");
-    // asl appends to an existing code file rather than truncating it, so a
-    // leftover from an earlier run would be re-read by p2bin.
-    let _ = std::fs::remove_file(&code);
-
-    let expected = std::env::var_os("PHOSPHOR_ASM").is_some();
-
     // Both link addresses, because a source edit that only breaks one of them is
-    // exactly what a single-image guard would miss.
-    for (image, base, name, define) in [
-        (PROGRAM_D000, 0xD000u32, "williams_video.bin", None),
-        (
-            PROGRAM_E000,
-            0xE000,
-            "williams_video_e000.bin",
-            Some("ROMBASE=0xE000"),
-        ),
-    ] {
-        let _ = std::fs::remove_file(&code);
-        let mut asl = Command::new("asl");
-        asl.arg("-q");
-        if let Some(d) = define {
-            asl.args(["-D", d]);
-        }
-        let assembled = asl.arg("-o").arg(&code).arg(&asm).status();
-        let assembled = match assembled {
-            Ok(status) => status,
-            Err(e) => {
-                assert!(
-                    !expected,
-                    "PHOSPHOR_ASM is set, so `asl` is supposed to be on PATH here, \
-                     but running it failed: {e}. The dev shell provides it; a skip \
-                     at this point would report green while guarding nothing."
-                );
-                eprintln!("skipping: `asl` is not on PATH and PHOSPHOR_ASM is unset");
-                return;
-            }
-        };
-        assert!(assembled.success(), "asl failed on {}", asm.display());
-
-        let range = format!("0x{base:04X}-0xFFFF");
-        let converted = Command::new("p2bin")
-            .arg(&code)
-            .arg(&out)
-            .args(["-r", &range, "-l", "0x00"])
-            .status()
-            .expect("p2bin runs when asl did");
-        assert!(converted.success(), "p2bin failed on {}", code.display());
-
-        let built = std::fs::read(&out).expect("read re-assembled image");
-        let _ = std::fs::remove_file(&code);
-        let _ = std::fs::remove_file(&out);
-
-        let define_arg = define.map(|d| format!("-D {d} ")).unwrap_or_default();
-        let stale = format!(
-            "tests/roms/{name} is stale. Rebuild it with\n  \
-             asl -q {define_arg}-o out.p williams_video.asm\n  \
-             p2bin out.p {name} -r {range} -l 0x00"
-        );
-        assert_eq!(
-            built.len(),
-            image.len(),
-            "re-assembled image is {} bytes, committed is {}. {stale}",
-            built.len(),
-            image.len()
-        );
-        let differs = built.iter().zip(image).position(|(a, b)| a != b).map(|i| {
-            format!(
-                "first difference at ${:04X}: built {:#04X}, committed {:#04X}",
-                base as usize + i,
-                built[i],
-                image[i]
-            )
-        });
-        assert!(
-            differs.is_none(),
-            "{}. {stale}",
-            differs.unwrap_or_default()
-        );
-    }
+    // exactly what a single-image guard would miss. This board is the reason
+    // `assert_binary_matches_source` takes a list rather than one image.
+    common::assert_binary_matches_source(
+        "williams_video.asm",
+        "williams_video",
+        &[
+            common::Image {
+                committed: PROGRAM_D000,
+                name: "williams_video.bin",
+                base: 0xD000,
+                len: PROGRAM_D000.len(),
+                fill: 0x00,
+                define: None,
+            },
+            common::Image {
+                committed: PROGRAM_E000,
+                name: "williams_video_e000.bin",
+                base: 0xE000,
+                len: PROGRAM_E000.len(),
+                fill: 0x00,
+                define: Some("ROMBASE=0xE000"),
+            },
+        ],
+    );
 }
 
 /// The image is exactly the $D000-$FFFF program-ROM window, so loading it is a
