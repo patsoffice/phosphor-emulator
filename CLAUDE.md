@@ -40,6 +40,15 @@ Use the harness `Edit` tool (with `replace_all`) for literal single-file
 substitutions; reach for `ast-grep` when the change is pattern-shaped or spans
 many files. Always re-run `cargo build`/`test` after a codemod.
 
+**Never edit a file with `sed`, `perl`, a `python` one-liner or a shell
+heredoc.** Those are the two tools above and nothing else. A stream editor
+matches text rather than syntax, so it fires inside comments and strings, has no
+idea what a balanced brace is, and reports success whether or not the pattern
+matched anything: a mistyped address silently changes nothing, and an
+over-broad one silently changes too much. `Edit` fails loudly when its anchor is
+absent or ambiguous, and `ast-grep` prints a diff to review before `-U` applies
+it. That difference is the whole point.
+
 ### Build & Test
 
 ```bash
