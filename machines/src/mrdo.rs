@@ -1063,15 +1063,14 @@ impl MrdoSystem {
     }
 }
 
-// The board is the bus: Mr. Do! is the only machine on it.
-impl Bus for MrdoBoard {
-    type Address = u16;
-    type Data = u8;
-
-    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        let BusMaster::Cpu(0) = master else {
-            return 0xFF;
-        };
+impl MrdoBoard {
+    /// The full read decode, including the watchpoint notification.
+    ///
+    /// Split out of [`Bus::read`] so the fast path has something to be checked
+    /// against: `the_fast_path_never_disagrees_with_the_full_decode` calls this
+    /// directly, which is the only way to compare the two paths without arming
+    /// an observer and thereby disabling the one under test.
+    fn decode_read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let data = match addr {
             0x0000..=0x90FF => self.main_map.read_backing(addr),
             0x9803 => self.pal_u001, // protection PAL16R6 readback
@@ -1085,6 +1084,30 @@ impl Bus for MrdoBoard {
         };
         self.main_map.watch_read(0, master, addr, data);
         data
+    }
+}
+
+// The board is the bus: Mr. Do! is the only machine on it.
+impl Bus for MrdoBoard {
+    type Address = u16;
+    type Data = u8;
+
+    #[inline]
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        let BusMaster::Cpu(0) = master else {
+            return 0xFF;
+        };
+        // Fast path: a backed read with nothing observing, inlined here because
+        // the decode below is too large to be. It falls through for the I/O and
+        // protection addresses, which carry no backing, and whenever a
+        // watchpoint or the trace is armed, so the two paths are never
+        // distinguishable. This board's trace is the map's own
+        // (`impl_map_debug_trace!`), so `fast_read` already tests it and there
+        // is no separate flag to check here.
+        if let Some(data) = self.main_map.fast_read(addr) {
+            return data;
+        }
+        self.decode_read(master, addr)
     }
 
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
@@ -2051,6 +2074,84 @@ mod tests {
     #[test]
     fn dip_banks_are_valid() {
         crate::assert_dip_banks_valid(MRDO_DIP_BANKS, &[DSW1_DEFAULT, DSW2_DEFAULT]);
+    }
+
+    /// Wherever the fast path answers, it answers with what the full decode
+    /// would have returned, for every address in the space.
+    ///
+    /// The guard that belongs on every board adopting `fast_read`, because the
+    /// map-level equivalence test in `address_space16.rs` cannot see what a
+    /// board does on top of the map. Two shapes would break here and nowhere
+    /// else: a mirror folded by hand in the decode instead of declared on the
+    /// map, and an address the board intercepts that is nonetheless declared
+    /// backed. Mr. Do! has neither, which is what this pins: its four input
+    /// ports and the PAL readback at 0x9803 sit in the hole between sprite RAM
+    /// and work RAM, so the map has no bytes there and the fast path declines.
+    #[test]
+    fn the_fast_path_never_disagrees_with_the_full_decode() {
+        let mut board = MrdoBoard::new();
+        // Distinguishable bytes, so an off-by-a-mirror lands on a different one.
+        for (region, key) in [
+            (MainRegion::Rom, 0x5Au8),
+            (MainRegion::BgVideoRam, 0xA5),
+            (MainRegion::FgVideoRam, 0x3C),
+            (MainRegion::SpriteRam, 0xC3),
+            (MainRegion::WorkRam, 0x69),
+        ] {
+            for (i, b) in board
+                .main_map
+                .region_data_mut(region)
+                .iter_mut()
+                .enumerate()
+            {
+                *b = (i ^ key as usize) as u8;
+            }
+        }
+        // Distinguishable from each other and from any backing byte, so an
+        // intercepted address answered off the map would show up.
+        board.pal_u001 = 0x11;
+        board.in0 = 0x22;
+        board.in1 = 0x33;
+        board.dsw1 = 0x44;
+        board.dsw2 = 0x55;
+
+        let mut answered = 0usize;
+        for addr in 0..=0xFFFFu16 {
+            if let Some(fast) = board.main_map.fast_read(addr) {
+                answered += 1;
+                assert_eq!(
+                    fast,
+                    board.decode_read(BusMaster::Cpu(0), addr),
+                    "fast path disagrees at {addr:#06X}"
+                );
+            }
+        }
+        // A guard that never fires is not a guard: the backed regions are
+        // 0x8000 of ROM, 0x1000 of video RAM, 0x100 of sprite RAM and 0x1000 of
+        // work RAM.
+        assert_eq!(answered, 0x8000 + 0x1000 + 0x100 + 0x1000);
+    }
+
+    /// With a watchpoint armed the fast path must decline everywhere, so the
+    /// full decode runs and the watchpoint gets its chance to fire.
+    #[test]
+    fn an_armed_watchpoint_takes_the_board_off_the_fast_path() {
+        use phosphor_core::core::watchpoint::WatchpointKind;
+
+        let mut board = MrdoBoard::new();
+        assert!(
+            board.main_map.fast_read(0x0000).is_some(),
+            "ROM should be on the fast path to begin with"
+        );
+        board
+            .main_map
+            .set_watchpoint(0, 0xE000, WatchpointKind::Write);
+        for addr in [0x0000u16, 0x8000, 0x9000, 0xE000] {
+            assert!(
+                board.main_map.fast_read(addr).is_none(),
+                "an armed watchpoint must take {addr:#06X} off the fast path too"
+            );
+        }
     }
 
     #[test]
