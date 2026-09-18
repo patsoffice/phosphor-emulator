@@ -564,6 +564,13 @@ impl XeviousSystem {
         self.board
             .load_sound_prom(&XEVIOUS_SOUND_PROM.load(rom_set)?);
 
+        // 54XX explosion-sound MCU firmware, the same image Galaga ships and
+        // the same network behind it. Optional: without the ROM the chip is
+        // absent rather than silent.
+        if let Ok(rom_54xx) = crate::galaga::NAMCO_54XX_ROM.load(rom_set) {
+            self.board.load_54xx_rom(&rom_54xx);
+        }
+
         // Decode graphics.
         let gfx1 = XEVIOUS_GFX1_ROM.load(rom_set)?;
         self.char_cache = decode_gfx(&gfx1, 0, FG_CHAR_COUNT, &FG_CHAR_LAYOUT);

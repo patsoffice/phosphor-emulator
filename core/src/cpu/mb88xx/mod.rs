@@ -183,6 +183,14 @@ pub struct Mb88xx {
     /// Updated by write_pla (OUTO instruction). Equivalent to MAME's m_o_output.
     #[save(id = 21)]
     pub o_latch: u8,
+    /// The last value `OUTO` put on the O port: `(carry << 4) | A`, before any
+    /// device-specific interpretation of it.
+    #[save(id = 34)]
+    pub o_pla: u8,
+    /// Counts `OUTO` executions, so a wrapper can tell a fresh write from the
+    /// same value sitting on the port.
+    #[save(id = 35)]
+    pub o_pla_seq: u32,
     /// Shared external O port register. Updated asynchronously from o_latch
     /// after each execute_cycle, matching MAME's m_portO which is updated
     /// via O_w_sync between scheduler timeslices. Z80 reads/writes go through
@@ -294,6 +302,8 @@ impl Mb88xx {
             sf: 0,
             irq_pin: 0,
             pio: 0,
+            o_pla: 0,
+            o_pla_seq: 0,
             th: 0,
             tl: 0,
             tp: 0,
@@ -506,10 +516,19 @@ impl Mb88xx {
     // --- O port write (PLA-mapped for 8-bit mode) ---
 
     fn write_pla(&mut self, index: u8) {
-        // 8-bit PLA mode (default): write nibble to high or low half
-        // based on bit 4 of the index (carry flag in OUTO instruction).
-        // Matches MAME: `(index & 0x0f) << shift` — mask data nibble first
-        // to avoid u8 overflow when CF=1 and shift=4.
+        // What the instruction actually puts on the port: five bits, the low
+        // four from A and bit 4 from the carry. Devices differ in what they do
+        // with it, so it is published raw alongside a sequence number, and a
+        // wrapper that cares can see each write rather than a running total.
+        self.o_pla = index;
+        self.o_pla_seq = self.o_pla_seq.wrapping_add(1);
+
+        // The merge below is the **51XX's** behavior, not the CPU's: that chip
+        // keeps an eight-bit register and fills one half per write, choosing by
+        // bit 4. It lives here because the 51XX was the first wrapper and
+        // nothing else needed the port, which is exactly the kind of thing that
+        // breaks the second caller. The 54XX reads `o_pla` instead, because its
+        // bit 4 selects a sound channel rather than a half.
         let shift = if index & 0x10 != 0 { 4 } else { 0 };
         let mask = 0x0F << shift;
         self.port_o = (self.port_o & !mask) | ((index & 0x0F) << shift);

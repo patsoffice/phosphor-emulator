@@ -295,6 +295,18 @@ static GALAGA_PROMS: RomRegion = RomRegion {
     ],
 };
 
+/// Namco 54XX explosion-sound MCU firmware (MB8844, 1KB). Shared with Xevious,
+/// which ships the same image.
+pub(crate) static NAMCO_54XX_ROM: RomRegion = RomRegion {
+    size: 0x0400,
+    entries: &[RomEntry {
+        name: "54xx.bin",
+        size: 0x0400,
+        offset: 0x0000,
+        crc32: &[0xee7357e0],
+    }],
+};
+
 static GALAGA_SOUND_PROM: RomRegion = RomRegion {
     size: 0x0100,
     entries: &[RomEntry {
@@ -530,6 +542,13 @@ impl GalagaSystem {
         // Sound PROM
         self.board
             .load_sound_prom(&config.sound_prom.load(rom_set)?);
+
+        // 54XX explosion-sound MCU firmware. Optional: without it the chip is
+        // absent rather than silent, and the board behaves as it did before the
+        // explosion channel existed.
+        if let Ok(rom_54xx) = NAMCO_54XX_ROM.load(rom_set) {
+            self.board.load_54xx_rom(&rom_54xx);
+        }
 
         // Build star palette
         self.build_star_palette();
@@ -1152,7 +1171,7 @@ impl AudioSource for GalagaSystem {
 
 impl BusDebug for GalagaSystem {
     fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
-        vec![
+        let mut devices: Vec<(&str, &dyn Debuggable)> = vec![
             ("Z80 Main", &self.cpus.main as &dyn Debuggable),
             ("Z80 Sub", &self.cpus.sub as &dyn Debuggable),
             ("Z80 Sound", &self.cpus.sound as &dyn Debuggable),
@@ -1161,7 +1180,13 @@ impl BusDebug for GalagaSystem {
             ("Namco 51XX", &self.board.namco51 as &dyn Debuggable),
             ("Namco 53XX", &self.board.namco53 as &dyn Debuggable),
             ("Clocks", &self.board.clocks as &dyn Debuggable),
-        ]
+        ];
+        // Only listed when the firmware loaded, so an absent row says the chip
+        // is not fitted rather than that it is idle.
+        if let Some(ref n54) = self.board.namco54 {
+            devices.push(("Namco 54XX", n54 as &dyn Debuggable));
+        }
+        devices
     }
 
     fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {

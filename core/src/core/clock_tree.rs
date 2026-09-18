@@ -126,6 +126,8 @@ pub enum ClockDomainName {
     SoundCpu,
     /// An embedded microcontroller (I8035/I8039/MB88xx custom).
     Mcu,
+    /// A second embedded microcontroller on the same board.
+    Mcu2,
     /// The video dot clock.
     Pixel,
     /// A programmable sound generator (SN76489, AY-3-8910, Namco WSG).
@@ -157,6 +159,7 @@ impl ClockDomainName {
             Self::SubCpu => "SUBCPU_HZ",
             Self::SoundCpu => "SNDCPU_HZ",
             Self::Mcu => "MCU_HZ",
+            Self::Mcu2 => "MCU2_HZ",
             Self::Pixel => "PIXEL_HZ",
             Self::Psg => "PSG_HZ",
             Self::Psg2 => "PSG2_HZ",
@@ -177,6 +180,7 @@ impl ClockDomainName {
             Self::SubCpu => "subcpu",
             Self::SoundCpu => "soundcpu",
             Self::Mcu => "mcu",
+            Self::Mcu2 => "mcu2",
             Self::Pixel => "pixel",
             Self::Psg => "psg",
             Self::Psg2 => "psg2",

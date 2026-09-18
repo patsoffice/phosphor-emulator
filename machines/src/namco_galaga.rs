@@ -46,6 +46,7 @@ use phosphor_core::device::namco50::Namco50;
 use phosphor_core::device::namco51::Namco51;
 use phosphor_core::device::namco51_lle::Namco51Lle;
 use phosphor_core::device::namco53::Namco53;
+use phosphor_core::device::namco54::Namco54Lle;
 use phosphor_core::gfx::decode::GfxLayout;
 use phosphor_macros::{MemoryRegion, Saveable};
 
@@ -268,6 +269,11 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
     t.add_domain(Clk::Cpu3, RootId::MAIN, 1, 6);
     let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 3); // 6.144 MHz
     t.add_domain(Clk::Mcu, RootId::MAIN, 1, 12); // Namco 51xx at 1.536 MHz
+    // The 54XX steps in MACHINE cycles, which the MB88xx takes at its external
+    // clock over six: 18.432 MHz / 12 / 6 = 256 kHz. Ticking it at the 1.536 MHz
+    // pin rate runs the chip six times too fast, which is audible as every
+    // explosion being six times too short.
+    t.add_domain(Clk::Mcu2, RootId::MAIN, 1, 72);
     t.set_step_domain(cpu);
     // Pixel clock is exactly twice the CPU clock, so 384 dot clocks is exactly
     // 192 CPU cycles.
@@ -674,6 +680,11 @@ pub struct NamcoGalagaBoard {
     /// Xevious load the same DAC differently, each read off its own sheet.
     #[save(id = 23)]
     pub(crate) audio_out: WsgOutputStage,
+
+    /// The explosion-sound MCU, on the boards that carry one. Galaga and
+    /// Xevious do; Dig Dug has the 53XX in its place.
+    #[save(id = 24)]
+    pub(crate) namco54: Option<Namco54Lle>,
     #[save(id = 3)]
     pub(crate) namco06: Namco06,
     #[save(id = 4)]
@@ -699,6 +710,11 @@ pub struct NamcoGalagaBoard {
     /// A handle into the clock tree, which is itself saved.
     #[save_skip]
     pub(crate) namco51_dom: DomainId,
+    /// The 54XX runs on the same divider, being the same family of part off
+    /// the same crystal. A second handle rather than a shared one because the
+    /// two chips are fitted independently.
+    #[save_skip]
+    pub(crate) namco54_dom: DomainId,
 
     // Input ports (active-low: 0xFF = all released)
     #[save(id = 8)]
@@ -770,9 +786,11 @@ impl NamcoGalagaBoard {
     pub fn new(audio: BoardParams) -> Self {
         let clocks = clock_tree();
         let namco51_dom = clocks.find(Clk::Mcu).expect("declared Namco 51xx domain");
+        let namco54_dom = clocks.find(Clk::Mcu2).expect("declared Namco 54xx domain");
         Self {
             map: Self::build_map(),
             audio_out: WsgOutputStage::new(audio, TIMING.cpu_clock_hz),
+            namco54: None,
 
             wsg: {
                 let mut wsg = NamcoWsg::new(TIMING.cpu_clock_hz);
@@ -788,6 +806,7 @@ impl NamcoGalagaBoard {
 
             clocks,
             namco51_dom,
+            namco54_dom,
 
             in0: 0xFF,
             in1: 0xFF,
@@ -987,6 +1006,21 @@ impl NamcoGalagaBoard {
             }
         }
 
+        // The 54XX runs on the same machine-cycle divider as the 51XX, both
+        // being MB88xx parts off the same clock tree, and its three output
+        // latches are what the explosion ladders see.
+        if let Some(ref mut n54) = self.namco54 {
+            // The 06XX's chip-select line reaches this MCU's interrupt pin, and
+            // the firmware both vectors off it and then polls it inside the
+            // handler. It needs the line as the 06XX actually drives it, held
+            // for the transaction, rather than a pulse on the write.
+            n54.set_chip_select(self.namco06.chip_select_active(3));
+            if self.clocks.tick(self.namco54_dom) {
+                n54.tick();
+                self.audio_out.set_explosion(n54.channels());
+            }
+        }
+
         // Drive the 50XX score/protection MCU (if fitted) the same way: assert
         // its chip-select IRQ and R/W line after the Z80s have run, then step
         // it on its own machine-cycle divider.
@@ -1159,9 +1193,22 @@ impl NamcoGalagaBoard {
                 n50.write(data);
             }
         }
-        // Chip-select 3 (54XX explosion-sound MCU) is write-only; its discrete
-        // audio network is not yet modelled, so its commands are discarded
-        // (explosions are silent for now).
+        // Chip-select 3 (54XX explosion-sound MCU) is write-only: the chip
+        // never answers a read, so the command has to raise its interrupt or be
+        // lost. A board with no 54XX fitted drops it, which is what Dig Dug
+        // does, having the 53XX in that place.
+        if self.namco06.chip_select(3) {
+            self.trace_custom_io(
+                DebugEventKind::DeviceWrite,
+                0x7000,
+                data,
+                "Namco 54XX",
+                Some("explosion command"),
+            );
+            if let Some(ref mut n54) = self.namco54 {
+                n54.write(data);
+            }
+        }
     }
 
     /// Write the 06XX control register.
@@ -1357,6 +1404,18 @@ impl NamcoGalagaBoard {
         // a few Z80 cycles before the MCU's INK instruction.
         lle.mcu.dynamic_k = true;
         self.namco51 = Namco51Wrapper::Lle(lle);
+    }
+
+    /// Fit the Namco 54XX explosion-sound MCU (06XX chip-select 3), which is
+    /// what Galaga and Xevious have where Dig Dug has the 53XX.
+    ///
+    /// Without the firmware the chip is absent rather than silent: its commands
+    /// go nowhere and the explosion channels stay at zero, which is what the
+    /// board did before this existed.
+    pub fn load_54xx_rom(&mut self, data: &[u8]) {
+        let mut chip = Namco54Lle::new();
+        chip.load_rom(data);
+        self.namco54 = Some(chip);
     }
 
     /// Fit the Namco 50XX score/protection chip (06XX chip-select 2). Only
