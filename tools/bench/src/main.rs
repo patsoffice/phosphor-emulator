@@ -18,11 +18,37 @@
 //! ROM-gated: with no ROM directory it explains how to point at one and exits
 //! 0, so it is safe to invoke from a script that may run without ROMs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use phosphor_harness::{Harness, roms_dir};
+use phosphor_harness::{Harness, Movie, roms_dir};
+
+/// Where the committed gameplay movies live, for `--movie auto`.
+const MOVIE_DIR: &str = "harness/tests/golden/movies";
+
+/// The movie for one machine, or `None` if the collection has none.
+///
+/// `auto` looks for `<machine>-<stamp>.phmi`, which is how the golden-frame
+/// movies are named. The stamp is part of the file name rather than the
+/// content, so this globs on the prefix rather than reconstructing it.
+fn resolve_movie(spec: &str, machine: &str) -> Result<Option<PathBuf>, String> {
+    if spec != "auto" {
+        return Ok(Some(PathBuf::from(spec)));
+    }
+    let dir = Path::new(MOVIE_DIR);
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let prefix = format!("{machine}-");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".phmi") {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
 
 /// Boards chosen to span the shapes that cost different amounts:
 /// a single-CPU raster board, a three-CPU board sharing one bus, a vector
@@ -66,9 +92,26 @@ struct Args {
     /// predictors. Note this is far short of most machines' power-on
     /// self-test, so by default you are measuring self-test code rather than
     /// gameplay. That is fine for A/B comparison (both sides measure the same
-    /// thing) but raise it if you want in-game numbers.
+    /// thing) but raise it if you want in-game numbers, or pass --movie.
     #[arg(long, default_value_t = 120)]
     warmup: u64,
+
+    /// Replay a recorded input movie (`.phmi`) instead of letting the machine
+    /// run itself.
+    ///
+    /// This is how to measure GAMEPLAY rather than attract. Warmup replays the
+    /// movie's opening frames to reach the state you want, and the measured
+    /// frames continue it, so the sample is deterministic and reproducible
+    /// rather than whatever the attract loop happened to be showing. It matters
+    /// most for anything whose cost scales with what is on screen: a sprite
+    /// pass measured in attract can be a fraction of its in-game cost.
+    ///
+    /// The committed movies live in `harness/tests/golden/movies/`. With
+    /// `--movie auto` the movie for each machine is looked up there by name,
+    /// which is the usual thing to want when benchmarking several machines at
+    /// once. A machine with no movie is benchmarked without one and says so.
+    #[arg(long, value_name = "PATH|auto")]
+    movie: Option<String>,
 
     /// Repetitions per machine. The fastest is reported, with how far the
     /// slowest lagged, so host noise is visible rather than hidden.
@@ -151,8 +194,30 @@ fn bench_machine(name: &str, roms: &Path, args: &Args) -> Result<MachineResult, 
     let mut reps = Vec::with_capacity(args.reps);
     let mut frame_rate_hz = 60.0;
 
+    // Decoded once rather than per repetition: the bytes are the same every
+    // time and the decode is not what is being measured.
+    let movie_path = match &args.movie {
+        Some(spec) => resolve_movie(spec, name)?,
+        None => None,
+    };
+    let movie = match &movie_path {
+        Some(p) => {
+            let bytes =
+                std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+            Some(Movie::decode(&bytes).map_err(|e| format!("{}: {e}", p.display()))?)
+        }
+        None => None,
+    };
+
     for _ in 0..args.reps {
         let mut harness = Harness::build(name, roms, None, None, &[], &[])?;
+        if let Some(m) = &movie {
+            // Bound per repetition, because a player carries its own position
+            // and every rep has to replay the same frames from the same start.
+            harness
+                .bind_movie(m.clone())
+                .map_err(|e| format!("{name}: {e}"))?;
+        }
         let machine = harness.machine_mut();
         frame_rate_hz = machine.frame_rate_hz();
 
@@ -245,6 +310,21 @@ fn main() {
     } else {
         args.machines.clone()
     };
+
+    // Which sample each machine is being measured on. A movie makes the run
+    // gameplay rather than attract, and that changes the answer enough for
+    // anything screen-dependent that it belongs in the output rather than in
+    // the invocation the reader may not have.
+    if let Some(spec) = &args.movie {
+        for m in &machines {
+            match resolve_movie(spec, m) {
+                Ok(Some(p)) => println!("{m}: replaying {}", p.display()),
+                Ok(None) => println!("{m}: no movie found, measuring what the machine does alone"),
+                Err(e) => println!("{m}: {e}"),
+            }
+        }
+        println!();
+    }
 
     println!(
         "{} frames x {} reps, {} warmup, roms {}\n",
