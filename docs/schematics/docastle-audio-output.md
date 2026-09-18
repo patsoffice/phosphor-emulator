@@ -121,17 +121,24 @@ to pin 3 and pin 3 goes to ground, so it is a rheostat.
 This is a hand transcription and can be wrong. Nothing in it is checked by a
 test; the section above it is what keeps that honest.
 
-## Mr. Do's Wild Ride, read 2026-09-18
+## The two conversion kits, read 2026-09-18
 
 | | |
 |---|---|
 | Drawing | `Mr. Do's WILD RIDE`, Universal, `Fig. 4 Sound Amplifier Diagram and Parts Location` |
 | Read from | `arcade-museum.com/manuals-videogames/M/mrdo-wr.pdf`, PDF page 20 |
+| Drawing | `DO! RUN RUN`, Universal, `Fig. 4 Sound Amplifier Diagram and Parts Location` |
+| Read from | `arcade-museum.com/manuals-videogames/D/DoRunRun.pdf`, PDF page 20 |
 
 Read for `phosphor-emulator-20f3`, which exists because `dorunrun` and `dowild`
-ride this row on a board nobody had read. This closes `dowild`. It is a
-different board: Wild Ride is Universal 8339A and a conversion kit, where this
-row was read off the 8302.
+ride this row on a board nobody had read. This closes both.
+
+**The two kits are the same amplifier, component for component.** Every
+designator, value and connection below is identical on the two sheets, down to
+the volume control's ordering code. So they are described once here.
+
+They are not the 8302 this row was read off. Both are conversion kits on their
+own boards, Wild Ride's being Universal 8339A.
 
 **The amplifier is the same and its small-signal parts are the same.** IC1 is an
 MB3730, its input coupling is 4.7 uF into pin 1, its gain capacitor is 22 uF on
@@ -157,14 +164,19 @@ So a shared row was the wrong assumption again, which is the pattern
 values around the chip are shared, and the two things that set the level and the
 low-frequency corner are not.
 
+**The split is by kit, not by game.** The three machines in this row divide two
+against one: the two conversion kits are each other's twin and the cabinet game
+is the odd one out. That is the shape worth remembering, because "same
+manufacturer, same year, same amplifier IC" predicted the wrong grouping here,
+and a guess that Do! Run Run would match Mr. Do's Castle because they share a
+device file would have been wrong twice over.
+
 ### What this does NOT establish
 
 - **Which MB3730 pins are what.** The topology above is read off the drawing, but
-  calling the 8302's output a bridge and this one single-ended needs the part's
+  calling the 8302's output a bridge and these single-ended needs the part's
   pinout, and no MB3730 datasheet was read. What is certain is the asymmetry: one
   terminal reaches the speaker through a 470 uF and the other does not.
-- **`dorunrun`.** A Do! Run Run drawing was looked for and not found, so that
-  machine still rides this row unread.
 - **Anything upstream of the amplifier.** This sheet is the amplifier unit alone.
   Whether Wild Ride sums its sound chips through the same four 1.5k that the 8302
   does is on the main-board sheets, which were not read.

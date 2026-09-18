@@ -589,25 +589,28 @@ id = "docastle-output"
 machines = ["docastle", "dorunrun", "dowild"]
 status = "missing"
 notes = """
-EXAMINED, MR. DO'S CASTLE AND MR. DO'S WILD RIDE. Off `unexamined` as `missing`.
-Universal 8302 sheet No. 4, which is printed rotated 90 degrees on its page, plus
-Wild Ride's `Fig. 4 Sound Amplifier Diagram` (Universal 8339A, a conversion kit).
-Do Run Run is still in this row unread: a drawing was looked for on 2026-09-18
-and not found.
+EXAMINED, ALL THREE MACHINES. Off `unexamined` as `missing`. Universal 8302
+sheet No. 4, which is printed rotated 90 degrees on its page, plus the
+`Fig. 4 Sound Amplifier Diagram` from each of the two conversion kits' service
+manuals.
 
-AND THE TWO THAT WERE READ DO NOT MATCH, which is why the warning below was
-worth keeping. Wild Ride carries the same MB3730 and the same small-signal
-values around it, 4.7 uF in, 22 uF of gain, 4.7 ohm and 0.1 uF Boucherot cells,
-and the identical 1k B-taper volume part down to its ordering code. But its
-volume is a three-terminal DIVIDER fed through 51k with 10k to ground, where the
-8302's is a rheostat, and one of its speaker terminals reaches the speaker
-through a 470 uF where the 8302 has no coupling capacitor at all. The chip is
-shared, the level and the low-frequency corner are not. Written up in the
-`Mr. Do's Wild Ride` section of docs/schematics/docastle-audio-output.md.
+AND THE SPLIT IS TWO AGAINST ONE, BY KIT RATHER THAN BY GAME. Do Run Run and
+Mr. Do's Wild Ride are each other's twin, component for component, down to the
+volume control's ordering code. Mr. Do's Castle is the odd one out.
+
+Both kits carry the same MB3730 as the 8302 and the same small-signal values
+around it, 4.7 uF in, 22 uF of gain, 4.7 ohm and 0.1 uF Boucherot cells, and the
+identical 1k B-taper volume part. But their volume is a three-terminal DIVIDER
+fed through 51k with 10k to ground, where the 8302's is a rheostat, and one of
+their speaker terminals reaches the speaker through a 470 uF where the 8302 has
+no coupling capacitor at all. The chip is shared, the level and the
+low-frequency corner are not. Written up in the conversion-kit section of
+docs/schematics/docastle-audio-output.md.
 
 Galaga and Dig Dug turned out not to share their output stage despite sharing a
-board family, and this row has now gone the same way; do not assume Do Run Run
-matches either of these two.
+board family, and this row has now gone the same way. Note which guess would
+have failed here: "same manufacturer, same year, same amplifier IC" predicts one
+grouping and the drawings give another.
 
 THE ROW'S OWN QUESTION IS ANSWERED, and the answer confirms the model: the four
 chips reach one node through four EQUAL 1.5k legs, so the balance is 1:1 and the
