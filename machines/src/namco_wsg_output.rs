@@ -596,8 +596,14 @@ impl WsgOutputStage {
     ///
     /// A no-op on a board with no 54XX, which is Pac-Man, Ms. Pac-Man and Dig
     /// Dug: only Galaga and Xevious have an explosion network to drive.
-    /// Nothing calls this with a non-zero code yet, because the MB8844 that
-    /// produces those codes is not modeled; see `phosphor-emulator-uxi9`.
+    ///
+    /// The codes come from [`Namco54Lle::channels`] in ladder order, so `ports`
+    /// is the 100k leg first, then the 47k, then the 150k, matching
+    /// [`ExplosionNetwork::channels`]. Note that on Galaga's self-test
+    /// explosion the 100k channel is never driven: only the two O-port channels
+    /// move, so a change to the 100k path will not show there.
+    ///
+    /// [`Namco54Lle::channels`]: phosphor_core::device::namco54::Namco54Lle::channels
     pub fn set_explosion(&mut self, ports: [u8; 3]) {
         let Some(ids) = self.ids.explosion else {
             return;
