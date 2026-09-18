@@ -803,10 +803,10 @@ impl MrdoBoard {
 
     /// Composite the BG and FG tilemaps into one native row.
     ///
-    /// Both are 32×32 grids of 8×8 tiles read straight out of video RAM, so a
-    /// row's grid row is fixed by `ny` and only the column varies; the per-pixel
-    /// tile lookup below is what the whole-frame renderer did too, and a row
-    /// pass does not multiply it.
+    /// Both are 32x32 grids of 8x8 tiles read straight out of video RAM, so a
+    /// row's grid row is fixed by `ny` and only the column varies. The loop
+    /// below walks pixels but fetches per *tile*, which is the rule in
+    /// `phosphor-emulator-3me5`: iterate the units that vary along the row.
     ///
     /// `set_flip_all` mirrors both tilemaps 180° in cocktail mode, so the
     /// mirrored coordinate is what is sampled. Sprites are NOT flipped by the
