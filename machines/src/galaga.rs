@@ -1,3 +1,48 @@
+//! Galaga (Namco, 1981), the board the shared Namco Galaga hardware is named
+//! for. The primary ROM set is the Namco rev B `galaga`; `galagao` and
+//! `galagamw` (Midway) also load.
+//!
+//! # Drawings
+//!
+//! | Document | Source | Pages |
+//! |---|---|---|
+//! | `GALAGA CPU PC`, Midway Mfg. Co., part A084-91414-A000 | `arcade-museum.com/manuals-videogames/G/galaga3.pdf` | PDF p23 (whole sheet), p24 (right half) |
+//! | `Galaga Parts and Operating Manual`, Midway Mfg. Co. | `arcade-museum.com/manuals-videogames/G/galaga1.pdf` | PDF p11-12 (Figure 3, option switch settings) |
+//!
+//! The CPU sheet is a 150 dpi scan, so values that will not resolve on it are
+//! worth reading off Xevious instead: the two boards' audio sections are the
+//! same circuit component for component, and SP-230 is a clean 300 dpi drawing
+//! (see [`crate::xevious`]).
+//!
+//! What the CPU sheet places, for anyone tracing further: the 51XX at `4H` and
+//! the 54XX at `6M`, the explosion network's `R20`-`R42` and its three LM324
+//! sections at `5P`, and the two 8-position DIP switches at `6J` and `6K`. The
+//! explosion path is transcribed in
+//! [`docs/schematics/namco-54xx-explosion.md`](../../docs/schematics/namco-54xx-explosion.md)
+//! and the WSG's output stage in
+//! [`docs/schematics/namco-galaga-audio-output.md`](../../docs/schematics/namco-galaga-audio-output.md);
+//! both are modeled in [`crate::namco_wsg_output`].
+//!
+//! # The DIP tables follow the manual, not the reference emulator
+//!
+//! Each switch shorts its line to ground against a 4.7k pull-up, so a closed
+//! switch reads 0 and `SW#n` is bit `n - 1` of its bank. Feeding those bits
+//! through Figure 3 gives the tables in [`GALAGA_DIP_BANKS`], and for the `6K`
+//! bank (coinage, bonus and lives) the result **disagrees with MAME's port
+//! definitions** on all three fields. The manual is what this file follows.
+//!
+//! The disagreement is easy to mistake for a bug in this table, so it is worth
+//! being able to re-derive: Figure 3 has `SW#1` closed for the first four
+//! coinage rows and open for the last four, which makes that bit the most
+//! significant of the three rather than the least, and the bonus rows land on
+//! 0x20 for "20K, 60K, every 60K" where MAME has 0x20 as "20K, 70K, every 70K".
+//! Reading the two orderings off a switch table is the only way to tell them
+//! apart; the values alone look equally plausible.
+//!
+//! Note that Figure 3 is the **Midway** manual, so its `6J` half describes
+//! `galagamw`, whose DSWA differs from the Namco set this file's primary ROMs
+//! are. The `6K` half is common to both.
+
 use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
