@@ -376,10 +376,46 @@ docs/schematics/namco-54xx-explosion.md. Tracked as phosphor-emulator-uxi9.
 
 COMPARED AGAINST THE REFERENCE, which is what this row exists for, on Galaga's
 self-test explosion captured from reset by both: fundamental 185.4 Hz against
-182.6, centroid 296 Hz against 301, and every band within 5 pp. **Still 8.5 dB
-quiet**, which is a gain question in the summing stage rather than a spectral
-one, and is why this is not `implemented-needs-validation`: there is no adapter
-and no scenario, so nothing here is reproducible from the catalog yet.
+182.6, centroid 296 Hz against 301, and every band within 5 pp. Still
+`partial` rather than `implemented-needs-validation`: there is no adapter and
+no scenario, so nothing here is reproducible from the catalog yet.
+
+THE 8.5 dB LEVEL GAP IS NOT OURS TO CLOSE, which took measuring both rows to
+establish and is recorded so nobody closes it by inserting a constant. Measured
+2026-09-18 on Galaga, each emulator against ITSELF, so the arbitrary full-scale
+reference cancels:
+
+| | WSG peak | explosion peak | explosion - WSG |
+|---|---|---|---|
+| reference | -9.79 dBFS | -1.91 dBFS | +7.9 dB |
+| ours | -4.07 dBFS | -10.68 dBFS | -6.6 dB |
+
+(WSG figures from sustained gameplay, 0 percent silent: the reference driven
+into a game by a Lua autoboot script, ours from the committed movie. Galaga's
+WSG is silent in attract, so a from-reset capture cannot show it.)
+
+The balance our model produces is the one the summing-node legs imply. The WSG
+and explosion channel 3 both reach that node through 10k against the same 3.3k
+of feedback, so they enter at equal weight, and channels 1 and 2 at 33k enter a
+third of that. The WSG node swings to about 0.64 of the 5 V rail at one voice's
+full volume, while the band-pass outputs are rail-limited to roughly 1.75 V of
+AC, the op-amp being single-supply with a 2.0 V reference and clipping 1.5 V
+below the positive rail. So the WSG belongs ABOVE the explosion, which is what
+our -6.6 dB says.
+
+The reference's +7.9 dB does not come from the circuit: its explosion sits at
+-1.9 dBFS, all but clipping, because `galaga_final_mixer` carries a hand gain of
+40800 while the WSG reaches the mix on a separate 0.90 * 10/16 route. Those are
+two independently tuned constants, and matching them would mean overriding the
+drawing with somebody's ear.
+
+What IS still open is our WSG's own absolute level, which is 5.7 dB above the
+reference's and belongs to `namco-galaga-output`, not here. That does not move
+the balance above, which is a ratio.
+
+NOT EXERCISED: the 100k / 2.5 kHz channel, on R-Port #1, is never driven during
+the self-test explosion; over the 560 frames measured its code never leaves 0
+while the two O-port channels both reach 15. Nothing here has tested it.
 
 THE PORT-TO-LADDER ASSIGNMENT WAS THE SOFT SPOT AND IS NOW READ. It used to come
 from the reference's discrete network, because the sheet draws the 54XX as a
