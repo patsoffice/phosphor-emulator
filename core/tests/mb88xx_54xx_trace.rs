@@ -16,7 +16,20 @@
 //!
 //! **Compare fields 2 onward, not the whole line.** The leading number counts
 //! machine cycles and the two harnesses schedule on it differently; everything
-//! after it is CPU state and must match exactly.
+//! after it is CPU state.
+//!
+//! **One divergence is expected and must not be closed.** `trace_54xx` is built
+//! from the vendored MAME 0.148, which takes the external interrupt on the
+//! pin's rising edge. The datasheet, this core, and current MAME all take it on
+//! the falling one; 0.148 was fixed upstream. See [`Mb88xx::set_irq`].
+//!
+//! So on a command stream that fires that interrupt the two run a few machine
+//! cycles out of step from the first command onward, which is thousands of
+//! differing lines for a reason that is not a defect here. Diff a stream that
+//! does not interrupt, or read past the offset. Do not "fix" the edge to make
+//! this quiet: doing so leaves Dig Dug stuck in its self-test.
+//!
+//! [`Mb88xx::set_irq`]: phosphor_core::cpu::mb88xx::Mb88xx::set_irq
 //!
 //! Skips unless `ROM54` names a 54XX image, because the firmware is not
 //! redistributable.

@@ -475,27 +475,52 @@ impl Mb88xx {
         self.r_input[port & 3] = val & 0x0F;
     }
 
-    /// Drive the external interrupt pin. Latches the request on the rising
-    /// edge.
+    /// Drive the external interrupt pin, latching the request when the pin goes
+    /// low.
     ///
-    /// **This does not match the reference, and the difference is known.**
-    /// MAME latches on the falling edge, when the line is released, which is
-    /// what an active-low pin implies. Tracing this core against MAME's on the
-    /// real Namco 54XX firmware shows it: both reach 0x0039 together, then this
-    /// one vectors to 0x0002 while the reference carries on to 0x003C and
-    /// writes a sound channel. Correcting the edge here makes 5687 differing
-    /// trace lines become 142, all of them a poll loop spinning an iteration
-    /// either side of the release.
+    /// `state` is the **request**, not the pin level: `true` means the line is
+    /// being pulled down, so `false` to `true` here is the falling edge of the
+    /// active-low `/IRQ`. That is the edge the part specifies.
     ///
-    /// It is left alone because **the 51XX's wiring compensates for it**:
-    /// switching to the falling edge silences Dig Dug completely. The board
-    /// drives that chip's line from the 06XX chip-select, and the handshake
-    /// only works with the edge as it is here. Fixing both together is
-    /// `phosphor-emulator-8mez`, and it wants the same trace-diff treatment
-    /// pointed at the 51XX.
+    /// > The falling edge of `/IRQ` pulse sets the external interrupt request
+    /// > flag to generate an external interrupt request, only if the external
+    /// > interrupt is enabled in advance by EN instruction. Also, the `/IRQ` pin
+    /// > state, which is reflected in the external interrupt input flag (IF)
+    /// > regardless of enabling/disabling the external interrupt, is testable
+    /// > using TSTI instruction. (When `/IRQ` = L, IF = 1; otherwise IF = 0.)
     ///
-    /// The 54XX's sound does not depend on this: its explosion measures the
-    /// same either way.
+    /// Fujitsu `MB8840/MB8840H SERIES`, TM336-A871, Table 1, C-Port. The same
+    /// entry is why [`Self::irq_pin`] is 1 while the line is held down and why
+    /// `TSTI` computes `irq_pin ^ 1`: `irq_pin` is IF, and ST is inverted in
+    /// this family, so ST = 0 is the true case.
+    ///
+    /// **Current MAME agrees**, and says the same thing about the pin:
+    ///
+    /// ```text
+    /// // On rising edge trigger interrupt.
+    /// // Note this is a logical level, the actual pin is high-to-low voltage triggered.
+    /// if (!m_if && state && (m_pio & INT_CAUSE_EXTERNAL))
+    ///     m_pending_irq |= INT_CAUSE_EXTERNAL;
+    /// ```
+    ///
+    /// That is this condition, down to naming the flag after the datasheet's
+    /// IF. **MAME 0.148 is the outlier**, and it is the copy
+    /// `cross-validation/` vendors: it takes the request on `state ==
+    /// CLEAR_LINE`, when the line is released, and has been fixed upstream
+    /// since. A trace diff against `bin/trace_54xx` on firmware that takes this
+    /// interrupt therefore will not converge, and must not be made to; see
+    /// `core/tests/mb88xx_54xx_trace.rs`.
+    ///
+    /// Dig Dug is the functional corroboration, and the failure is not subtle.
+    /// That board drives the 51XX's line from the 06XX chip-select, and on
+    /// 0.148's edge the I/O handshake never completes, so the board never
+    /// leaves its self-test; `audio_sanity_test` reports it as the one machine
+    /// of 41 emitting no audio at all.
+    ///
+    /// On the 54XX, by contrast, little rides on it, which is why the edge went
+    /// unexamined for so long: the 06XX's pulse is about 21 us against a
+    /// 256 kHz machine cycle, so the two edges are a handful of cycles apart
+    /// and the explosion measures the same from either.
     pub fn set_irq(&mut self, state: bool) {
         let new_state = state as u8;
         if self.irq_pin == 0 && new_state != 0 && (self.pio & INT_CAUSE_EXTERNAL) != 0 {
