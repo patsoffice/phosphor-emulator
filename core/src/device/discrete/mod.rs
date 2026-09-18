@@ -723,6 +723,51 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// First-order shelf: `r_series` from `src` to the output, and `r_shunt` in
+    /// series with `c` from the output to ground.
+    ///
+    /// Flat at unity through DC, because the capacitor is open and no current
+    /// flows through `r_series`; falling from `1/(2π·(r_series + r_shunt)·c)`;
+    /// and flat again above `1/(2π·r_shunt·c)` at `r_shunt/(r_series + r_shunt)`,
+    /// where the capacitor is a short and the two resistors are a divider. A
+    /// low shelf, in other words: bass at full level and everything above the
+    /// upper corner cut by the divider.
+    ///
+    /// Built from the existing one-pole rather than a node kind of its own,
+    /// because it decomposes exactly. With `k` the high-frequency divider and
+    /// `τ = (r_series + r_shunt)·c`,
+    ///
+    /// ```text
+    /// k + (1 − k)/(1 + sτ) = (1 + k·s·τ)/(1 + sτ)
+    /// ```
+    ///
+    /// and `k·τ = r_shunt·c`, which is the zero the network has. So a scaled
+    /// direct path summed with a scaled low-pass is the shelf, exactly, and not
+    /// an approximation of it.
+    pub fn rc_shelf(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        r_series: f64,
+        r_shunt: f64,
+        c: f64,
+    ) -> NodeId {
+        let src = src.into();
+        let k = r_shunt / (r_series + r_shunt);
+        let pole = self.push_node(
+            &format!("{name}_LP"),
+            NodeKind::RcLowPass {
+                src,
+                tau: derive::rc_tau(r_series + r_shunt, c),
+                y: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        );
+        let direct = self.gain(&format!("{name}_HF"), src, k);
+        let lift = self.gain(&format!("{name}_LF"), pole, 1.0 - k);
+        self.add(name, &[direct, lift])
+    }
+
     /// One-pole RC high-pass / coupling capacitor over `src`; `tau = R * C`.
     pub fn rc_high_pass(
         &mut self,

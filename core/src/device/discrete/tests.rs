@@ -427,6 +427,58 @@ fn step_n(c: &mut DiscreteCircuit, n: usize) {
 
 // -- RC filters -------------------------------------------------------------
 
+/// The shelf's three regions, on Mr. Do's Castle's own values.
+///
+/// 22k in series with 2k + 0.22 uF to ground, from
+/// `docs/schematics/docastle-audio-output.md`. DC passes at unity because the
+/// capacitor is open; the far side settles to the bare resistor divider once the
+/// capacitor is a short, which is `2/24` or -21.6 dB; and the corners are
+/// `1/(2π·24k·0.22u)` and `1/(2π·2k·0.22u)`.
+///
+/// Both ends are read off a step, which is where the network states them most
+/// plainly: the instant the input moves, the capacitor is still discharged and
+/// the shunt leg is a short, so the output takes the bare divider; once it has
+/// charged, no current flows through the series arm and the output is the input.
+/// Both matter, because a shelf that got only the settled end right would be a
+/// wire and one that got only the jump right would be a plain attenuator.
+///
+/// A square wave is the wrong probe here even well above the corner, and it was
+/// tried first: its harmonics are each shaped differently, so peak-to-peak does
+/// not come to the divider ratio.
+#[test]
+fn rc_shelf_divides_a_step_then_charges_to_unity() {
+    const R_SERIES: f64 = 22_000.0;
+    const R_SHUNT: f64 = 2_000.0;
+    const C: f64 = 0.22e-6;
+    let divider = R_SHUNT / (R_SERIES + R_SHUNT); // 2/24, or -21.6 dB
+
+    let mut b = builder_1to1(RATE);
+    let step = b.data_input("STEP", 1.0); // scale, not an initial value
+    let shelf = b.rc_shelf("SHELF", step, R_SERIES, R_SHUNT, C);
+    let mut c = b.build();
+
+    step_n(&mut c, 64); // quiet, and the shelf sits at zero with zero in
+    assert_eq!(c.value(shelf), 0.0);
+
+    // The jump. tau is about 5.3 ms against a 48 kHz step, so one step charges
+    // the capacitor by well under a percent and the divider is what shows.
+    c.set_data(step, 1.0);
+    c.tick(1);
+    let jump = c.value(shelf);
+    assert!(
+        (jump - divider).abs() < 0.05 * divider,
+        "the step should arrive divided to {divider:.4}, got {jump:.4}"
+    );
+
+    // Settled: the capacitor is charged, nothing flows through the series arm.
+    step_n(&mut c, 20_000);
+    assert!(
+        (c.value(shelf) - 1.0).abs() < 1e-3,
+        "a settled step should pass at unity, got {}",
+        c.value(shelf)
+    );
+}
+
 #[test]
 fn rc_low_pass_approaches_target() {
     // tau = 1 ms; alpha per step at 48 kHz.
