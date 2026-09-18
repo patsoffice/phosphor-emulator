@@ -120,3 +120,51 @@ to pin 3 and pin 3 goes to ground, so it is a rheostat.
 
 This is a hand transcription and can be wrong. Nothing in it is checked by a
 test; the section above it is what keeps that honest.
+
+## Mr. Do's Wild Ride, read 2026-09-18
+
+| | |
+|---|---|
+| Drawing | `Mr. Do's WILD RIDE`, Universal, `Fig. 4 Sound Amplifier Diagram and Parts Location` |
+| Read from | `arcade-museum.com/manuals-videogames/M/mrdo-wr.pdf`, PDF page 20 |
+
+Read for `phosphor-emulator-20f3`, which exists because `dorunrun` and `dowild`
+ride this row on a board nobody had read. This closes `dowild`. It is a
+different board: Wild Ride is Universal 8339A and a conversion kit, where this
+row was read off the 8302.
+
+**The amplifier is the same and its small-signal parts are the same.** IC1 is an
+MB3730, its input coupling is 4.7 uF into pin 1, its gain capacitor is 22 uF on
+pin 2, and each speaker terminal carries a 4.7 ohm and 0.1 uF Boucherot cell.
+Those are the values on the 8302, component for component, and the volume
+control is the same part down to its ordering code: `RV 16YP 10S B 1K`, a 1k
+B-taper.
+
+**What differs is everything around it, in both directions.**
+
+- **The volume is a divider here, not a rheostat.** On the 8302 the pot's wiper
+  is strapped to one end and the whole thing sits from the summing node to
+  ground. Here the wiper drives the amplifier through the 4.7 uF, with the top
+  of the track fed from the audio input through `R4` 51k and the input loaded by
+  `R3` 10k to ground. So the track is a true three-terminal divider and the
+  signal reaching it is already attenuated by roughly 52 to 1.
+- **There is a 470 uF in series with a speaker terminal.** `C1`, from the pin 6
+  side to `S2`, where the 8302 drives its speaker as a bridge with no coupling
+  capacitor at all. Pin 5 goes to `S1` with no capacitor in its path.
+
+So a shared row was the wrong assumption again, which is the pattern
+`phosphor-emulator-20f3` was filed to check. The chip is shared, the passive
+values around the chip are shared, and the two things that set the level and the
+low-frequency corner are not.
+
+### What this does NOT establish
+
+- **Which MB3730 pins are what.** The topology above is read off the drawing, but
+  calling the 8302's output a bridge and this one single-ended needs the part's
+  pinout, and no MB3730 datasheet was read. What is certain is the asymmetry: one
+  terminal reaches the speaker through a 470 uF and the other does not.
+- **`dorunrun`.** A Do! Run Run drawing was looked for and not found, so that
+  machine still rides this row unread.
+- **Anything upstream of the amplifier.** This sheet is the amplifier unit alone.
+  Whether Wild Ride sums its sound chips through the same four 1.5k that the 8302
+  does is on the main-board sheets, which were not read.
