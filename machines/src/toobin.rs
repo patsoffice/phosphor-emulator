@@ -90,6 +90,7 @@ use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 use crate::atari_jsa::{AtariJsa1, JsaPokey};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::scanline::ScanlineDriven;
 
 // ---------------------------------------------------------------------------
 // ROM manifest (the "toobin" parent set, revision 3)
@@ -1516,51 +1517,45 @@ pub trait ToobinBusView: Bus16 {
 /// that test out.
 #[inline]
 pub fn tick<B: ToobinBusView>(cpu: &mut M68000, bus: &mut B) {
-    let board = bus.board();
-    let frame_cycle = board.clock % TIMING.cycles_per_frame();
-    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    Drive { cpu, bus }.tick();
+}
+
+/// The CPU and the bus view as two disjoint borrows, which is what lets a cycle
+/// dispatch at a concrete type while the shared drive stays generic.
+struct Drive<'a, B: ToobinBusView> {
+    cpu: &'a mut M68000,
+    bus: &'a mut B,
+}
+
+impl<B: ToobinBusView> ScanlineDriven for Drive<'_, B> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.bus.board().clock
     }
-    step_cycle(cpu, bus);
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        // This board counts its lines in a u16; the drive counts in the clock's
+        // own width, and a frame is far short of either.
+        self.bus.board().begin_scanline(scanline as u16);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        step_cycle(self.cpu, self.bus);
+    }
 }
 
 /// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
 pub fn run_scanlines<B: ToobinBusView>(cpu: &mut M68000, bus: &mut B, cycles: u64) {
-    debug_assert!(
-        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let board = bus.board();
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline as u16);
-        for _ in 0..TIMING.cycles_per_scanline {
-            step_cycle(cpu, bus);
-        }
-    }
+    Drive { cpu, bus }.run_scanlines(cycles);
 }
 
 /// Run one frame. Whole scanlines go through [`run_scanlines`]; a partial
 /// scanline at either end, which only happens after the debugger has left the
 /// clock off-boundary, goes through [`tick`].
 pub fn run_frame<B: ToobinBusView>(cpu: &mut M68000, bus: &mut B) {
-    let scanline = TIMING.cycles_per_scanline;
-    let mut remaining = TIMING.cycles_per_frame();
-
-    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
-    for _ in 0..lead {
-        tick(cpu, bus);
-    }
-    remaining -= lead;
-
-    let whole = remaining - remaining % scanline;
-    run_scanlines(cpu, bus, whole);
-    remaining -= whole;
-
-    for _ in 0..remaining {
-        tick(cpu, bus);
-    }
+    Drive { cpu, bus }.run_frame();
 }
 
 #[inline]

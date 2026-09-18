@@ -33,6 +33,7 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 
 use crate::namco_wsg_output::{BoardParams, WsgOutputStage};
+use crate::scanline::ScanlineDriven;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
@@ -382,9 +383,35 @@ pub trait NamcoPacBus: Bus<Address = u16, Data = u8> {
 /// A whole frame goes through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
-    bus.board().begin_cycle(cpu);
-    cpu.execute_cycle(bus, BusMaster::Cpu(0));
-    bus.board().end_cycle();
+    Drive { cpu, bus }.tick();
+}
+
+/// The CPU and the bus view as two disjoint borrows, which is what lets a cycle
+/// dispatch at a concrete type while the shared drive stays generic. Generic
+/// over the *bus view* rather than the board, because a game can interpose its
+/// own decode in front of it.
+struct Drive<'a, B: NamcoPacBus> {
+    cpu: &'a mut Z80,
+    bus: &'a mut B,
+}
+
+impl<B: NamcoPacBus> ScanlineDriven for Drive<'_, B> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.bus.board().clock
+    }
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        self.bus.board().begin_scanline(scanline);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        self.bus.board().begin_cycle_inner(self.cpu);
+        self.cpu.execute_cycle(self.bus, BusMaster::Cpu(0));
+        self.bus.board().end_cycle();
+    }
 }
 
 /// Run one frame's worth of cycles.
@@ -394,22 +421,7 @@ pub fn tick<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
 /// goes through [`tick`], so the frame is the same sequence of cycles either
 /// way.
 pub fn run_frame<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
-    let scanline = TIMING.cycles_per_scanline;
-    let mut remaining = TIMING.cycles_per_frame();
-
-    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
-    for _ in 0..lead {
-        tick(cpu, bus);
-    }
-    remaining -= lead;
-
-    let whole = remaining - remaining % scanline;
-    run_scanlines(cpu, bus, whole);
-    remaining -= whole;
-
-    for _ in 0..remaining {
-        tick(cpu, bus);
-    }
+    Drive { cpu, bus }.run_frame();
 }
 
 /// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
@@ -420,21 +432,7 @@ pub fn run_frame<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
 /// a scanline boundary and pass a multiple of `cycles_per_scanline`; the
 /// debugger's off-boundary stepping goes through [`tick`] instead.
 pub fn run_scanlines<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B, cycles: u64) {
-    debug_assert!(
-        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let board = bus.board();
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline);
-        for _ in 0..TIMING.cycles_per_scanline {
-            bus.board().begin_cycle_inner(cpu);
-            cpu.execute_cycle(bus, BusMaster::Cpu(0));
-            bus.board().end_cycle();
-        }
-    }
+    Drive { cpu, bus }.run_scanlines(cycles);
 }
 
 /// The base board is itself a complete bus for games that add nothing to it.
@@ -666,22 +664,12 @@ impl NamcoPacBoard {
     // Core tick — the board half of one CPU cycle (see [`tick`])
     // -----------------------------------------------------------------------
 
-    /// Board work that happens before the CPU's cycle: scanline rendering,
-    /// VBLANK interrupt assertion, the sound generator, and latching debug
-    /// attribution context.
-    fn begin_cycle(&mut self, cpu: &Z80) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            self.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
-        }
-        self.begin_cycle_inner(cpu);
-    }
-
     /// Work that only happens on the first cycle of a scanline: rendering that
     /// line, and asserting VBLANK when the beam leaves the visible area.
     ///
-    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
-    /// single-step path, from `begin_cycle` when the clock lands on a boundary.
+    /// Driven by [`ScanlineDriven`], once per scanline from `run_scanlines` and,
+    /// for the debugger's single-step path, from `tick` when the clock lands on
+    /// a boundary.
     fn begin_scanline(&mut self, scanline: u64) {
         // Per-scanline rendering: render the current scanline from VRAM +
         // sprites before the CPU processes it, matching hardware CRT read

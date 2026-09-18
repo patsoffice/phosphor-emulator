@@ -80,6 +80,8 @@ use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use phosphor_core::device::SsioBoard;
 
+use crate::scanline::ScanlineDriven;
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
 pub(crate) enum Region {
@@ -187,51 +189,45 @@ pub(crate) const TILE_ROWS: usize = 30;
 /// goes through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(cpu: &mut Z80, board: &mut Mcr2Board) {
-    let frame_cycle = board.clock % TIMING.cycles_per_frame();
-    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    Drive { cpu, board }.tick();
+}
+
+/// The CPU and the board as two disjoint borrows, which is what lets a cycle
+/// dispatch at a concrete type while the shared drive stays generic.
+struct Drive<'a> {
+    cpu: &'a mut Z80,
+    board: &'a mut Mcr2Board,
+}
+
+impl ScanlineDriven for Drive<'_> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.board.clock
     }
-    step_cycle(cpu, board);
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        self.board.begin_scanline(scanline);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        step_cycle(self.cpu, self.board);
+    }
 }
 
 /// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
 /// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
 /// the debugger's off-boundary stepping goes through [`tick`] instead.
 pub fn run_scanlines(cpu: &mut Z80, board: &mut Mcr2Board, cycles: u64) {
-    debug_assert!(
-        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline);
-        for _ in 0..TIMING.cycles_per_scanline {
-            step_cycle(cpu, board);
-        }
-    }
+    Drive { cpu, board }.run_scanlines(cycles);
 }
 
 /// Run one frame's worth of cycles. Whole scanlines go through
 /// [`run_scanlines`]; a partial scanline at either end (only after the debugger
 /// has left the clock off-boundary) goes through [`tick`].
 pub fn run_frame(cpu: &mut Z80, board: &mut Mcr2Board) {
-    let scanline = TIMING.cycles_per_scanline;
-    let mut remaining = TIMING.cycles_per_frame();
-
-    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
-    for _ in 0..lead {
-        tick(cpu, board);
-    }
-    remaining -= lead;
-
-    let whole = remaining - remaining % scanline;
-    run_scanlines(cpu, board, whole);
-    remaining -= whole;
-
-    for _ in 0..remaining {
-        tick(cpu, board);
-    }
+    Drive { cpu, board }.run_frame();
 }
 
 /// The part of a cycle with no frame-position test in it.

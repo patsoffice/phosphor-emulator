@@ -34,6 +34,7 @@ use phosphor_core::gfx::render_bitmap_scanline;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::scanline::ScanlineDriven;
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs (machine-specific constants for page table dispatch)
@@ -305,12 +306,34 @@ impl Bus for WilliamsBoard {
 /// A whole frame goes through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
-    let board = bus.board();
-    let frame_cycle = board.clock % TIMING.cycles_per_frame();
-    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    Drive { cpus, bus }.tick();
+}
+
+/// The CPU complement and the bus view as two disjoint borrows, which is what
+/// lets a cycle dispatch at a concrete type while the shared drive stays
+/// generic.
+struct Drive<'a, 'c, B: WilliamsBus> {
+    cpus: &'a mut WilliamsCpus<'c>,
+    bus: &'a mut B,
+}
+
+impl<B: WilliamsBus> ScanlineDriven for Drive<'_, '_, B> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.bus.board().clock
     }
-    step_cycle(cpus, bus);
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        // This board counts its lines in a u16; the drive counts in the clock's
+        // own width, and a frame is far short of either.
+        self.bus.board().begin_scanline(scanline as u16);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        step_cycle(self.cpus, self.bus);
+    }
 }
 
 /// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
@@ -321,19 +344,7 @@ pub fn tick<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
 /// multiple of `cycles_per_scanline`; the debugger's off-boundary stepping goes
 /// through [`tick`] instead.
 pub fn run_scanlines<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B, cycles: u64) {
-    debug_assert!(
-        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let board = bus.board();
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline as u16);
-        for _ in 0..TIMING.cycles_per_scanline {
-            step_cycle(cpus, bus);
-        }
-    }
+    Drive { cpus, bus }.run_scanlines(cycles);
 }
 
 /// Run one frame's worth of cycles.
@@ -343,22 +354,7 @@ pub fn run_scanlines<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B, c
 /// goes through [`tick`], so the frame is the same sequence of cycles either
 /// way.
 pub fn run_frame<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
-    let scanline = TIMING.cycles_per_scanline;
-    let mut remaining = TIMING.cycles_per_frame();
-
-    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
-    for _ in 0..lead {
-        tick(cpus, bus);
-    }
-    remaining -= lead;
-
-    let whole = remaining - remaining % scanline;
-    run_scanlines(cpus, bus, whole);
-    remaining -= whole;
-
-    for _ in 0..remaining {
-        tick(cpus, bus);
-    }
+    Drive { cpus, bus }.run_frame();
 }
 
 /// The part of a cycle with no frame-position test in it.

@@ -83,6 +83,7 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::scanline::ScanlineDriven;
 use crate::set_bit_active_high;
 // The palette DAC model comes from core, not from `tkg04.rs`. Mario Bros. has
 // its own board and shares only the color network with the TKG-04 games; this
@@ -580,50 +581,47 @@ pub const MARIO_CONTROLS: &[InputControl] = &[
 /// goes through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
-    let frame_cycle = board.clock % TIMING.cycles_per_frame();
-    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    Drive { main, sound, board }.tick();
+}
+
+/// The CPUs and the board as disjoint borrows, which is what lets a cycle
+/// dispatch at a concrete type while the shared drive stays generic.
+struct Drive<'a> {
+    main: &'a mut Z80,
+    sound: &'a mut I8035,
+    board: &'a mut MarioBrosBoard,
+}
+
+impl ScanlineDriven for Drive<'_> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.board.clock
     }
-    step_cycle(main, sound, board);
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        // This board counts its lines in a u16; the drive counts in the clock's
+        // own width, and a frame is far short of either.
+        self.board.begin_scanline(scanline as u16);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        step_cycle(self.main, self.sound, self.board);
+    }
 }
 
 /// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
 /// start on a scanline boundary and pass a multiple of `cycles_per_scanline`.
 pub fn run_scanlines(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard, cycles: u64) {
-    debug_assert!(
-        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline as u16);
-        for _ in 0..TIMING.cycles_per_scanline {
-            step_cycle(main, sound, board);
-        }
-    }
+    Drive { main, sound, board }.run_scanlines(cycles);
 }
 
 /// Run one frame's worth of cycles. Whole scanlines go through
 /// [`run_scanlines`]; a partial scanline at either end (only after the debugger
 /// has left the clock off-boundary) goes through [`tick`].
 pub fn run_frame(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
-    let scanline = TIMING.cycles_per_scanline;
-    let mut remaining = TIMING.cycles_per_frame();
-
-    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
-    for _ in 0..lead {
-        tick(main, sound, board);
-    }
-    remaining -= lead;
-
-    let whole = remaining - remaining % scanline;
-    run_scanlines(main, sound, board, whole);
-    remaining -= whole;
-
-    for _ in 0..remaining {
-        tick(main, sound, board);
-    }
+    Drive { main, sound, board }.run_frame();
 }
 
 /// The part of a cycle with no frame-position test in it.

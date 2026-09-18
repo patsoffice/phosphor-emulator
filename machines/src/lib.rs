@@ -705,6 +705,7 @@ pub mod roadrunner;
 pub mod robotron;
 pub mod rom_loader;
 pub mod satans_hollow;
+pub(crate) mod scanline;
 pub mod scramble;
 pub mod simple_system;
 pub mod sinistar;

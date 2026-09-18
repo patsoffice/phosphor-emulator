@@ -57,6 +57,7 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::scanline::ScanlineDriven;
 
 /// Audio output rate produced by [`GalaxianBoard::fill_audio`]; matches the
 /// frontend's `audio_sample_rate`.
@@ -159,53 +160,47 @@ impl GalaxianBus for GalaxianBoard {
 /// cycle; a whole frame goes through [`run_scanlines`], which hoists that out.
 #[inline]
 pub fn tick<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B) {
-    let board = bus.board();
-    let frame_cycle = board.clock % TIMING.cycles_per_frame();
-    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    Drive { cpu, bus }.tick();
+}
+
+/// The CPU and the bus view as two disjoint borrows, which is what lets a cycle
+/// dispatch at a concrete type while the shared drive stays generic. Generic
+/// over the *bus view* rather than the board, because the games on this board
+/// hand the CPU different register sets.
+struct Drive<'a, B: GalaxianBus> {
+    cpu: &'a mut Z80,
+    bus: &'a mut B,
+}
+
+impl<B: GalaxianBus> ScanlineDriven for Drive<'_, B> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.bus.board().clock
     }
-    step_cycle(cpu, bus);
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        self.bus.board().begin_scanline(scanline);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        step_cycle(self.cpu, self.bus);
+    }
 }
 
 /// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
 /// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
 /// the debugger's off-boundary stepping goes through [`tick`] instead.
 pub fn run_scanlines<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B, cycles: u64) {
-    debug_assert!(
-        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let board = bus.board();
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline);
-        for _ in 0..TIMING.cycles_per_scanline {
-            step_cycle(cpu, bus);
-        }
-    }
+    Drive { cpu, bus }.run_scanlines(cycles);
 }
 
 /// Run one frame's worth of cycles. Whole scanlines go through
 /// [`run_scanlines`]; a partial scanline at either end (only after the debugger
 /// has left the clock off-boundary) goes through [`tick`].
 pub fn run_frame<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B) {
-    let scanline = TIMING.cycles_per_scanline;
-    let mut remaining = TIMING.cycles_per_frame();
-
-    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
-    for _ in 0..lead {
-        tick(cpu, bus);
-    }
-    remaining -= lead;
-
-    let whole = remaining - remaining % scanline;
-    run_scanlines(cpu, bus, whole);
-    remaining -= whole;
-
-    for _ in 0..remaining {
-        tick(cpu, bus);
-    }
+    Drive { cpu, bus }.run_frame();
 }
 
 /// The part of a cycle with no frame-position test in it.

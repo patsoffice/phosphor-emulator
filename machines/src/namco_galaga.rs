@@ -41,6 +41,7 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 
 use crate::namco_wsg_output::{BoardParams, WsgOutputStage};
+use crate::scanline::ScanlineDriven;
 use phosphor_core::device::namco06::Namco06;
 use phosphor_core::device::namco50::Namco50;
 use phosphor_core::device::namco51::Namco51;
@@ -505,19 +506,37 @@ pub fn run_cycles<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, cycles:
 /// scanline boundary and pass a multiple of `cycles_per_scanline`; the
 /// debugger's off-boundary stepping goes through [`tick`] instead.
 pub fn run_scanlines<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, cycles: u64) {
-    debug_assert!(
-        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
-            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
-        "run_scanlines must start on a scanline boundary and run whole scanlines"
-    );
-    for _ in 0..cycles / TIMING.cycles_per_scanline {
-        let board = bus.board();
-        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
-        board.begin_scanline(scanline);
-        for _ in 0..TIMING.cycles_per_scanline {
-            let gate = bus.board().begin_cycle_inner(cpus);
-            step_cpus(cpus, bus, gate);
-        }
+    Drive { cpus, bus }.run_scanlines(cycles);
+}
+
+/// The CPU complement and the bus view as two disjoint borrows, which is what
+/// lets a cycle dispatch at a concrete type while the shared drive stays
+/// generic.
+///
+/// Distinct from [`ScanlineGame`], which solves the other half of this board's
+/// duplication: that trait lives on the *game wrapper* so a row can be composited
+/// out of a renderer the board cannot reach, and it re-forms the split once per
+/// scanline rather than once per frame. This one is only the cycle loop.
+struct Drive<'a, B: NamcoGalagaBus> {
+    cpus: &'a mut GalagaCpus,
+    bus: &'a mut B,
+}
+
+impl<B: NamcoGalagaBus> ScanlineDriven for Drive<'_, B> {
+    const TIMING: phosphor_core::core::machine::TimingConfig = TIMING;
+
+    fn clock(&mut self) -> u64 {
+        self.bus.board().clock
+    }
+
+    fn begin_scanline(&mut self, scanline: u64) {
+        self.bus.board().begin_scanline(scanline);
+    }
+
+    #[inline]
+    fn step_cycle(&mut self) {
+        let gate = self.bus.board().begin_cycle_inner(self.cpus);
+        step_cpus(self.cpus, self.bus, gate);
     }
 }
 
@@ -528,8 +547,7 @@ pub fn run_scanlines<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, cycl
 /// Whole scanlines go through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B) {
-    let gate = bus.board().begin_cycle(cpus);
-    step_cpus(cpus, bus, gate);
+    Drive { cpus, bus }.tick();
 }
 
 /// A game on this board that draws its picture one row at a time.
@@ -865,24 +883,14 @@ impl NamcoGalagaBoard {
     // Core tick — the board half of one CPU cycle (see [`tick`])
     // -----------------------------------------------------------------------
 
-    /// Board work that happens before the CPUs' cycle: deferred resets,
-    /// interrupt timing, the 06XX timer, the sound generator, and sampling
-    /// debug attribution context.
-    fn begin_cycle(&mut self, cpus: &mut GalagaCpus) -> CycleGate {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            self.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
-        }
-        self.begin_cycle_inner(cpus)
-    }
-
     /// Work that only happens on the first cycle of a scanline: the VBLANK
     /// interrupts and the 51XX's TC pin, and the sound CPU's scanline-timer
     /// NMI. Every one of these fires on a scanline boundary, so none of it
     /// belongs in the per-cycle path.
     ///
-    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
-    /// single-step path, from `begin_cycle` when the clock lands on a boundary.
+    /// Driven by [`ScanlineDriven`], once per scanline from [`run_scanlines`]
+    /// and, for the debugger's single-step path, from [`tick`] when the clock
+    /// lands on a boundary.
     fn begin_scanline(&mut self, scanline: u64) {
         // VBLANK interrupt: fire at the start of VBLANK (scanline 224).
         // Only assert IRQ if the mask (enable latch) is set, matching MAME's
