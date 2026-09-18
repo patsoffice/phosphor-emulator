@@ -29,10 +29,18 @@
 //!
 //! Audio: melodic and effect sound is the shared Namco WSG (3 voices, mapped at
 //! 0x6800-0x681F and driven by the sound Z80), delegated through the board's
-//! `AudioSource`. The 54XX explosion channel — a discrete analog noise network
-//! fed by the write-only 54XX MCU on 06XX chip-select 3 — is not yet modelled,
-//! so explosions are silent; the seam to add it lives at
-//! `namco_galaga.rs` chip-select-3 dispatch (see `write_custom_io`).
+//! `AudioSource`. The explosion channel is the 54XX, an MB8844 running its own
+//! firmware on 06XX chip-select 3, whose three four-bit ports drive binary
+//! weighted ladders into three band-passes and on to the same summing amplifier
+//! the WSG reaches. The MCU is [`phosphor_core::device::namco54::Namco54Lle`]
+//! and the analog side is [`crate::namco_wsg_output`]; the network is
+//! transcribed in
+//! [`docs/schematics/namco-54xx-explosion.md`](../../docs/schematics/namco-54xx-explosion.md).
+//!
+//! **This board and Galaga carry that network component for component**, which
+//! was read off each sheet separately rather than assumed, so one constant
+//! serves both. The transcription was made from this board's drawing: Atari's
+//! SP-230 is a clean 300 dpi scan where the Galaga pages are 150 dpi.
 
 use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
@@ -1240,7 +1248,7 @@ impl AudioSource for XeviousSystem {
 
 impl BusDebug for XeviousSystem {
     fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
-        vec![
+        let mut devices: Vec<(&str, &dyn Debuggable)> = vec![
             ("Z80 Main", &self.cpus.main as &dyn Debuggable),
             ("Z80 Sub", &self.cpus.sub as &dyn Debuggable),
             ("Z80 Sound", &self.cpus.sound as &dyn Debuggable),
@@ -1248,7 +1256,20 @@ impl BusDebug for XeviousSystem {
             ("Namco 06XX", &self.board.namco06 as &dyn Debuggable),
             ("Namco 51XX", &self.board.namco51 as &dyn Debuggable),
             ("Clocks", &self.board.clocks as &dyn Debuggable),
-        ]
+        ];
+        // The two chips this board fits conditionally, listed the way Galaga
+        // lists its 54XX: present only when they are, so an absent row says the
+        // chip is not fitted rather than that it is idle. Leaving them out
+        // entirely, which this did, made that convention silently untrue here
+        // and hid the explosion channel from the debugger on the one board
+        // whose drawing the network was transcribed from.
+        if let Some(ref n50) = self.board.namco50 {
+            devices.push(("Namco 50XX", n50 as &dyn Debuggable));
+        }
+        if let Some(ref n54) = self.board.namco54 {
+            devices.push(("Namco 54XX", n54 as &dyn Debuggable));
+        }
+        devices
     }
 
     fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {

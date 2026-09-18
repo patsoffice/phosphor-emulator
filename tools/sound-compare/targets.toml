@@ -417,6 +417,13 @@ NOT EXERCISED: the 100k / 2.5 kHz channel, on R-Port #1, is never driven during
 the self-test explosion; over the 560 frames measured its code never leaves 0
 while the two O-port channels both reach 15. Nothing here has tested it.
 
+XEVIOUS IS DRIVING THE CHIP, measured 2026-09-18 over the committed movie: the
+54XX moves its channels on 117 of 3000 frames, and the explosion at that point
+reads f0 184.5 Hz with a 233 Hz centroid against Galaga's 185.4 Hz. That is the
+agreement the shared firmware and the identical network predict, and it is the
+first evidence the Xevious half of this row does anything at all. It is NOT a
+reference comparison; `phosphor-emulator-pd5e` records why one is not here yet.
+
 THE PORT-TO-LADDER ASSIGNMENT WAS THE SOFT SPOT AND IS NOW READ. It used to come
 from the reference's discrete network, because the sheet draws the 54XX as a
 custom block with pin numbers and no port names. Confirmed 2026-09-17 against
