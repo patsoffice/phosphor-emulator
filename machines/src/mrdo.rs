@@ -2104,7 +2104,11 @@ mod tests {
                 .iter_mut()
                 .enumerate()
             {
-                *b = (i ^ key as usize) as u8;
+                // The high bits are folded back in deliberately. A plain
+                // `(i ^ key) as u8` aliases every 256 bytes, so it cannot see a
+                // 256-byte fold, which is the commonest shape of the hazard
+                // this guard exists for: Gottlieb's sprite RAM is exactly that.
+                *b = (i ^ (i >> 8) ^ key as usize) as u8;
             }
         }
         // Distinguishable from each other and from any backing byte, so an

@@ -1136,14 +1136,18 @@ mod tests {
     #[test]
     fn the_fast_path_never_disagrees_with_the_full_decode() {
         let mut board = NamcoPacBoard::new();
-        // Distinguishable bytes, so an off-by-a-mirror lands on a different one.
+        // Distinguishable bytes, so an off-by-a-mirror lands on a different
+        // one. The high bits are folded back in deliberately: a plain
+        // `(i ^ key) as u8` aliases every 256 bytes, so it could not see a
+        // 256-byte fold, which is the commonest shape of the hazard this guard
+        // exists for and exactly what Gottlieb's sprite RAM does.
         for (i, b) in board
             .map
             .region_data_mut(Region::Rom)
             .iter_mut()
             .enumerate()
         {
-            *b = (i ^ 0x5A) as u8;
+            *b = (i ^ (i >> 8) ^ 0x5A) as u8;
         }
         for (i, b) in board
             .map
@@ -1151,7 +1155,7 @@ mod tests {
             .iter_mut()
             .enumerate()
         {
-            *b = (i ^ 0xA5) as u8;
+            *b = (i ^ (i >> 8) ^ 0xA5) as u8;
         }
         for (i, b) in board
             .map
@@ -1159,7 +1163,7 @@ mod tests {
             .iter_mut()
             .enumerate()
         {
-            *b = (i ^ 0x3C) as u8;
+            *b = (i ^ (i >> 8) ^ 0x3C) as u8;
         }
 
         for addr in 0..0x8000u16 {

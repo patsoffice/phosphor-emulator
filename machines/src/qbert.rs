@@ -319,8 +319,31 @@ impl Bus for GottliebBoard {
     type Address = u32;
     type Data = u8;
 
+    #[inline]
     fn read(&mut self, master: BusMaster, addr: u32) -> u8 {
         let addr16 = (addr & 0xFFFF) as u16;
+        // Fast path: a backed read with nothing observing, inlined here because
+        // the decode below is too large to be. It covers NVRAM, RAM, char RAM
+        // and the 40 KB program ROM, which is where the instruction fetches
+        // come from.
+        //
+        // 0x3000-0x3FFF IS EXCLUDED, and that exclusion is the whole hazard this
+        // board is the worked example of. Sprite RAM and video RAM are each
+        // declared as a 2 KB region but READ folded, to 256 bytes and to 1 KB,
+        // so for an address above the fold the page table holds a byte the
+        // decode never returns. Declaring the mirrors instead would let the
+        // fast path cover them too, but it would resize both regions and their
+        // save-state payloads, which is a larger change than this is worth.
+        //
+        // Nothing is mapped at 0x5000-0x5FFF: the palette is `palette_ram` and
+        // the I/O ports are a decode, so `fast_read` declines there on its own.
+        // The trace is the map's own (`impl_map_debug_trace!`), so `fast_read`
+        // already tests it.
+        if addr16 & 0xF000 != 0x3000
+            && let Some(data) = self.map.fast_read(addr16)
+        {
+            return data;
+        }
         let data = match addr16 {
             // NVRAM: 0x0000-0x0FFF
             0x0000..=0x0FFF => self.map.read_backing(addr16),
@@ -955,5 +978,84 @@ mod tests {
         // I8088 physical address 0x10042 should wrap to 0x0042 (NVRAM)
         sys.bus_write(BusMaster::Cpu(0), 0x10042, 0xDD);
         assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x0042), 0xDD);
+    }
+
+    /// A distinguishable byte per region offset, which must differ between
+    /// offsets that are 256 apart.
+    ///
+    /// The obvious `(i ^ key) as u8` does not: it aliases every 256 bytes, so
+    /// it cannot see a 256-byte fold, which is precisely the fold this board
+    /// has. Folding the high bits back in is what makes the guard able to fail.
+    fn fill(i: usize, key: u8) -> u8 {
+        (i ^ (i >> 8) ^ key as usize) as u8
+    }
+
+    /// Wherever the fast path answers, it answers with what the full decode
+    /// would have returned, for every address in the space.
+    ///
+    /// The guard that belongs on every board adopting `fast_read`. This board
+    /// is the one the hazard was named for: sprite RAM and video RAM are each
+    /// declared as a 2 KB region and read folded, to 256 bytes and to 1 KB, so
+    /// a blanket fast path would return a byte the decode never does. The
+    /// exclusion of 0x3000-0x3FFF in `read` is what makes the two agree, and
+    /// this is what holds that exclusion in place: widen the fast path to cover
+    /// 0x3000 and this fails at 0x3100.
+    #[test]
+    fn the_fast_path_never_disagrees_with_the_full_decode() {
+        let mut sys = QbertSystem::new();
+        for (region, key) in [
+            (gottlieb::Region::Nvram, 0x5Au8),
+            (gottlieb::Region::Ram, 0xA5),
+            (gottlieb::Region::SpriteRam, 0x3C),
+            (gottlieb::Region::VideoRam, 0xC3),
+            (gottlieb::Region::CharRam, 0x69),
+            (gottlieb::Region::ProgramRom, 0x96),
+        ] {
+            for (i, b) in sys.board.map.region_data_mut(region).iter_mut().enumerate() {
+                *b = fill(i, key);
+            }
+        }
+
+        let mut answered = 0usize;
+        for addr in 0..=0xFFFFu16 {
+            if addr & 0xF000 == 0x3000 {
+                continue; // deliberately off the fast path; see `read`
+            }
+            if let Some(fast) = sys.board.map.fast_read(addr) {
+                answered += 1;
+                assert_eq!(
+                    fast,
+                    sys.bus_read(BusMaster::Cpu(0), u32::from(addr)),
+                    "fast path disagrees at {addr:#06X}"
+                );
+            }
+        }
+        // NVRAM 0x1000 + RAM 0x2000 + char RAM 0x1000 + program ROM 0xA000.
+        assert_eq!(answered, 0x1000 + 0x2000 + 0x1000 + 0xA000);
+    }
+
+    /// The excluded window is excluded for a reason: inside it the page table
+    /// and the decode genuinely disagree, because the decode folds and the map
+    /// does not. If this ever stops being true the fold has been replaced by a
+    /// declared mirror, and the exclusion in `read` can go.
+    #[test]
+    fn the_folded_window_is_why_the_fast_path_skips_it() {
+        let mut sys = QbertSystem::new();
+        for (i, b) in sys
+            .board
+            .map
+            .region_data_mut(gottlieb::Region::SpriteRam)
+            .iter_mut()
+            .enumerate()
+        {
+            *b = fill(i, 0x3C);
+        }
+        // 0x3100 folds to sprite-RAM offset 0x00; the page table holds 0x100.
+        let decoded = sys.bus_read(BusMaster::Cpu(0), 0x3100);
+        let paged = sys.board.map.fast_read(0x3100).expect("backed");
+        assert_ne!(
+            decoded, paged,
+            "if these agree the fold is gone and read's exclusion is stale"
+        );
     }
 }
