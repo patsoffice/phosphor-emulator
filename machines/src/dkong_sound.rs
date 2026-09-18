@@ -20,6 +20,14 @@
 //! source rather than multiplied by it, and an emitter follower rather than a
 //! filter on the output, into a divider. Both work in volts throughout, because
 //! every one of those stages compares two absolute voltages against each other.
+//!
+//! **That shape is read off the drawing**, not inferred from how the numbers
+//! came out: two diodes meet at one node that feeds a transistor base, and there
+//! is no multiplying element on the path. The two channels and their values are
+//! transcribed in
+//! [`docs/schematics/dkong-effect-chain.md`](../../docs/schematics/dkong-effect-chain.md),
+//! which also names the parts behind [`DAC_DECAY_S`] and records the single
+//! asymmetry between the channels, `R27` 150 against `R5` 750.
 //! Jump adds a slewing control-voltage capacitor with its own wobble oscillator,
 //! which is the only part of the two that differs downstream of the source.
 //!

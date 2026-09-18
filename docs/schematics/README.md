@@ -162,6 +162,13 @@ section is there so that is obvious.
   its two POKEYs 1:1 with a coupling capacitor per chip, which by superposition
   makes the model's single DC block right in position as well as in ratio. What is
   missing is a gain of 4.55 per chip, an antiphase pair, and two speakers.
+- [`dkong-effect-chain.md`](dkong-effect-chain.md), the path from an effect's
+  oscillator to Donkey Kong's summing bus, read twice because the board carries
+  it twice. It settles the topology claim `dkong_sound.rs` rests on, that the
+  effects are diode-mixed with their source rather than multiplied by it: two
+  diodes meet at one node feeding an emitter follower, and nothing on the path
+  multiplies. It also names the parts behind the DAC's 100 ms decay, which are
+  `C32` and `R20` rather than the `R37` that had been cited.
 - [`dkongjr-sound-sources.md`](dkongjr-sound-sources.md), what generates Donkey
   Kong Jr.'s effect tones. Four voices off five 74LS629 VCO halves, a 4020 tap
   mux and a 16-bit LFSR, sharing not one source with the 555s the emulator plays
