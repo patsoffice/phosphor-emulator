@@ -226,12 +226,16 @@ impl SsioBoard {
     /// Runs the Z80 and both AY-8910s, handles IRQ generation, and
     /// accumulates audio.
     pub fn tick(&mut self) {
-        // IRQ generation
-        self.bus.irq_counter += 1;
+        // IRQ generation.
+        //
+        // Compare before incrementing, so the assert lands on an exact multiple
+        // of the interval from reset rather than one cycle earlier. See
+        // `phosphor-emulator-mtme`.
         if self.bus.irq_counter >= IRQ_INTERVAL {
             self.bus.irq_counter = 0;
             self.bus.irq_pending = true;
         }
+        self.bus.irq_counter += 1;
 
         // Execute one Z80 cycle
         self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(0));
@@ -569,14 +573,24 @@ mod tests {
     }
 
     #[test]
-    fn irq_fires_after_interval() {
+    fn irq_fires_once_its_interval_has_elapsed() {
         let mut ssio = SsioBoard::new();
         // Load a minimal ROM with HALT instruction (0x76) to prevent crash
         ssio.bus.rom[0] = 0x76; // HALT
 
+        // The assert lands on the tick whose cycle count EQUALS the interval, so
+        // it takes one more tick than the interval to see it: after
+        // `IRQ_INTERVAL` ticks only that many cycles have elapsed. Counting the
+        // other way is the off-by-one `phosphor-emulator-mtme` removed, so if
+        // this reads wrong, read that first rather than moving the boundary.
         for _ in 0..IRQ_INTERVAL {
             ssio.tick();
         }
+        assert!(
+            !ssio.bus.irq_pending,
+            "not yet: the interval has only just elapsed"
+        );
+        ssio.tick();
         assert!(ssio.bus.irq_pending);
     }
 

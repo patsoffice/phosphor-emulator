@@ -43,7 +43,19 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
-pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
+/// Period of the board's free-running NMI, in CPU cycles.
+///
+/// The divider is `MASTER / 4096 / 12`, the "3 kHz" clock over twelve, and the
+/// CPU is `MASTER / 8`. So the period is `4096 * 12 / 8` cycles and the crystal
+/// cancels: it is 6144 whatever the oscillator is trimmed to. 246.094 Hz at the
+/// nominal 12.096 MHz.
+///
+/// **This was `cpu_clock_hz / 250` and ran 1.5 % fast**, 6048 cycles against the
+/// divider's 6144, because 250 Hz is the rate the chain is usually described as
+/// producing rather than the rate it does produce. `atari_avg` had the right
+/// number from the same derivation all along, which is what made the
+/// disagreement visible. See `phosphor-emulator-mtme`.
+pub const NMI_PERIOD_CYCLES: u64 = 4096 * 12 / 8;
 
 /// The bits an option-switch read leaves undriven, which float high.
 ///
@@ -225,11 +237,15 @@ impl AtariDvgBoard {
 
     /// Per-cycle board work that runs before the CPU.
     fn begin_cycle(&mut self, cpu: &M6502) {
-        // NMI generation: 3 KHz / 12 ≈ 250 Hz, gated by TEST.
+        // NMI generation: MASTER/4096/12 = 246.094 Hz, gated by TEST.
         //
         // The counter keeps running while TEST holds the interrupt off, because
         // the hardware gate is on the interrupt line and not on the divider.
-        self.nmi_counter += 1;
+        //
+        // Compare before incrementing, so the assert lands on an exact multiple
+        // of the period from reset rather than one cycle earlier. The increment
+        // goes below the pulse-width test, not above it, or the 16-cycle pulse
+        // becomes 15. See `phosphor-emulator-mtme`.
         if self.nmi_counter >= NMI_PERIOD_CYCLES {
             self.nmi_counter = 0;
             self.nmi_pending = !self.test_asserted;
@@ -249,6 +265,7 @@ impl AtariDvgBoard {
         if self.nmi_pending && self.nmi_counter == 16 {
             self.nmi_pending = false;
         }
+        self.nmi_counter += 1;
 
         // Latch debug attribution context (cycle + instruction PC) before
         // CPU execution — bus dispatch cannot read CPU state mid-tick.

@@ -29,16 +29,16 @@ machine = "astdelux"
 frames = 1800
 shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright. The words are what this pins; the rubble is a demo game and moves whenever the machine's state evolves differently. It last moved when RAMSEL began swapping the two 256-byte SRAMs it had been ignoring, which changes where the demo keeps its working state and so where the asteroids drift, and changes none of the text."
 size = [1024, 1024]
-frame = "sha256:526451d0349f18c966279e632bc4fdc79c7ea373f3d9735c2460855f69246171"
-vectors = "sha256:f8ab5a696c0ec2eb778427765ed4da143ef9366325cb00bc0d8b813dfb8dee0a"
+frame = "sha256:340cb908cdc4b8c955c3773af300cd3bba201a2328b0a18fcea9c9fa87b87e7b"
+vectors = "sha256:579794a8b1107df61c12f4502f70f08a1e2281a11fe75ac1201f6ce676782dd5"
 
 [[frame]]
 machine = "asteroid"
 frames = 1800
 shows = "Attract mode: 1 COIN 1 PLAY over drifting asteroids with a small saucer, above the 1979 Atari copyright. It read PUSH START until the option mux was fixed, because the broken decode delivered the Language toggle as the coinage setting and the game saw Free Play; the default byte is the manual's suggested 1 coin / 1 play."
 size = [1024, 1024]
-frame = "sha256:948a0a289cc650abd7223a15567e0fc010b8f8033aa12e49d890acd2778553ca"
-vectors = "sha256:12ba865cff123bd01be9d7699f2b0447e7ab2ab0af8ade526edbb97fda7fba4d"
+frame = "sha256:291fb6a06b1b2fc5b136804c5875d985a8609bcb1327ac17690da3bc085337c4"
+vectors = "sha256:db9ca70558b794e4ddac4b6731ec84347367fe69da0d1fb249502efc3c7e72d7"
 
 [[frame]]
 machine = "burgertime"
@@ -166,10 +166,10 @@ frame = "sha256:5129c5c150136ddf04c9ac408fd8dcf2f74ea281a6b3863fe70344037ed78132
 [[frame]]
 machine = "llander"
 frames = 1800
-shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and 750 FUEL UNITS PER COIN. It read a literal X until the option mux was fixed and the undriven data-bus bits were made to float high, which this ROM depends on because its fuel routine reads 0x2800 without masking. 750 is the default byte's setting, and the game's own self-test prints the same number."
+shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with 750 FUEL UNITS PER COIN. It read a literal X until the option mux was fixed and the undriven data-bus bits were made to float high, which this ROM depends on because its fuel routine reads 0x2800 without masking. 750 is the default byte's setting, and the game's own self-test prints the same number. INSERT COINS BLINKS and is NOT pinned: this capture catches it off, where the capture before phosphor-emulator-mtme caught it on. The terrain is static in attract and was byte-identical across that change; only the lander's drift and the blink phase moved."
 size = [1024, 1024]
-frame = "sha256:02cd8455627abc60f096d12036b3b52f7dd808a2e428d22f3fde6e3b8e5edda0"
-vectors = "sha256:90f8bfdf7cb8c4f81994d2854ca195fe2be5a0fbef4318515acbeb5967f48204"
+frame = "sha256:a3f39872f605747c6540018046cf8e2ebd41ed1b241ab640c1087c0c680102f7"
+vectors = "sha256:3842c47f7916a021f160b05dd1724daaf7d5149fde58c4ef9b5293b1158473f2"
 
 [[frame]]
 machine = "marble"
@@ -257,8 +257,8 @@ machine = "quantum"
 frames = 1800
 shows = "Attract mode: the QUANTUM title over colored particle blobs, with INSERT COINS, the 1982 Atari copyright and the CREDIT line. The title, the four text lines and the score are what this pins; the blobs and specks drift and sit wherever the machine's timing has carried them, so they move whenever the CPU's clock accounting changes, and the vector list hash moves with them. They last moved 589 pixels of 540,000 when a queue refill the body drives itself learned to suspend, which gave a second refill in one instruction a clock of its own."
 size = [600, 900]
-frame = "sha256:e692f5969b859bc8fb40d34986d79945dc5feb44e92daa1a350aa90fd880edb1"
-vectors = "sha256:12bba9ee200715224c472cf4227c1c781ed8bf7dafb7894f9f549a8c292890f1"
+frame = "sha256:e2ed82cc584cdbbb98e98df8e59b050740729215c3e7c510beb88a4c48bfbdfc"
+vectors = "sha256:308277cfd7c8dccf8fd6336f6c834062cbe38b8fb28f3ac9928765be4e7c517b"
 
 [[frame]]
 machine = "roadrunner"
@@ -315,10 +315,10 @@ vectors = "sha256:b86f6889cceaf60f8c1c9082e368ad79cf6b5c70a5076f0596a1d635594986
 [[frame]]
 machine = "tempest"
 frames = 1800
-shows = "Attract mode: the blue tube seen head-on with a yellow flipper on its rim and coloured debris at the centre, the 10101 EJD high-score line over a red INSERT COINS, and the MCMLXXX ATARI / BONUS EVERY 20000 / CREDITS 0 / 1 COIN 1 PLAY lines. Upright since phosphor-emulator-iitc: the raster fallback no longer applies the cabinet rotation a second time."
+shows = "Attract mode: a blue tube seen head-on with a yellow flipper on its rim and colored debris at the center, the 10101 EJD high-score line over a red INSERT COINS, and the MCMLXXX ATARI / BONUS EVERY 20000 / CREDITS 0 / 1 COIN 1 PLAY lines. Upright since phosphor-emulator-iitc: the raster fallback no longer applies the cabinet rotation a second time. WHICH TUBE IS NOT PINNED: the demo cycles levels, so the shape at this frame moves whenever the machine's timing does. It was the square tube before phosphor-emulator-mtme and is the round one after, on a one-cycle shift in the 250 Hz IRQ that compounds over 1800 frames. The four text lines are what this pins."
 size = [727, 714]
-frame = "sha256:adfa670a794b101015c946ffd5eed7fc9a9b73bab89407efa45d1ad4a37aaae5"
-vectors = "sha256:6f5aab44070094d67771c8c423afcc6ab61238776b2f7ea7411ada9c5f5d9373"
+frame = "sha256:493729e67c794309b0f7284180ecf839b8502dce9f70c925bbc394b77c3c60c6"
+vectors = "sha256:c6a5de0ed59cdd9c184068e6b4dc0bf79b13c87670f4d8394e277e6cd847cfa7"
 
 [[frame]]
 machine = "tempest"
@@ -327,8 +327,8 @@ frames = 2800
 shows = "Level 10 in play at score 61,924 with two lives in reserve: the blue V-shaped web seen from outside, the yellow claw on its upper-left rim, red flippers climbing three of the lanes, green spikers near the vertex and a shot bursting white mid-web. The vector display list is pinned beside the raster frame, so this guards both the geometry and its rasterization under player control."
 movie = "movies/tempest-1787710135.phmi"
 size = [727, 714]
-frame = "sha256:8db009386935cb3b3b33a8fab1bcf322f8d4928a6e6d817824f0b947092b05f1"
-vectors = "sha256:acc3851aa0fe73ee4354a0376983ec82d069a07f213f98c0cb1e21d48d1a778f"
+frame = "sha256:de2c3190d764f62fca8b1b85ec8d0f656adff57e233e5a3080272aa95d28c77b"
+vectors = "sha256:e11651b5dad8c5c7f1a6060dfaffe741d529281c901c740298ca041f62f556e0"
 
 [[frame]]
 machine = "toobin"

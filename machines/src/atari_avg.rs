@@ -141,8 +141,14 @@ impl AtariAvgBoard {
     /// debugger's access-attribution latch. The CPU lives on the machine, which
     /// passes it in.
     pub fn begin_cycle(&mut self, cpu: &M6502) {
-        // IRQ generation: 250 Hz periodic
-        self.irq_counter += 1;
+        // IRQ generation: 250 Hz periodic.
+        //
+        // Compare before incrementing. Incrementing first makes the counter
+        // reach the period on cycle N-1, so the assert lands one cycle before
+        // the reference's, which puts it at exact multiples of the period from
+        // reset. Invisible until an instruction boundary falls inside that
+        // one-cycle window, and then the CPU takes the interrupt an instruction
+        // sooner than the hardware would. See `phosphor-emulator-mtme`.
         if self.irq_counter >= IRQ_PERIOD_CYCLES {
             self.irq_counter = 0;
             self.irq_pending = true;
@@ -158,6 +164,7 @@ impl AtariAvgBoard {
                 });
             }
         }
+        self.irq_counter += 1;
 
         // Latch debug attribution context (cycle + instruction PC) before
         // CPU execution — bus dispatch cannot read CPU state mid-tick.

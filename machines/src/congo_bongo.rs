@@ -441,11 +441,15 @@ fn tick_sound(sound_cpu: &mut Z80, board: &mut CongoBongoBoard) {
     // the whole reason it returns a count rather than a bool.
     for _ in 0..board.clocks.advance(board.sound_dom) {
         // Periodic ~244 Hz IRQ (irq0_line_hold).
-        board.sound_irq_counter += 1;
+        //
+        // Compare before incrementing, so the assert lands on an exact multiple
+        // of the period from reset rather than one cycle earlier. See
+        // `phosphor-emulator-mtme`.
         if board.sound_irq_counter >= SOUND_IRQ_PERIOD {
             board.sound_irq_counter = 0;
             board.sound_irq_pending = true;
         }
+        board.sound_irq_counter += 1;
 
         // HOLD_LINE auto-clear: the line drops when the CPU acknowledges the
         // interrupt, which it does at an instruction boundary while IFF1 is

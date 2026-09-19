@@ -612,11 +612,15 @@ impl QuantumBoard {
     /// divider, and the watchpoint attribution latch.
     fn begin_cycle(&mut self, cpu: &M68000) {
         // Periodic IRQ1 (HOLD_LINE).
-        self.irq_counter += 1;
+        //
+        // Compare before incrementing, so the assert lands on an exact multiple
+        // of the period from reset rather than one cycle earlier. See
+        // `phosphor-emulator-mtme`.
         if self.irq_counter >= IRQ_PERIOD_CYCLES {
             self.irq_counter = 0;
             self.irq_pending = true;
         }
+        self.irq_counter += 1;
 
         // POKEY runs at 600 kHz ≈ one tick per 10 CPU cycles.
         if self.clock.is_multiple_of(CPU_PER_POKEY) {

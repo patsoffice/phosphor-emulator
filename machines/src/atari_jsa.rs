@@ -498,11 +498,14 @@ impl AtariJsa1 {
         // The periodic interrupt is free-running: it is divided straight off the
         // crystal and neither the CPU nor the main board can stop it, only
         // acknowledge it.
-        self.bus.irq_counter += 1;
+        // Compare before incrementing, so the assert lands on an exact multiple
+        // of the period from reset rather than one cycle earlier. See
+        // `phosphor-emulator-mtme`.
         if self.bus.irq_counter >= IRQ_PERIOD_CYCLES {
             self.bus.irq_counter = 0;
             self.bus.timed_int = true;
         }
+        self.bus.irq_counter += 1;
 
         // Bus dispatch cannot read CPU state while the CPU is mid-cycle, so the
         // cycle and instruction address a hit is attributed to are latched here.
@@ -1049,11 +1052,20 @@ mod tests {
         let mut jsa = AtariJsa1::new(JsaPokey::Absent);
         jsa.bus.reset_pending = false;
 
+        // The assert lands on the tick whose cycle count EQUALS the period, so
+        // it takes one more tick than the period to see it: after
+        // `IRQ_PERIOD_CYCLES` ticks only that many cycles have elapsed, and the
+        // divider fires once they have. Counting the other way is the
+        // off-by-one `phosphor-emulator-mtme` removed, so if this reads wrong,
+        // read that first rather than moving the boundary back.
         assert!(!jsa.bus.timed_int);
-        run(&mut jsa, IRQ_PERIOD_CYCLES as usize - 1);
-        assert!(!jsa.bus.timed_int, "not yet");
+        run(&mut jsa, IRQ_PERIOD_CYCLES as usize);
+        assert!(
+            !jsa.bus.timed_int,
+            "not yet: the period has only just elapsed"
+        );
         run(&mut jsa, 1);
-        assert!(jsa.bus.timed_int, "fires at its period");
+        assert!(jsa.bus.timed_int, "fires once its period has elapsed");
 
         // A read of the acknowledge strobe clears it.
         jsa.bus.read(BusMaster::Cpu(1), 0x2806);
