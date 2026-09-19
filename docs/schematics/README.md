@@ -181,12 +181,16 @@ section is there so that is obvious.
   twice is the player-ship level, where the issue's description of the ladder
   was wrong in three ways at once and `PA0` turns out to be the *more*
   significant bit. Also eleven summing legs that are all the same 51 kOhm, so
-  the board's entire balance is the attenuator in front of each one. Two of its
-  voices carry netlists, [`zaxxon-battleship-oscillator.json`](zaxxon-battleship-oscillator.json)
-  and [`zaxxon-shot-oscillator.json`](zaxxon-shot-oscillator.json), because both
-  turn on which op-amp pin a resistor lands on and three passes over the prose
-  got that wrong: they are the same integrator-and-Schmitt oscillator drawn
-  three times on one board, and nothing short of pins says so.
+  the board's entire balance is the attenuator in front of each one. Three of
+  its voices carry netlists, [`zaxxon-battleship-oscillator.json`](zaxxon-battleship-oscillator.json),
+  [`zaxxon-shot-oscillator.json`](zaxxon-shot-oscillator.json) and
+  [`zaxxon-laser-oscillator.json`](zaxxon-laser-oscillator.json), because all
+  three turn on which op-amp pin a resistor lands on and successive passes over
+  the prose got that wrong every time: they are the same integrator-and-Schmitt
+  oscillator drawn four times on one board, with only its reference changing,
+  and nothing short of pins says so. The laser's adds a second kind of pin fact
+  that prose kept losing: `U7`'s output pin is not on the drawing at all, and
+  the board reads its timing capacitor instead.
 - [`zaxxon-color-dac.md`](zaxxon-color-dac.md), the one entry here that is not
   about audio, and the one that changed a picture. Zaxxon's palette runs three
   resistor ladders into three equal 470 ohm pulldowns with no gain stage

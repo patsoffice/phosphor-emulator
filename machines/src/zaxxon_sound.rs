@@ -771,18 +771,49 @@ const C53: f64 = 10e-6;
 /// This is also the one figure in this voice that the reference recording
 /// corroborates. MAME loops `01.wav` while the gate is low, and that sample is
 /// 0.20 s long, which is one period of 5.31 Hz to within a frame.
+///
+/// Nothing in the built circuit calls this: [`Timer555`] integrates the
+/// capacitor rather than being told a rate. It is the closed form the component
+/// has to agree with, and `the_laser_555_ramps_at_the_rate_its_parts_give`
+/// makes it do so.
+#[allow(dead_code)] // checked against Timer555 by a test; see above
 fn laser_repeat_hz() -> f64 {
     1.44 / ((R65 + R66) * C53)
 }
 
-/// `U7`'s duty cycle, `R65 / (R65 + R66)`: the pulse is short and the gap long.
+/// `U7`'s duty cycle, `R65 / (R65 + R66)`: the rise is short and the fall long,
+/// which is the whole shape of the laser's sweep.
+#[allow(dead_code)] // checked against Timer555 by a test; see `laser_repeat_hz`
 fn laser_duty() -> f64 {
     R65 / (R65 + R66)
 }
-/// **INVENTED.** The laser's audible pitch and decay. The `U8`/`Q3`/`D4` chain
-/// `U7` drives was read as a part list and not solved.
-const LASER_HZ: f64 = 1_450.0;
-const LASER_DECAY_S: f64 = 0.055;
+
+// The `U8`/`Q3`/`D4` chain that `U7` drives is the **fourth** copy of the
+// battleship's integrator-and-Schmitt oscillator on this board, and `R70` lands
+// on `U8`'s pin 6 summing node exactly as `R85`, `R96` and `R159` do. What is
+// different is what feeds its reference: `U8`(1,2,3) is a unity follower, and
+// its pin 3 sits on `U7`'s pins 2 and 6, the 555's own timing capacitor.
+//
+// So the laser is a square whose pitch is swept by a capacitor ramp between the
+// part's two thresholds, 4 V and 8 V, rising in 35 ms and falling over 153 ms.
+// The file previously made it a triangle at an invented 1450 Hz, amplitude
+// modulated by an envelope off the same 555 read as a square, which is why its
+// energy sat in one band where the board's spreads over six.
+const R67: f64 = 120_000.0; // laser integrator input
+const R70: f64 = 47_000.0; // its sink, through Q3
+const C138: f64 = 0.01e-6; // its integrator cap
+const R72: f64 = 51_000.0; // its Schmitt input, from +6 V
+const R73: f64 = 100_000.0; // its Schmitt feedback
+
+/// The laser oscillator's rate against `U7`'s capacitor, **75 Hz per volt**.
+///
+/// `R68` and `R69` are both 51 k, so the integrator's virtual ground is half the
+/// follower's output and the rate is linear in it. Between the 555's 4 V and 8 V
+/// that is **300 Hz to 600 Hz**, which is where the reference recording's energy
+/// sits.
+fn laser_hz_per_volt() -> f64 {
+    relaxation_hz(0.5, R67, R70, C138, schmitt_window_v(R72, R73))
+}
 
 /// `R75`/`R76` divide `U8`'s output before `C55` and the 4016B. This is what
 /// sets the laser's level against the rest of the board, and it is read.
@@ -1048,6 +1079,8 @@ struct Timer555 {
     c: f64,
     v_high: f64,
     v_low: f64,
+    /// Report the timing capacitor rather than pin 3. See [`Timer555::tapping_the_cap`].
+    tap_cap: bool,
     cap: f64,
     high: bool,
 }
@@ -1062,15 +1095,33 @@ impl Timer555 {
             // output when sourcing and saturates near ground when sinking.
             v_high: V12 - 1.7,
             v_low: V_SAT,
+            tap_cap: false,
             cap: 0.0,
             high: false,
         }
+    }
+
+    /// Report the timing capacitor instead of pin 3.
+    ///
+    /// `U7`'s **pin 3 is not drawn**, and that is not an omission in the
+    /// transcription: the pin is absent from the symbol on the sheet, and the
+    /// only wire off that part other than its supply and its timing network runs
+    /// from the pins 2 and 6 node. The board is using the 555 as a ramp
+    /// generator and reading its capacitor, so what the laser's oscillator gets
+    /// is an exponential sweep between the part's own two thirds and one third
+    /// of +12 V, not a square.
+    fn tapping_the_cap(mut self) -> Self {
+        self.tap_cap = true;
+        // The capacitor is where this one starts its life, at the lower
+        // threshold, rather than discharged.
+        self.cap = V12 / 3.0;
+        self
     }
 }
 
 impl CustomComponent for Timer555 {
     fn reset(&mut self) {
-        self.cap = 0.0;
+        self.cap = if self.tap_cap { V12 / 3.0 } else { 0.0 };
         self.high = false;
     }
 
@@ -1088,7 +1139,13 @@ impl CustomComponent for Timer555 {
                 self.high = true;
             }
         }
-        if self.high { self.v_high } else { self.v_low }
+        if self.tap_cap {
+            self.cap
+        } else if self.high {
+            self.v_high
+        } else {
+            self.v_low
+        }
     }
 
     fn save_state(&self, w: &mut StateWriter) {
@@ -1659,17 +1716,25 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let base_missile_leg = mix_leg(&mut b, "BASE_MISSILE_LEG", bm_voice, LEG_BASE_MISSILE);
 
     // --- The laser: a 5.3 Hz repeat gating a decaying tone -------------------
-    // `U7`'s square is 18.8 % high, not the 50 % a plain square node gives, and
-    // the duty is the difference between a short tick and a long one. A ramp
-    // thresholded at `1 - 2*duty` reproduces it exactly, since the framework's
-    // triangle runs -1 to +1.
-    let laser_ramp = b.triangle("U7_555_RAMP", laser_repeat_hz());
-    let laser_repeat = b.threshold("U7_555", laser_ramp, 1.0 - 2.0 * laser_duty());
-    let laser_env = b.rc_envelope("LASER_ENV", laser_repeat, 1e-4, LASER_DECAY_S);
-    let laser_carrier = b.triangle("LASER_TONE", LASER_HZ);
-    let laser_voice = b.multiply("LASER_AM", laser_carrier, laser_env);
-    // U8's output divided by R75/R76 before C55 and the 4016B.
-    let laser_level = b.gain("LASER_LEVEL", laser_voice, OPAMP_SWING * R76 / (R75 + R76));
+    // What the oscillator follows is `U7`'s timing CAPACITOR, not its output
+    // pin, which is not drawn at all: the ramp sweeps the pitch 300 Hz to
+    // 600 Hz, rising in 35 ms through R65 and falling over 153 ms through R66.
+    // D3 across R66 is what makes those two legs different, and the asymmetry is
+    // the voice: a fast swoop up and a slow fall.
+    // U7's pin 5 is decoupled by C54 rather than driven, so its upper threshold
+    // is the part's own two thirds of +12 V and the lower is half of that.
+    let laser_cv = b.constant("U7_CV", V12 * 2.0 / 3.0);
+    let laser_ramp = b.custom(
+        "U7_555_CAP",
+        vec![laser_cv],
+        Box::new(Timer555::new(R65, R66, C53).tapping_the_cap()),
+    );
+    let laser_freq = b.gain("LASER_FREQ", laser_ramp, laser_hz_per_volt());
+    let laser_square = b.variable_square("U8_LASER_OSC", laser_freq);
+    // U8's output divided by R75/R76 before C55 and the 4016B. The 4016B is a
+    // switch, so nothing here decays: the gate is the envelope.
+    let half = 2.0 * OPAMP_SWING * R76 / (R75 + R76) / 2.0;
+    let laser_level = b.logic_levels("LASER_LEVEL", laser_square, -half, half);
     let laser_gated = b.multiply("LASER_SW", laser_level, laser);
     let laser_leg = mix_leg(&mut b, "LASER_LEG", laser_gated, LEG_LASER);
 
@@ -2302,6 +2367,69 @@ mod tests {
         // And the decay: C89 against R147 in parallel with R148.
         let decay = C89 * (R147 * R148 / (R147 + R148));
         assert!((decay - 0.468).abs() < 0.005, "{decay} s");
+    }
+
+    /// `Timer555` integrates its capacitor rather than being handed a rate, so
+    /// it has to be made to agree with the closed form the parts give. Run it
+    /// and measure, which also pins the asymmetry `D3` creates: this voice is a
+    /// fast swoop up and a slow fall, and a 50 % ramp would be a different
+    /// sound entirely.
+    #[test]
+    fn the_laser_555_ramps_at_the_rate_its_parts_give() {
+        let mut t = Timer555::new(R65, R66, C53).tapping_the_cap();
+        let dt = 1.0 / 192_000.0;
+        let cv = [V12 * 2.0 / 3.0];
+
+        // Settle, then measure one full period by its rising crossings.
+        for _ in 0..192_000 {
+            t.step(&cv, dt);
+        }
+        let (mut last, mut rises, mut first, mut end) = (t.cap, Vec::new(), 0usize, 0usize);
+        // Counted cumulatively and differenced between the first and last
+        // crossing, so the duty is measured over a whole number of periods. A
+        // fixed window holds 10.6 of them and the partial one biases it low.
+        let (mut rising, mut rising_at_first, mut rising_at_end) = (0usize, 0usize, 0usize);
+        for i in 0..(192_000 * 2) {
+            let v = t.step(&cv, dt);
+            if v > last {
+                rising += 1;
+            }
+            if last < V12 / 2.0 && v >= V12 / 2.0 {
+                rises.push(i);
+                if rises.len() == 1 {
+                    first = i;
+                    rising_at_first = rising;
+                }
+                end = i;
+                rising_at_end = rising;
+            }
+            last = v;
+        }
+        assert!(rises.len() >= 3, "only {} periods seen", rises.len());
+        let period = (end - first) as f64 / (rises.len() - 1) as f64 * dt;
+        let hz = 1.0 / period;
+        assert!(
+            (hz - laser_repeat_hz()).abs() < 0.05,
+            "the component ramps at {hz} Hz against the parts' {}",
+            laser_repeat_hz()
+        );
+
+        // The capacitor rises for R65's share of the period and falls for
+        // R66's, which is what D3 across R66 buys.
+        let duty = (rising_at_end - rising_at_first) as f64 / (end - first) as f64;
+        assert!(
+            (duty - laser_duty()).abs() < 0.01,
+            "{duty} rising against the parts' {}",
+            laser_duty()
+        );
+
+        // And the sweep it hands the oscillator, from the part's own thresholds.
+        let (lo, hi) = (
+            V12 / 3.0 * laser_hz_per_volt(),
+            V12 * 2.0 / 3.0 * laser_hz_per_volt(),
+        );
+        assert!((lo - 300.0).abs() < 5.0, "bottom of the sweep {lo} Hz");
+        assert!((hi - 600.0).abs() < 10.0, "top of the sweep {hi} Hz");
     }
 
     #[test]

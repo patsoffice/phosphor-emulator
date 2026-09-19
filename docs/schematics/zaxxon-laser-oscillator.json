@@ -1,0 +1,156 @@
+{
+  "modules": {
+    "zaxxon laser: a 555 read at its capacitor, sweeping the same oscillator": {
+      "ports": {
+        "PA6": { "direction": "input", "bits": [2] },
+        "R186 47k -> SJ": { "direction": "output", "bits": [60] }
+      },
+      "cells": {
+        "u30": {
+          "type": "U30 7406",
+          "port_directions": { "in (3)": "input", "out (4)": "output" },
+          "connections": { "in (3)": [2], "out (4)": [3] },
+          "attributes": {}
+        },
+        "r79": {
+          "type": "R79 10k",
+          "port_directions": { "+12V": "input", "out (4)": "output" },
+          "connections": { "+12V": ["1"], "out (4)": [3] },
+          "attributes": {}
+        },
+        "r65": {
+          "type": "R65 5k1",
+          "port_directions": { "+12V": "input", "DIS (7)": "output" },
+          "connections": { "+12V": ["1"], "DIS (7)": [10] },
+          "attributes": {}
+        },
+        "r66d3": {
+          "type": "R66 22k / D3",
+          "port_directions": { "DIS (7)": "input", "C53": "output" },
+          "connections": { "DIS (7)": [10], "C53": [11] },
+          "attributes": {}
+        },
+        "u7": {
+          "type": "U7 555",
+          "port_directions": {
+            "DIS (7)": "input",
+            "THR/TRG (6,2)": "input",
+            "CV C54 (5)": "input",
+            "OUT (3) n/c": "output"
+          },
+          "connections": {
+            "DIS (7)": [10],
+            "THR/TRG (6,2)": [11],
+            "CV C54 (5)": ["0"],
+            "OUT (3) n/c": [99]
+          },
+          "attributes": {}
+        },
+        "c53": {
+          "type": "C53 10u",
+          "port_directions": { "4 - 8 V": "input", "GND": "output" },
+          "connections": { "4 - 8 V": [11], "GND": ["0"] },
+          "attributes": {}
+        },
+        "u8a": {
+          "type": "U8a",
+          "port_directions": {
+            "+ (3)": "input",
+            "- (2) = out": "input",
+            "out (1)": "output"
+          },
+          "connections": { "+ (3)": [11], "- (2) = out": [12], "out (1)": [12] },
+          "attributes": {}
+        },
+        "r67": {
+          "type": "R67 120k",
+          "port_directions": { "in": "input", "-> pin 6": "output" },
+          "connections": { "in": [12], "-> pin 6": [13] },
+          "attributes": {}
+        },
+        "r68r69": {
+          "type": "R68 51k / R69 51k",
+          "port_directions": { "in": "input", "half": "output" },
+          "connections": { "in": [12], "half": [14] },
+          "attributes": {}
+        },
+        "c138": {
+          "type": "C138 10n",
+          "port_directions": { "pin 6": "input", "pin 7": "output" },
+          "connections": { "pin 6": [13], "pin 7": [15] },
+          "attributes": {}
+        },
+        "u8b": {
+          "type": "U8b integrator",
+          "port_directions": {
+            "- (6)": "input",
+            "+ (5)": "input",
+            "out (7)": "output"
+          },
+          "connections": { "- (6)": [13], "+ (5)": [14], "out (7)": [15] },
+          "attributes": {}
+        },
+        "u8c": {
+          "type": "U8c Schmitt",
+          "port_directions": {
+            "- (9)": "input",
+            "+ (10)": "input",
+            "out (8)": "output"
+          },
+          "connections": { "- (9)": [15], "+ (10)": [16], "out (8)": [17] },
+          "attributes": {}
+        },
+        "r72": {
+          "type": "R72 51k",
+          "port_directions": { "+6V": "input", "out": "output" },
+          "connections": { "+6V": ["1"], "out": [16] },
+          "attributes": {}
+        },
+        "r73": {
+          "type": "R73 100k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [17], "out": [16] },
+          "attributes": {}
+        },
+        "r74d4": {
+          "type": "R74 10k / D4",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [17], "out": [18] },
+          "attributes": {}
+        },
+        "q3": {
+          "type": "Q3 C1684 / R71 2k2",
+          "port_directions": { "B": "input", "C": "output" },
+          "connections": { "B": [18], "C": [19] },
+          "attributes": {}
+        },
+        "r70": {
+          "type": "R70 47k",
+          "port_directions": { "Q3 C": "input", "-> pin 6": "output" },
+          "connections": { "Q3 C": [19], "-> pin 6": [13] },
+          "attributes": {}
+        },
+        "r75r76": {
+          "type": "R75 10k / R76 2k2",
+          "port_directions": { "in": "input", "x0.18": "output" },
+          "connections": { "in": [17], "x0.18": [50] },
+          "attributes": {}
+        },
+        "u17": {
+          "type": "U17 4016B",
+          "port_directions": {
+            "C55 2u2 (8)": "input",
+            "CTL (6)": "input",
+            "OUT (9)": "output"
+          },
+          "connections": {
+            "C55 2u2 (8)": [50],
+            "CTL (6)": [3],
+            "OUT (9)": [60]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

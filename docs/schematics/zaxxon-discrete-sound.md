@@ -463,10 +463,11 @@ warbling with the 555. Its duty is 45.5 % rather than the battleship's exact
 to 1. It reaches `MB4391 U16` ch B through `R164` 1 MΩ against `R165` 220 kΩ, a
 divider of **0.18**, and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
 
-## The three sheet-12 voices
+## The two remaining sheet-12 voices
 
 These were read at block level: enough to name every part and the signal flow,
-not enough to state a center frequency or a sweep law from the values.
+not enough to state a center frequency or a sweep law from the values. The laser
+used to sit here beside them and is now solved, in its own section below.
 
 - **`HOMING MISSILE` (`PA4`)** goes to `U30` 7406 (1 -> 2) with `R55` 10 kΩ to
   +12 V, then `R42` 51 kΩ into `U5` with `R43` 100 kΩ, `R44` 6.8 kΩ and `C43`
@@ -483,14 +484,50 @@ not enough to state a center frequency or a sweep law from the values.
   `MB4391 U14` ch A, whose audio is a third Sallen-Key noise band on sheet 12
   (`R61`/`R62` 15 kΩ, `C50`/`C137` 0.022 uF, **482 Hz**, gain `1 + R63/R64` =
   1.5, Q 0.67) through `C51` 22 uF; the leg is `R183` 39 kΩ / `R184` 8.2 kΩ.
-- **`LASER` (`PA6`)** goes to `U30` 7406 (3 -> 4) with `R79` 10 kΩ to +12 V. A
-  555 at `U7` free-runs at `1.44/((R65+2*R66)*C53)` with `R65` 5.1 kΩ, `R66`
-  22 kΩ, `C53` 10 uF and `D3` across `R66`, giving **about 5.3 Hz at a 19 % duty
-  cycle**: a repetition rate rather than a tone. That drives `U8` stages with
-  `R67` 120 kΩ, `R68`/`R69` 51 kΩ, `C138` 0.01 uF, `R70` 47 kΩ, `R71` 2.2 kΩ,
-  `R72` 51 kΩ, `R73` 100 kΩ, `R74` 10 kΩ, `Q3` and `D4`, then `R75` 10 kΩ,
-  `R76` 2.2 kΩ and `C55` 2.2 uF into `U17` 4016B (pins 8, 9, 6), biased by
-  `R77`/`R78` 51 kΩ; the leg is `R186` 47 kΩ / `R187` 8.2 kΩ.
+## The laser: the oscillator a fourth time, swept by a capacitor
+
+`LASER` (`PA6`) goes to `U30` 7406 (3 -> 4) with `R79` 10 kΩ to +12 V, which
+reaches `U17`'s 4016B and does nothing else: the gate is a switch, so this voice
+has no envelope and nothing in it decays.
+
+![zaxxon laser oscillator](zaxxon-laser-oscillator.svg)
+
+[`zaxxon-laser-oscillator.json`](zaxxon-laser-oscillator.json). `U8`(5,6,7) and
+`U8`(9,10,8) around `Q3` are the **fourth** copy of the battleship's
+integrator-and-Schmitt oscillator on this board, and `R70` 47 kΩ lands on pin 6
+like `R85`, `R96` and `R159` before it. `R72` 51 kΩ and `R73` 100 kΩ are the
+same Schmitt pair as the battleship's two stages, so the window is the same
+3.378 V.
+
+**`U7`'s pin 3 is not drawn**, and that is the key to the voice. The pin is
+absent from the symbol, not merely unlabeled, and the only wire off the part
+besides its supply and its timing network runs from the **pins 2 and 6 node**,
+`C53`'s top, to `U8`(1,2,3)'s non-inverting input. The board is using the 555 as
+a ramp generator and reading its capacitor.
+
+So what sweeps the oscillator is an exponential ramp between the part's own two
+thresholds:
+
+| | |
+|---|---|
+| `U7` astable | `R65` 5.1 kΩ, `R66` 22 kΩ, `C53` 10 uF, `D3` across `R66` |
+| rise, through `R65` alone | `0.693*R65*C53` = **35 ms** |
+| fall, through `R66` alone | `0.693*R66*C53` = **153 ms** |
+| rate, duty | **5.31 Hz**, 18.8 % rising |
+| capacitor swing | `V/3` to `2V/3` = **4 V to 8 V** |
+| oscillator | `R67` 120 kΩ in, `C138` 0.01 uF, `R70` 47 kΩ sink, `R68`/`R69` 51 kΩ halving |
+| rate against the ramp | **75 Hz per volt** |
+| sweep | **300 Hz to 600 Hz**, fast up and slow down |
+| duty | `R70`/`R67` gives 39 % |
+| out | `R75` 10 kΩ / `R76` 2.2 kΩ, a divider of **0.18**, then `C55` 2.2 uF |
+| gate | `U17` 4016B (8, 9, 6), biased by `R77`/`R78` 51 kΩ |
+| leg | `R186` 47 kΩ / `R187` 8.2 kΩ |
+
+`D3` is what makes the two legs different and the asymmetry is the whole
+character: a fast swoop up and a slow fall, repeated 5.31 times a second. The
+reference recording of this voice is 0.20 s long, which is one period of that to
+within a frame, and its energy peaks in the 250 Hz band, which is where a square
+sweeping 300 to 600 Hz puts its fundamental.
 
 ## The alarms
 
@@ -635,6 +672,14 @@ sources.
   integrator-and-Schmitt oscillator. Its rate is 3331 Hz per volt at node A, its
   `Qbar`-driven shaper rests the VCA muted and decays over 468 ms, and its 555
   is modulated through its control pin rather than its timing resistors.
+- **The laser is a fourth copy of it**, swept 300 Hz to 600 Hz by `U7`'s timing
+  capacitor. `U7`'s output pin is not drawn: the board reads pins 2 and 6.
+- **One circuit accounts for four of the eleven voices.** An op-amp integrator,
+  an inverting Schmitt on a 51 k / 100 k or 33 k / 100 k pair, and a transistor
+  sinking the summing node through a resistor that decides the duty. What
+  differs between them is the capacitor, the sink ratio, and whether the
+  reference is a fixed divider (the battleship), a node driven by a 555 and an
+  envelope (the shot), or a 555's capacitor directly (the laser).
 - **The alarm stage is a comparator**, driven a hundred times past its rails,
   whose output is slew-limited by `C99` to 0.4 V per microsecond.
 - **Seven 74123 one-shot widths**, from their own R and C:
@@ -770,10 +815,11 @@ A good scan. The PPI map, the ladder network, the seven one-shot R/C pairs, the
 three Sallen-Key filters and the whole eleven-leg mix table were read at 400 dpi
 with every designator and value legible, and those are the parts to trust.
 
-The battleship's and the shot's oscillators are now read at component level and
-solved, and so are the junctions their rates turn on. The sheet-12 555 chains,
-and the routing of control voltages across the sheet seam other than the shot's
-and the alarms', are still read at block level and are marked so above.
+The battleship's, the shot's and the laser's oscillators are now read at
+component level and solved, and so are the junctions their rates turn on. The
+homing missile and the base missile, and the routing of control voltages across
+the sheet seam other than the shot's and the alarms', are still read at block
+level and are marked so above.
 
 This is a hand transcription and can be wrong. Nothing in it is checked by a
 test; the section above it is what keeps that honest.
