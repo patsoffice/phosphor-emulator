@@ -350,3 +350,18 @@ frames = 1800
 shows = "Attract mode: the XEVIOUS title over the scrolling green forest, with the Solvalou below it and the 1982 Namco copyright."
 size = [224, 288]
 frame = "sha256:ea2352abe4c3772155c5ccaf50d46e0dfbc56973dc6642fd122834db2d22829c"
+
+[[frame]]
+machine = "zaxxon"
+frames = 800
+shows = "Attract mode: the ZAXXON logo in outlined cyan block capitals across the middle of the screen, over the fortress wall, with the gray brick tower at the top right and the wall's jagged blue edge running down the left. The background layer is what this pins: it is the only one of the family's three layers that is ROM-resident rather than CPU-written, and it is sampled per row through the isometric skew, so a wrong scroll or a wrong skew shows up here as a sheared or displaced wall and nowhere else in this file. The scroll sits at 0x040 and does not move between frames 400 and 800, so this is a settled screen rather than a point in an animation."
+size = [224, 256]
+frame = "sha256:6c7a8c0441d593d077e2a5d6df2eb5e23b8af2d40986f4401f8b27838472cfbb"
+
+[[frame]]
+machine = "zaxxon"
+id = "space"
+frames = 2700
+shows = "Attract mode, the ENEMY PLANE P=19 scoring screen: enemy craft and shots scattered over black with the blue asteroid cluster at the top left, under the cyan TOP and white 1UP score lines and above the green FUEL bar. The background layer is switched off here, so what this pins is the other two and the foreground's colors. Those come from the second color PROM indexed by screen position rather than from anything the CPU wrote, which is why TOP, 1UP, FUEL and the E/F markers are four different colors with no color RAM on the board; a wrong PROM index would recolor whole bands of the screen at once. Verified against a reference capture of the same screen: identical pixel counts and identical RGB in every text band."
+size = [224, 256]
+frame = "sha256:adbbf84ab3dfe5210d7d6f78b0035fb29fa921afa15983f005b0c792af787a4e"

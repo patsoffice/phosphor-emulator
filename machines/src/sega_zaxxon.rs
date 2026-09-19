@@ -4,8 +4,8 @@
 //!
 //! **This engine has no package of its own, and should not grow one.** It is a
 //! shared subsystem rather than a board, so the drawings that cover it are the
-//! per-game packages, each recorded in that game's own file: currently only
-//! [`crate::congo_bongo`].
+//! per-game packages, each recorded in that game's own file: [`crate::zaxxon`]
+//! and [`crate::congo_bongo`].
 //!
 //! One thing here does rest on a drawing: the palette, transcribed in
 //! [`docs/schematics/zaxxon-color-dac.md`](../../docs/schematics/zaxxon-color-dac.md)

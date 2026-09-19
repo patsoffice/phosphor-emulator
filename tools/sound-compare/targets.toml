@@ -266,6 +266,31 @@ Reading the drawing took twenty minutes; the belief had been in the plan for
 weeks."""
 
 [[target]]
+id = "zaxxon-discrete"
+machines = ["zaxxon"]
+status = "missing"
+notes = """
+UNREAD, and nothing is implemented. Zaxxon has no sound chip at all: twelve
+voices (player ship A-D, homing missile, base missile, laser, battleship, small
+and medium explosion, cannon, shot, two alarms) are analog circuits on the sound
+board, each gated by one active-low bit of an i8255 PPI's port A, B or C. What
+`machines/src/zaxxon.rs` does today is wire the PPI to the bus and keep its three
+output latches, so the trigger edges exist and nothing downstream of them does.
+The machine declares `no_audio` and is silent.
+
+`missing` rather than `blocked`: nothing is stopping the work, and the drawing is
+in hand. arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf carries IC Board A
+834-0214 sheets 11 and 12 at PDF pp131-135, which are the whole sound board:
+an MM5837 noise generator at U2, a 74123 one-shot per percussive voice, MB4391
+VCAs, 4016B switches, three 555s and an LA4460 into the speaker. Every voice is
+labeled on the 8255's pins there, so the port map is read rather than inherited.
+The sheet inventory is in docs/schematics/zaxxon-color-dac.md.
+
+The reference driver plays recorded WAVs, so as with congo-percussion there is no
+comparison to run: a recording of somebody's board is not a model of any board.
+The reference here is the drawing, and the next step is a read and a rebuild."""
+
+[[target]]
 id = "atari-system1-audio"
 machines = ["marble", "roadrunner"]
 device = "machines/src/atari_system1_sound.rs"

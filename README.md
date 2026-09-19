@@ -146,7 +146,7 @@ cargo run -p phosphor-frontend -- dkong /path/to/roms --gfxview --gfx-region spr
 
 The machine is booted for a moment first so palette-RAM-driven colors are populated. Vector/bitmap-framebuffer machines (Asteroids, I, Robot's 3-D, Crystal Castles) have no tile sheets and report so.
 
-**PNG sheet export** (offline, in the `disasm` tool — no running machine, CI-friendly). This is the **bring-up** path: validate a new machine's bit-plane layout + PROM palette by diffing a sheet against a MAME GFX dump *before* the scanline renderer works. It needs a `GfxRegion` registered for the machine (currently Donkey Kong, Mario Bros., Congo Bongo):
+**PNG sheet export** (offline, in the `disasm` tool: no running machine, CI-friendly). This is the **bring-up** path: validate a new machine's bit-plane layout + PROM palette by diffing a sheet against a MAME GFX dump *before* the scanline renderer works. It needs a `GfxRegion` registered for the machine (currently Donkey Kong, Mario Bros., Congo Bongo, Zaxxon):
 
 ```bash
 # List a machine's registered GFX regions (no ROMs needed)
@@ -471,7 +471,8 @@ assert_eq!(bus.memory[0x10], 0x42);
 - Battlezone (Atari: M6502 + DVG + Mathbox + POKEY)
 - Space Duel (Atari: M6502 + AVG + POKEY)
 - Space Fury (Sega G80: Z80 + vector generator)
-- Zaxxon (Sega G80: Z80 + tilemap/sprite video)
+- Super Zaxxon and Future Spy (Sega Zaxxon hardware, already in the tree as
+  `sega_zaxxon.rs`; both need their encrypted Z80 opcodes decrypted first)
  
 ### Frontend
 

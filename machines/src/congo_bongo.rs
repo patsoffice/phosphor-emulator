@@ -1,7 +1,7 @@
 //! Sega Congo Bongo (1983), on Zaxxon-family hardware.
 //!
-//! The video pipeline this board shares with the rest of the Zaxxon family
-//! lives in [`crate::sega_zaxxon`]. What stays here is the part that is Congo
+//! The video pipeline this board shares with [`crate::zaxxon`] lives in
+//! [`crate::sega_zaxxon`]. What stays here is the part that is Congo
 //! Bongo's own: a second Z80 with two PSGs and a percussion board, a custom
 //! sprite DMA engine, a color RAM the foreground layer reads, and this board's
 //! own memory map and control-latch bit assignments.
