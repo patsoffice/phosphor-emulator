@@ -165,6 +165,10 @@ Games sharing hardware use a shared board struct. When adding a new game on exis
 - `mcr2.rs` - Bally Midway MCR II (Z80 + SSIO + CTC)
 - `atari_dvg.rs` - Atari DVG vector (M6502 + DVG)
 - `gottlieb.rs` - Gottlieb System 80 (I8088 + M6502 sound)
+- `sega_zaxxon.rs` - Sega Zaxxon family video (Zaxxon, Congo Bongo). A video
+  engine rather than a board: it owns the GFX caches, the PROM palette, the
+  ROM-resident background pixmap and sprite RAM, and each game's board keeps its
+  own CPUs, memory map, control-latch bit assignments and sound path
 
 ## Reference Examples
 

@@ -708,6 +708,7 @@ pub mod rom_loader;
 pub mod satans_hollow;
 pub(crate) mod scanline;
 pub mod scramble;
+pub mod sega_zaxxon;
 pub mod simple_system;
 pub mod sinistar;
 pub mod starwars;

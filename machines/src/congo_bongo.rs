@@ -1,4 +1,10 @@
-//! Sega Congo Bongo (1983) — Zaxxon-family hardware.
+//! Sega Congo Bongo (1983), on Zaxxon-family hardware.
+//!
+//! The video pipeline this board shares with the rest of the Zaxxon family
+//! lives in [`crate::sega_zaxxon`]. What stays here is the part that is Congo
+//! Bongo's own: a second Z80 with two PSGs and a percussion board, a custom
+//! sprite DMA engine, a color RAM the foreground layer reads, and this board's
+//! own memory map and control-latch bit assignments.
 //!
 //! # Schematics
 //!
@@ -33,27 +39,23 @@ use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
-    InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable, InputControl,
+    InputEvent, MachineCore, Nvram, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{
-    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
-};
+use phosphor_core::core::{Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::i8255::I8255;
 use phosphor_core::device::sn76489::Sn76489a;
-use phosphor_core::gfx;
-use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_core::gfx::resistor::{combine_weights, compute_resistor_weights};
-use phosphor_core::gfx::sprite::{SpriteClip, draw_sprite_row};
+use phosphor_core::gfx::decode::GfxLayout;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::congo_sound::CongoSound;
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::sega_zaxxon::{self as family, CoinLatch, TIMING, VISIBLE_LINES, Variant, ZaxxonVideo};
 use crate::set_bit_active_high;
 
 // ---------------------------------------------------------------------------
@@ -82,21 +84,8 @@ pub(crate) enum SoundRegion {
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
-// Master clock 48.66 MHz; main Z80 = /16 ≈ 3.041 MHz; pixel clock = /8 ≈ 6.083 MHz.
-// HTOTAL 384 px → 192 main-CPU cycles/scanline (pixel clock is 2× the CPU clock).
-// VTOTAL 264 lines; visible Y 16..239 (224 lines), VBLANK at line 240.
-// Frame: 192 × 264 = 50688 cycles → ≈ 59.99 Hz. ROT90 ⇒ display is 224×256.
-
-pub const TIMING: TimingConfig = TimingConfig {
-    cpu_clock_hz: 48_660_000 / 16, // 3_041_250
-    cycles_per_scanline: 192,
-    total_scanlines: 264,
-    // Native (pre-orientation) framebuffer: Congo Bongo declares ROT90 and the
-    // frontend rotates centrally, so these are the unrotated dimensions.
-    display_width: NATIVE_WIDTH as u32,                  // 256
-    display_height: (NATIVE_HEIGHT - VBLANK_END) as u32, // 224
-    display_aspect: Some((3, 4)),                        // portrait tube as viewed (after ROT90)
-};
+// The raster is the family's, so [`family::TIMING`] carries it. Only the sound
+// board's second crystal is Congo Bongo's own.
 
 /// The board's crystals and everything divided out of them.
 ///
@@ -106,7 +95,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// here whose domain has to be stepped with `advance()` rather than `tick()`.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
     use phosphor_core::core::RootId;
-    let mut t = ClockTree::new(48_660_000);
+    let mut t = ClockTree::new(family::MASTER_CLOCK);
     let snd = t.add_root(SOUND_CLOCK as u32); // 4 MHz sound board crystal
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 16); // 3.04125 MHz
     let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 8); // 6.0825 MHz
@@ -119,19 +108,6 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
     t.set_raster(dot, 384, 0);
     t
 }
-
-pub const NATIVE_WIDTH: usize = 256;
-pub const NATIVE_HEIGHT: usize = 240;
-pub const VBLANK_END: usize = 16; // first visible scanline
-pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on output)
-
-/// The foreground/text layer: 32x32 of 8x8 tiles covering the whole raster.
-const FG_TILEMAP: gfx::TilemapConfig = gfx::TilemapConfig {
-    cols: 32,
-    rows: 32,
-    tile_width: 8,
-    tile_height: 8,
-};
 
 // Sound section: a second Z80 @ 4 MHz with two SN76489A PSGs (4 MHz and 1 MHz)
 // and an i8255 PPI. The sound CPU takes a periodic IRQ at SOUND_CLOCK/16/16/16/4
@@ -306,44 +282,18 @@ pub static CONGO_PALETTE_PROM: RomRegion = RomRegion {
     ],
 };
 
-// GFX bit-plane layouts, promoted to `'static` so both the runtime decode
-// (`decode_gfx_roms`) and the gfxview `GfxRegion`s borrow the same tables. All
-// three are MAME `*_planar` layouts with `plane_offsets` LSB-first.
-
-/// Foreground/text: 256 chars, 8×8 2bpp; planes split at the ROM midpoint 0x800.
-pub static CONGO_TX_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
-    plane_offsets: &[0, 0x0800 * 8],
-    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
-    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
-    char_increment: 8 * 8,
-};
-
-/// Background: 1024 chars, 8×8 3bpp; planes at thirds of the 0x6000 region.
-pub static CONGO_BG_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
-    plane_offsets: &[0, 0x2000 * 8, 2 * 0x2000 * 8],
-    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
-    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
-    char_increment: 8 * 8,
-};
-
-/// Sprites: 128 sprites, 32×32 3bpp; planes at thirds of the 0xC000 region. Each
-/// 8×8 sub-cell is 8 consecutive bytes, laid out left-to-right then top-to-bottom
-/// — `x_offsets[px] = (px/8)*64 + px%8`, `y_offsets[py] = (py/8)*256 + (py%8)*8`.
+/// Sprites: 128 sprites, 32×32 3bpp; planes at thirds of the 0xC000 region.
+///
+/// The pixel offsets are the family's ([`family::SPRITE_X_OFFSETS`]); only the
+/// plane offsets are Congo Bongo's, because this board carries six sprite ROMs
+/// where Zaxxon carries three. The text and background layouts are the family's
+/// outright ([`family::TX_GFX_LAYOUT`], [`family::BG_GFX_LAYOUT`]), since those
+/// two regions are the same size on both boards.
 pub static CONGO_SPR_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[0, 0x4000 * 8, 2 * 0x4000 * 8],
-    x_offsets: &[
-        0, 1, 2, 3, 4, 5, 6, 7, // sub-cell col 0
-        64, 65, 66, 67, 68, 69, 70, 71, // sub-cell col 1
-        128, 129, 130, 131, 132, 133, 134, 135, // sub-cell col 2
-        192, 193, 194, 195, 196, 197, 198, 199, // sub-cell col 3
-    ],
-    y_offsets: &[
-        0, 8, 16, 24, 32, 40, 48, 56, // sub-cell row 0
-        256, 264, 272, 280, 288, 296, 304, 312, // sub-cell row 1
-        512, 520, 528, 536, 544, 552, 560, 568, // sub-cell row 2
-        768, 776, 784, 792, 800, 808, 816, 824, // sub-cell row 3
-    ],
-    char_increment: 128 * 8,
+    x_offsets: &family::SPRITE_X_OFFSETS,
+    y_offsets: &family::SPRITE_Y_OFFSETS,
+    char_increment: family::CHAR_INCREMENT_SPRITE,
 };
 
 // gfxview GFX regions. Congo Bongo's scanline renderer is already wired and
@@ -356,7 +306,7 @@ inventory::submit! {
         count: 256,
         width: 8,
         height: 8,
-        layout: &CONGO_TX_GFX_LAYOUT,
+        layout: &family::TX_GFX_LAYOUT,
         load: |rs| CONGO_GFX_TX_ROM.load(rs),
         palette: Some(congo_gfx_palette),
     }
@@ -368,7 +318,7 @@ inventory::submit! {
         count: 1024,
         width: 8,
         height: 8,
-        layout: &CONGO_BG_GFX_LAYOUT,
+        layout: &family::BG_GFX_LAYOUT,
         load: |rs| CONGO_GFX_BG_ROM.load(rs),
         palette: Some(congo_gfx_palette),
     }
@@ -390,30 +340,7 @@ inventory::submit! {
 /// with the same resistor-DAC math as the runtime path.
 fn congo_gfx_palette(rom_set: &RomSet) -> Result<Vec<(u8, u8, u8)>, RomLoadError> {
     let prom = CONGO_PALETTE_PROM.load(rom_set)?;
-    Ok(congo_palette_rgb(&prom).to_vec())
-}
-
-/// Build the 512-entry RGB palette from the `mr019` color PROM.
-///
-/// 3-3-2 resistor DAC (per `zaxxon_palette` in `sega/zaxxon_v.cpp`): R = PROM
-/// bits 0-2 and G = bits 3-5 (1k/470/220 Ω), B = bits 6-7 (470/220 Ω), all with
-/// a 470 Ω pulldown. The PROM is 256 bytes mirrored into 512, so the upper half
-/// (selected by the CBS color-bank latch) duplicates the lower.
-///
-/// Shared by [`CongoBongoBoard::build_palette`] and [`congo_gfx_palette`] so the
-/// runtime renderer and the offline viewer never diverge.
-fn congo_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 512] {
-    let rgweights = compute_resistor_weights(&[1000.0, 470.0, 220.0], Some(470.0));
-    let bweights = compute_resistor_weights(&[470.0, 220.0], Some(470.0));
-    let mut out = [(0u8, 0u8, 0u8); 512];
-    for (i, entry) in out.iter_mut().enumerate() {
-        let v = palette_prom[i];
-        let r = combine_weights(&rgweights, &[v & 1, (v >> 1) & 1, (v >> 2) & 1]);
-        let g = combine_weights(&rgweights, &[(v >> 3) & 1, (v >> 4) & 1, (v >> 5) & 1]);
-        let b = combine_weights(&bweights, &[(v >> 6) & 1, (v >> 7) & 1]);
-        *entry = (r, g, b);
-    }
-    out
+    Ok(family::palette_rgb(&prom).to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -473,8 +400,11 @@ pub fn run_frame(cpu: &mut Z80, sound_cpu: &mut Z80, board: &mut CongoBongoBoard
 }
 
 #[derive(BusDebug, DebugTrace, Saveable)]
-#[save_version(1)]
+#[save_version(2)]
 #[save_tlv]
+// 12 (bg_enabled), 13 (bg_position) and 15 (sprite_ram) moved into the shared
+// [`ZaxxonVideo`], which saves them under its own ids inside id 27.
+#[save_retired(12, 13, 15)]
 pub struct CongoBongoBoard {
     /// The address space persists its own writable regions: work RAM, video RAM
     /// and color RAM here.
@@ -486,7 +416,9 @@ pub struct CongoBongoBoard {
     #[save(id = 2)]
     pub(crate) sound_map: AddressSpace16,
 
-    // GFX ROMs + their decoded pixel caches.
+    /// The raw GFX ROM images. The board loaded them, so the board keeps them;
+    /// everything decoded from them lives in [`Self::video`] and is rebuilt by
+    /// [`Self::reload_gfx`].
     #[save_skip]
     pub(crate) tx_rom: [u8; 0x1000],
     #[save_skip]
@@ -496,34 +428,16 @@ pub struct CongoBongoBoard {
     #[save_skip]
     pub(crate) tilemap_dat: [u8; 0x4000],
     #[save_skip]
-    pub(crate) tx_cache: gfx::GfxCache, // 256 × 8×8 2bpp foreground tiles
-    #[save_skip]
-    pub(crate) bg_cache: gfx::GfxCache, // 1024 × 8×8 3bpp background tiles
-    #[save_skip]
-    pub(crate) sprite_cache: gfx::GfxCache, // 128 × 32×32 3bpp sprites
-
-    // Pre-rendered background tilemap pixmap (256×4096 palette-pen indices). The
-    // bg map is fixed in `tilemap_dat` ROM, so it is built once at load.
-    #[save_skip]
-    pub(crate) bg_pixmap: Vec<u8>,
-
-    /// Color PROM + the 512-entry RGB palette decoded from it.
-    ///
-    /// Expanded from the PROM rather than from anything the CPU writes, so
-    /// unlike the boards whose palette lives in RAM it stays derived and is
-    /// rebuilt at ROM load.
-    #[save_skip]
     pub(crate) palette_prom: [u8; 0x0200],
-    #[save_skip]
-    pub(crate) palette_rgb: [(u8, u8, u8); 512],
 
-    // Scanline-rendered framebuffer (256 × 240 × RGB24, pre-rotation).
-    #[save_skip]
-    pub(crate) scanline_buffer: Vec<u8>,
+    /// The family video engine: GFX caches, palette, background pixmap, sprite
+    /// RAM, and the control-latch lines that steer them.
+    #[save(id = 27)]
+    pub(crate) video: ZaxxonVideo,
 
     // Inputs (active-high) + DIP banks. `in2` holds the start buttons; the coin
-    // bits (SW100 5/6/7) come from `coin_status`, which the game latches and
-    // clears via the coin-enable latch lines.
+    // bits (SW100 5/6/7) come from `coins`, which the game latches and clears
+    // via the coin-enable latch lines.
     #[save(id = 3)]
     pub(crate) in0: u8,
     #[save(id = 4)]
@@ -535,30 +449,22 @@ pub struct CongoBongoBoard {
     #[save(id = 7)]
     pub(crate) dsw3: u8,
     #[save(id = 8)]
-    pub(crate) coin_status: [bool; 3], // coin A, coin B, service
+    pub(crate) coins: CoinLatch,
 
-    // 74LS259 addressable latches (raw bytes; individual lines decoded by the
-    // render/input issues). `int_enabled`/`bg_enabled` are broken out because the
-    // run loop needs them now.
+    // 74LS259 addressable latches (raw bytes; the video lines are decoded out of
+    // them into `video` on write). `int_enabled` is broken out because the run
+    // loop needs it.
     #[save(id = 9)]
     pub(crate) latch1: u8,
     #[save(id = 10)]
     pub(crate) latch2: u8,
     #[save(id = 11)]
     pub(crate) int_enabled: bool,
-    #[save(id = 12)]
-    pub(crate) bg_enabled: bool,
 
-    // Background scroll position (two raw bytes; decoded by issue .6).
-    #[save(id = 13)]
-    pub(crate) bg_position: [u8; 2],
-
-    // Custom sprite-DMA registers (src lo/hi, count, trigger) and the 256-byte
-    // sprite RAM the DMA engine fills (not in the CPU address map).
+    // Custom sprite-DMA registers (src lo/hi, count, trigger). The 256-byte
+    // sprite RAM they fill is in `video`, and is not in the CPU address map.
     #[save(id = 14)]
     pub(crate) sprite_dma: [u8; 4],
-    #[save(id = 15)]
-    pub(crate) sprite_ram: [u8; 0x100],
 
     // Sound command latch (main CPU → PPI port A).
     #[save(id = 16)]
@@ -638,26 +544,18 @@ impl CongoBongoBoard {
             bg_rom: [0; 0x6000],
             spr_rom: [0; 0xc000],
             tilemap_dat: [0; 0x4000],
-            tx_cache: gfx::GfxCache::new(0, 8, 8),
-            bg_cache: gfx::GfxCache::new(0, 8, 8),
-            sprite_cache: gfx::GfxCache::new(0, 32, 32),
-            bg_pixmap: Vec::new(),
             palette_prom: [0; 0x0200],
-            palette_rgb: [(0, 0, 0); 512],
-            scanline_buffer: vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT * 3],
+            video: ZaxxonVideo::new(Variant::Congo),
             in0: 0x00,
             in1: 0x00,
             in2: 0x00,
             dsw2: DSW2_DEFAULT,
             dsw3: DSW3_DEFAULT,
-            coin_status: [false; 3],
+            coins: CoinLatch::default(),
             latch1: 0x00,
             latch2: 0x00,
             int_enabled: false,
-            bg_enabled: false,
-            bg_position: [0; 2],
             sprite_dma: [0; 4],
-            sprite_ram: [0; 0x100],
             sound_latch: 0,
             sn1: Sn76489a::new(SOUND_CLOCK as u32),
             sn2: Sn76489a::new(SOUND_PSG2_CLOCK),
@@ -699,73 +597,22 @@ impl CongoBongoBoard {
     // GFX decode + palette (call after loading ROMs)
     // -----------------------------------------------------------------------
 
-    /// Decode the three Zaxxon-family GFX regions into pixel caches.
+    /// Rebuild everything the video engine derives from ROM: the three decoded
+    /// GFX caches, the PROM palette, and the background pixmap.
     ///
-    /// All three are MAME `*_planar` layouts; phosphor's [`decode_gfx`] takes
-    /// `plane_offsets` LSB-first, i.e. MAME's `planeoffset` array reversed (see
-    /// `gfx_8x8x2_planar`/`gfx_8x8x3_planar`/`zaxxon_spritelayout` in
-    /// `sega/zaxxon.cpp`).
-    pub fn decode_gfx_roms(&mut self) {
-        // The same `'static` layouts the gfxview `GfxRegion`s borrow, so the
-        // offline sheet export and the runtime renderer decode identically.
-        self.tx_cache = decode_gfx(&self.tx_rom, 0, 256, &CONGO_TX_GFX_LAYOUT);
-        self.bg_cache = decode_gfx(&self.bg_rom, 0, 1024, &CONGO_BG_GFX_LAYOUT);
-        self.sprite_cache = decode_gfx(&self.spr_rom, 0, 128, &CONGO_SPR_GFX_LAYOUT);
-    }
-
-    /// Build the 512-entry RGB palette from the `mr019` color PROM.
-    ///
-    /// Delegates to the shared [`congo_palette_rgb`] so the runtime renderer and
-    /// the gfxview export apply identical resistor-DAC math.
-    pub fn build_palette(&mut self) {
-        self.palette_rgb = congo_palette_rgb(&self.palette_prom);
-    }
-
-    /// Pre-render the background tilemap into a 256×4096 pixmap of palette pen
-    /// indices (`color * 8 + pen`, before the runtime color base is added).
-    ///
-    /// Per `get_bg_tile_info` (`sega/zaxxon_v.cpp`): the 32×512 tilemap is filled
-    /// from `tilemap_dat` — first half = low 8 code bits, second half = high 2
-    /// code bits (`& 3`) + 4 color bits (`>> 4`). The tile index wraps at
-    /// `bytes/2` (0x2000), so the bottom half of the map mirrors the top.
-    pub fn build_bg_pixmap(&mut self) {
-        if self.bg_cache.count() == 0 {
-            return;
-        }
-        const W: usize = 256; // 32 tiles × 8
-        const H: usize = 4096; // 512 tiles × 8
-        const SIZE: usize = 0x2000; // tilemap_dat bytes / 2
-        let mut pixmap = vec![0u8; W * H];
-        for tile_index in 0..(32 * 512) {
-            let col = tile_index % 32;
-            let row = tile_index / 32;
-            let eff = tile_index & (SIZE - 1);
-            let attr = self.tilemap_dat[eff + SIZE];
-            let code = self.tilemap_dat[eff] as usize + 256 * (attr as usize & 3);
-            let base_pen = (attr >> 4) as usize * 8;
-            for py in 0..8 {
-                for px in 0..8 {
-                    let pen = self.bg_cache.pixel(code, px, py) as usize;
-                    pixmap[(row * 8 + py) * W + col * 8 + px] = (base_pen + pen) as u8;
-                }
-            }
-        }
-        self.bg_pixmap = pixmap;
-    }
-
-    /// Source pixmap row for screen row `abs_y`, per the U56/U74/U75 adders:
-    /// `VF + ((bg_position << 1) ^ 0xfff) + 1`, masked to the pixmap height.
-    /// (Upright only; flip-screen VF inversion is deferred.)
-    fn bg_src_y(&self, abs_y: usize) -> usize {
-        let bgpos = ((self.bg_position[1] as usize & 0x07) << 8) | self.bg_position[0] as usize;
-        (abs_y + ((bgpos << 1) ^ 0xfff) + 1) & 0xFFF
-    }
-
-    /// Source pixmap column for screen pixel `(x, abs_y)` with the isometric
-    /// skew (U53/U54 adders): `HF + ((VF >> 1) ^ 0xff) + 1 + 0x3F`, masked to the
-    /// pixmap width. The 0x3F constant is the non-flipped `flipoffs` (0x40 − 1).
-    fn bg_src_x(abs_y: usize, x: usize) -> usize {
-        (x + ((abs_y >> 1) ^ 0xff) + 1 + 0x3F) & 0xFF
+    /// The text and background layouts are the family's; only the sprite layout
+    /// is this board's, because it has six sprite ROMs rather than three. The
+    /// `'static` layouts are the same ones the gfxview `GfxRegion`s borrow, so
+    /// the offline sheet export and the runtime renderer decode identically.
+    pub fn reload_gfx(&mut self) {
+        self.video.load_gfx(
+            &self.tx_rom,
+            &self.bg_rom,
+            &self.spr_rom,
+            &CONGO_SPR_GFX_LAYOUT,
+            &self.tilemap_dat,
+            &self.palette_prom,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -797,121 +644,12 @@ impl CongoBongoBoard {
         while count >= 0 {
             let daddr = self.read_main(saddr) as usize * 4;
             for i in 0..4 {
-                self.sprite_ram[(daddr + i) & 0xff] =
-                    self.read_main(saddr.wrapping_add(i as u16 + 1));
+                let byte = self.read_main(saddr.wrapping_add(i as u16 + 1));
+                self.video.sprite_ram_mut()[(daddr + i) & 0xff] = byte;
             }
             saddr = saddr.wrapping_add(0x20);
             count -= 1;
         }
-    }
-
-    /// Sprite top scanline from its Y byte (`find_minimum_y`): the first line
-    /// where `(Y + 0xf2 + VF) & 0xe0 == 0xe0`, scanned to its minimum, +1.
-    /// (Upright only; the flip path is kept for a later flip-screen pass.)
-    fn find_minimum_y(value: u8, flip: bool) -> i32 {
-        let flipmask = if flip { 0xff } else { 0x00 };
-        let flipconst = if flip { 0xef } else { 0xf1 };
-        let mut y: i32 = 0;
-        while y < 256 {
-            let sum = (value as i32 + flipconst + 1) + (y ^ flipmask);
-            if sum & 0xe0 == 0xe0 {
-                break;
-            }
-            y += 16;
-        }
-        loop {
-            let sum = (value as i32 + flipconst + 1) + ((y - 1) ^ flipmask);
-            if sum & 0xe0 != 0xe0 {
-                break;
-            }
-            y -= 1;
-        }
-        (y + 1) & 0xff
-    }
-
-    /// Sprite left column from its X byte (`find_minimum_x`).
-    fn find_minimum_x(value: u8, flip: bool) -> i32 {
-        let flipmask = if flip { 0xff } else { 0x00 };
-        let mut x = (value as i32 + 0xef + 1) ^ flipmask;
-        if flipmask != 0 {
-            x -= 31;
-        }
-        x & 0xff
-    }
-
-    /// Draw the sprites covering one scanline (32×32 3bpp, transparent pen 0).
-    ///
-    /// Only the lower half of sprite RAM is scanned, back-to-front (offs 0x7C →
-    /// 0) so lower-indexed sprites land on top. Each sprite is positioned via
-    /// `find_minimum_x/y` and drawn with 256-pixel X and Y wrap (`draw_sprites`
-    /// with flip masks 0x280/0x180). Per-sprite color = `(byte & 0x1f) +
-    /// (color_bank << 5)`, palette pen = `color * 8 + pen`.
-    fn render_sprites_scanline(&mut self, abs_y: usize) {
-        if self.sprite_cache.count() == 0 {
-            return;
-        }
-        let color_bank = ((self.latch2 >> 7) & 1) as usize;
-        let sprites = &self.sprite_cache;
-        let palette = &self.palette_rgb;
-        let ram = &self.sprite_ram;
-        let buf_start = abs_y * NATIVE_WIDTH * 3;
-        let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
-        let clip = SpriteClip {
-            x_min: 0,
-            x_max: NATIVE_WIDTH as i32,
-            wrap_offset: Some(-0x100),
-        };
-
-        let mut offs = 0x7c;
-        loop {
-            let sy = Self::find_minimum_y(ram[offs], false);
-            let code = (ram[offs + 1] & 0x7f) as u16; // bit 7 = flip Y
-            let flip_y = ram[offs + 1] & 0x80 != 0;
-            let color = (ram[offs + 2] & 0x1f) as usize + (color_bank << 5);
-            let flip_x = ram[offs + 2] & 0x80 != 0;
-            let sx = Self::find_minimum_x(ram[offs + 3], false);
-
-            // Sprite covers `abs_y` from its primary anchor or the −256 Y wrap.
-            for sy_anchor in [sy, sy - 0x100] {
-                let row = abs_y as i32 - sy_anchor;
-                if (0..32).contains(&row) {
-                    let src_py = if flip_y { 31 - row } else { row } as usize;
-                    draw_sprite_row(
-                        sprites,
-                        code,
-                        src_py,
-                        sx,
-                        flip_x,
-                        |pv| pv == 0,
-                        |pv| palette[(color * 8 + pv as usize) & 0x1FF],
-                        buf,
-                        &clip,
-                    );
-                }
-            }
-
-            if offs == 0 {
-                break;
-            }
-            offs -= 4;
-        }
-    }
-
-    /// Decoded foreground / background / sprite pixel caches (consumed by the
-    /// scanline renderer in the follow-up issues, and by debug tooling).
-    pub fn tx_cache(&self) -> &gfx::GfxCache {
-        &self.tx_cache
-    }
-    pub fn bg_cache(&self) -> &gfx::GfxCache {
-        &self.bg_cache
-    }
-    pub fn sprite_cache(&self) -> &gfx::GfxCache {
-        &self.sprite_cache
-    }
-
-    /// One entry of the decoded 512-color RGB palette.
-    pub fn palette_color(&self, index: usize) -> (u8, u8, u8) {
-        self.palette_rgb[index & 0x1FF]
     }
 
     // -----------------------------------------------------------------------
@@ -931,13 +669,9 @@ impl CongoBongoBoard {
         // low. The game acknowledges a credit by pulsing that line low→high (see
         // the per-coin pulses at 0x0B73 in the program ROM), so the clear must
         // run on every latch write, not only on the shared coin-enable bit.
-        for n in 0..3 {
-            if (self.latch1 >> n) & 1 == 0 {
-                self.coin_status[n] = false;
-            }
-        }
+        self.coins.apply_enables(self.latch1);
         match bit {
-            5 => self.bg_enabled = value,
+            5 => self.video.set_bg_enable(value),
             7 => {
                 self.int_enabled = value;
                 if !value {
@@ -951,27 +685,30 @@ impl CongoBongoBoard {
     /// Latch a coin insert (`zaxxon_coin_inserted`): the coin registers only
     /// while its arming line (latch-1 bit `n`) is high.
     pub fn coin_inserted(&mut self, n: usize) {
-        if (self.latch1 >> n) & 1 == 1 {
-            self.coin_status[n] = true;
-        }
+        self.coins.insert(n, self.latch1);
     }
 
     /// SW100 (0xC008) input: start buttons plus the three latched coin bits.
     pub fn read_sw100(&self) -> u8 {
-        self.in2
-            | (self.coin_status[0] as u8) << 5
-            | (self.coin_status[1] as u8) << 6
-            | (self.coin_status[2] as u8) << 7
+        self.in2 | self.coins.sw100_bits()
     }
 
     /// Write one bit of main latch 2 (0xC020-0xC027, U53, LS259 `write_d0`).
     /// Bit 1 = CREF1 (fg color), bit 3 = CREF3 (bg color), bit 6 = BS (fg bank),
-    /// bit 7 = CBS (color bank); decoded by the render issues from `latch2`.
+    /// bit 7 = CBS (color bank). Bit 0 is not connected on this board, and
+    /// bits 2, 4 and 5 are unassigned.
     pub fn write_latch2(&mut self, bit: u8, value: bool) {
         if value {
             self.latch2 |= 1 << bit;
         } else {
             self.latch2 &= !(1 << bit);
+        }
+        match bit {
+            1 => self.video.set_fg_color(value),
+            3 => self.video.set_bg_color(value),
+            6 => self.video.set_fg_bank(value),
+            7 => self.video.set_color_bank(value),
+            _ => {}
         }
     }
 
@@ -1038,112 +775,28 @@ impl CongoBongoBoard {
 
     /// Render one native screen scanline (`abs_y` = bitmap row 0-239).
     ///
-    /// Layer order matches `screen_update_congo`: the row is cleared, then the
-    /// scrolling background, sprites, and the foreground tilemap (transparent
-    /// pen 0) are drawn on top of one another.
+    /// The layering is the family's; what this adds is Congo Bongo's color RAM,
+    /// which the foreground layer reads per tile and no other board in the
+    /// family has.
     pub fn render_scanline(&mut self, abs_y: usize) {
-        let row_offset = abs_y * NATIVE_WIDTH * 3;
-        self.scanline_buffer[row_offset..row_offset + NATIVE_WIDTH * 3].fill(0);
-        self.render_bg_scanline(abs_y);
-        self.render_sprites_scanline(abs_y);
-        self.render_fg_scanline(abs_y);
-    }
-
-    /// Draw the pseudo-3D scrolling background for one scanline.
-    ///
-    /// Samples the pre-built pixmap with the isometric skew (`draw_background`
-    /// with `skew = true`) and adds the runtime color base `bg_color (CREF3) +
-    /// (color_bank << 8)`. When the layer is disabled the row stays black.
-    fn render_bg_scanline(&mut self, abs_y: usize) {
-        if !self.bg_enabled || self.bg_pixmap.is_empty() {
-            return;
-        }
-        let colorbase =
-            ((self.latch2 >> 3) & 1) as usize * 0x80 + ((self.latch2 >> 7) & 1) as usize * 0x100;
-        let row_base = self.bg_src_y(abs_y) * 256;
-        let pixmap = &self.bg_pixmap;
-        let palette = &self.palette_rgb;
-        let buf_start = abs_y * NATIVE_WIDTH * 3;
-        let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
-        for x in 0..NATIVE_WIDTH {
-            let val = pixmap[row_base + Self::bg_src_x(abs_y, x)] as usize;
-            let (r, g, b) = palette[(val + colorbase) & 0x1FF];
-            let off = x * 3;
-            buf[off] = r;
-            buf[off + 1] = g;
-            buf[off + 2] = b;
-        }
-    }
-
-    /// Draw the foreground/text tilemap for one scanline (32×32 of 8×8 2bpp
-    /// tiles, transparent pen 0). Per `congo_get_fg_tile_info`: tile code =
-    /// `videoram + (fg_bank << 8)`, color = `colorram & 0x1f`, and the gfx pen
-    /// (granularity 8) is offset by `fg_color (CREF1) + (color_bank << 8)`.
-    fn render_fg_scanline(&mut self, abs_y: usize) {
-        let tile_count = self.tx_cache.count();
-        if tile_count == 0 {
-            return; // GFX ROMs not loaded yet
-        }
         let video_ram = self.main_map.region_data(MainRegion::VideoRam);
         let color_ram = self.main_map.region_data(MainRegion::ColorRam);
-        let tiles = &self.tx_cache;
-        let palette = &self.palette_rgb;
-
-        // Latch-2 control lines: bit1 = fg_color (CREF1), bit6 = fg bank (BS),
-        // bit7 = color bank (CBS).
-        let fg_bank = ((self.latch2 >> 6) & 1) as usize;
-        let pal_offset =
-            ((self.latch2 >> 1) & 1) as usize * 0x80 + ((self.latch2 >> 7) & 1) as usize * 0x100;
-
-        let buf_start = abs_y * NATIVE_WIDTH * 3;
-        let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
-
-        gfx::render_tilemap_scanline(
-            &FG_TILEMAP,
-            tiles,
-            abs_y,
-            |col, row| {
-                let idx = row * FG_TILEMAP.cols + col;
-                // The 0x1000 fg ROM only decodes 256 tiles; the fg-bank high bit
-                // has no ROM behind it on this set, so wrap rather than index
-                // past it.
-                let code = (video_ram[idx] as usize + (fg_bank << 8)) % tile_count;
-                gfx::TileInfo::new(code as u16, color_ram[idx] & 0x1f)
-            },
-            |attr, pen| {
-                // Pen 0 is transparent, which is what lets the background and
-                // the sprites drawn before this show through.
-                (pen != 0).then(|| {
-                    let base = attr as usize * 8 + pal_offset;
-                    palette[(base + pen as usize) & 0x1FF]
-                })
-            },
-            buf,
-            0,
-        );
+        self.video.render_scanline(abs_y, video_ram, color_ram);
     }
 
     // -----------------------------------------------------------------------
     // Frame output (native; ROT90 applied centrally by the frontend)
     // -----------------------------------------------------------------------
 
-    /// Copy the visible raster (rows 16..240, native 256×224 RGB24) into the
-    /// output buffer in native row-major order.
-    ///
-    /// The 90° rotation Congo Bongo's cabinet needs is declared via
-    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
-    /// so this emits pixels unrotated.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        let start = VBLANK_END * NATIVE_WIDTH * 3;
-        let visible =
-            &self.scanline_buffer[start..start + (NATIVE_HEIGHT - VBLANK_END) * NATIVE_WIDTH * 3];
-        buffer.copy_from_slice(visible);
+        self.video.render_frame(buffer);
     }
 
-    /// Congo Bongo's monitor is mounted rotated 90°. The orientation is
-    /// declarative — the frontend rotates `render_frame`'s native output.
+    /// Congo Bongo's monitor is mounted rotated 90°, like the rest of the
+    /// family. The orientation is declarative: the frontend rotates
+    /// `render_frame`'s native output.
     pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
-        phosphor_core::core::machine::Orientation::ROT90
+        self.video.orientation()
     }
 
     // -----------------------------------------------------------------------
@@ -1152,14 +805,12 @@ impl CongoBongoBoard {
 
     pub fn reset(&mut self) {
         self.int_enabled = false;
-        self.bg_enabled = false;
         self.vblank_irq_pending = false;
         self.latch1 = 0;
         self.latch2 = 0;
-        self.bg_position = [0; 2];
         self.sprite_dma = [0; 4];
-        self.sprite_ram = [0; 0x100];
-        self.coin_status = [false; 3];
+        self.video.reset();
+        self.coins = CoinLatch::default();
         self.sound_latch = 0;
         self.clock = 0;
 
@@ -1176,7 +827,6 @@ impl CongoBongoBoard {
         self.main_map.region_data_mut(MainRegion::VideoRam).fill(0);
         self.main_map.region_data_mut(MainRegion::ColorRam).fill(0);
         self.sound_map.region_data_mut(SoundRegion::Ram).fill(0);
-        self.scanline_buffer.fill(0);
     }
 
     /// The interrupt lines this board drives, per CPU. Named to avoid shadowing
@@ -1263,9 +913,7 @@ impl CongoBongoSystem {
             .palette_prom
             .copy_from_slice(&CONGO_PALETTE_PROM.load(rom_set)?);
 
-        self.board.decode_gfx_roms();
-        self.board.build_palette();
-        self.board.build_bg_pixmap();
+        self.board.reload_gfx();
         Ok(())
     }
 
@@ -1344,7 +992,7 @@ impl Bus for CongoBongoBoard {
                     0xC000..=0xDFFF => match addr & 0x3F {
                         0x18..=0x1F => self.write_latch1((addr & 0x07) as u8, data & 1 != 0),
                         0x20..=0x27 => self.write_latch2((addr & 0x07) as u8, data & 1 != 0),
-                        0x28..=0x29 => self.bg_position[(addr & 0x01) as usize] = data,
+                        0x28..=0x29 => self.video.write_bg_position((addr & 0x01) as usize, data),
                         0x30..=0x33 => self.write_sprite_dma((addr & 0x03) as usize, data),
                         0x38..=0x3F => {
                             // Latch the sound command and drive it onto PPI port A
@@ -1399,21 +1047,22 @@ impl MachineCore for CongoBongoSystem {
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
+        let video = &self.board.video;
         vec![
             GfxSheet {
                 name: "fg",
-                cache: &self.board.tx_cache,
-                palette: &self.board.palette_rgb,
+                cache: video.tx_cache(),
+                palette: video.palette(),
             },
             GfxSheet {
                 name: "bg",
-                cache: &self.board.bg_cache,
-                palette: &self.board.palette_rgb,
+                cache: video.bg_cache(),
+                palette: video.palette(),
             },
             GfxSheet {
                 name: "sprites",
-                cache: &self.board.sprite_cache,
-                palette: &self.board.palette_rgb,
+                cache: video.sprite_cache(),
+                palette: video.palette(),
             },
         ]
     }
@@ -1436,150 +1085,15 @@ impl SaveState for CongoBongoSystem {
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
-// Stable input IDs. SW00 = P1 joystick + button, SW01 = P2 (cocktail), SW100 =
-// start + coin status. Coins go through the latch/ack path in `coin_inserted`.
-const INPUT_P1_RIGHT: u16 = 0;
-const INPUT_P1_LEFT: u16 = 1;
-const INPUT_P1_UP: u16 = 2;
-const INPUT_P1_DOWN: u16 = 3;
-const INPUT_P1_BUTTON: u16 = 4;
-const INPUT_P2_RIGHT: u16 = 5;
-const INPUT_P2_LEFT: u16 = 6;
-const INPUT_P2_UP: u16 = 7;
-const INPUT_P2_DOWN: u16 = 8;
-const INPUT_P2_BUTTON: u16 = 9;
-const INPUT_P1_START: u16 = 10;
-const INPUT_P2_START: u16 = 11;
-const INPUT_COIN1: u16 = 12;
-const INPUT_COIN2: u16 = 13;
-const INPUT_SERVICE: u16 = 14;
-
-#[allow(clippy::too_many_arguments)]
-const fn dir(
-    id: u16,
-    name: &'static str,
-    label: &'static str,
-    direction: Direction,
-    player: u8,
-    bindings: &'static [phosphor_core::core::machine::DefaultBinding],
-) -> InputControl {
-    InputControl {
-        id: InputId(id),
-        stable_name: name,
-        label,
-        kind: InputKind::DigitalDirection { direction },
-        player: Some(player),
-        default_bindings: bindings,
-    }
-}
-
-const fn button(id: u16, name: &'static str, label: &'static str, player: u8) -> InputControl {
-    InputControl {
-        id: InputId(id),
-        stable_name: name,
-        label,
-        kind: InputKind::Action(ActionRole::Primary),
-        player: Some(player),
-        default_bindings: &[],
-    }
-}
-
-use crate::input_defaults as ind;
-
-const CONGO_CONTROLS: &[InputControl] = &[
-    dir(
-        INPUT_P1_RIGHT,
-        "p1_right",
-        "P1 Right",
-        Direction::Right,
-        1,
-        ind::P1_RIGHT,
-    ),
-    dir(
-        INPUT_P1_LEFT,
-        "p1_left",
-        "P1 Left",
-        Direction::Left,
-        1,
-        ind::P1_LEFT,
-    ),
-    dir(INPUT_P1_UP, "p1_up", "P1 Up", Direction::Up, 1, ind::P1_UP),
-    dir(
-        INPUT_P1_DOWN,
-        "p1_down",
-        "P1 Down",
-        Direction::Down,
-        1,
-        ind::P1_DOWN,
-    ),
-    button(INPUT_P1_BUTTON, "p1_button", "P1 Button", 1),
-    dir(
-        INPUT_P2_RIGHT,
-        "p2_right",
-        "P2 Right",
-        Direction::Right,
-        2,
-        ind::P2_RIGHT,
-    ),
-    dir(
-        INPUT_P2_LEFT,
-        "p2_left",
-        "P2 Left",
-        Direction::Left,
-        2,
-        ind::P2_LEFT,
-    ),
-    dir(INPUT_P2_UP, "p2_up", "P2 Up", Direction::Up, 2, ind::P2_UP),
-    dir(
-        INPUT_P2_DOWN,
-        "p2_down",
-        "P2 Down",
-        Direction::Down,
-        2,
-        ind::P2_DOWN,
-    ),
-    button(INPUT_P2_BUTTON, "p2_button", "P2 Button", 2),
-    InputControl {
-        id: InputId(INPUT_P1_START),
-        stable_name: "p1_start",
-        label: "P1 Start",
-        kind: InputKind::Start,
-        player: Some(1),
-        default_bindings: crate::input_defaults::P1_START,
-    },
-    InputControl {
-        id: InputId(INPUT_P2_START),
-        stable_name: "p2_start",
-        label: "P2 Start",
-        kind: InputKind::Start,
-        player: Some(2),
-        default_bindings: crate::input_defaults::P2_START,
-    },
-    InputControl {
-        id: InputId(INPUT_COIN1),
-        stable_name: "coin1",
-        label: "Coin 1",
-        kind: InputKind::Coin,
-        player: None,
-        default_bindings: crate::input_defaults::COIN,
-    },
-    InputControl {
-        id: InputId(INPUT_COIN2),
-        stable_name: "coin2",
-        label: "Coin 2",
-        kind: InputKind::Coin,
-        player: None,
-        default_bindings: &[],
-    },
-    InputControl {
-        id: InputId(INPUT_SERVICE),
-        stable_name: "service",
-        label: "Service",
-        kind: InputKind::Service,
-        player: None,
-        default_bindings: crate::input_defaults::SERVICE,
-    },
-];
+// The control panel and its stable input IDs are the family's: SW00 = P1
+// joystick + button, SW01 = P2 (cocktail), SW100 = start + coin status. Coins go
+// through the latch/acknowledge path in `coin_inserted`. What is Congo Bongo's
+// own is which port bit each direction lands on, below.
+use crate::sega_zaxxon::{
+    INPUT_COIN1, INPUT_COIN2, INPUT_P1_BUTTON, INPUT_P1_DOWN, INPUT_P1_LEFT, INPUT_P1_RIGHT,
+    INPUT_P1_START, INPUT_P1_UP, INPUT_P2_BUTTON, INPUT_P2_DOWN, INPUT_P2_LEFT, INPUT_P2_RIGHT,
+    INPUT_P2_START, INPUT_P2_UP, INPUT_SERVICE, ZAXXON_FAMILY_CONTROLS as CONGO_CONTROLS,
+};
 
 impl InputConfigurable for CongoBongoSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -1620,79 +1134,9 @@ impl InputConfigurable for CongoBongoSystem {
 const DSW2_DEFAULT: u8 = 0x77; // 10000 bonus, Medium, 3 lives, sound on, upright
 const DSW3_DEFAULT: u8 = 0x33; // 1C/1C both slots
 
-/// Coinage choices shared by Coin A (bits 4-7) and Coin B (bits 0-3); `shift`
-/// places them in the right nibble.
-const fn coinage(shift: u8) -> [DipChoice; 16] {
-    [
-        DipChoice {
-            label: "4 Coins/1 Credit",
-            value: 0x0f << shift,
-        },
-        DipChoice {
-            label: "3 Coins/1 Credit",
-            value: 0x07 << shift,
-        },
-        DipChoice {
-            label: "2 Coins/1 Credit",
-            value: 0x0b << shift,
-        },
-        DipChoice {
-            label: "2C/1C 5C/3C 6C/4C",
-            value: 0x06 << shift,
-        },
-        DipChoice {
-            label: "2C/1C 3C/2C 4C/3C",
-            value: 0x0a << shift,
-        },
-        DipChoice {
-            label: "1 Coin/1 Credit",
-            value: 0x03 << shift,
-        },
-        DipChoice {
-            label: "1C/1C 5C/6C",
-            value: 0x02 << shift,
-        },
-        DipChoice {
-            label: "1C/1C 4C/5C",
-            value: 0x0c << shift,
-        },
-        DipChoice {
-            label: "1C/1C 2C/3C",
-            value: 0x04 << shift,
-        },
-        DipChoice {
-            label: "1 Coin/2 Credits",
-            value: 0x0d << shift,
-        },
-        DipChoice {
-            label: "1C/2C 5C/11C",
-            value: 0x08 << shift,
-        },
-        DipChoice {
-            label: "1C/2C 4C/9C",
-            value: 0x00 << shift,
-        },
-        DipChoice {
-            label: "1 Coin/3 Credits",
-            value: 0x05 << shift,
-        },
-        DipChoice {
-            label: "1 Coin/4 Credits",
-            value: 0x09 << shift,
-        },
-        DipChoice {
-            label: "1 Coin/5 Credits",
-            value: 0x01 << shift,
-        },
-        DipChoice {
-            label: "1 Coin/6 Credits",
-            value: 0x0e << shift,
-        },
-    ]
-}
-
-const COIN_B_CHOICES: [DipChoice; 16] = coinage(0);
-const COIN_A_CHOICES: [DipChoice; 16] = coinage(4);
+// DSW03 is the family's coinage nibbles verbatim, so its two choice tables come
+// from [`family::COIN_A_CHOICES`] and [`family::COIN_B_CHOICES`].
+use crate::sega_zaxxon::{COIN_A_CHOICES, COIN_B_CHOICES};
 
 const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {
@@ -1865,6 +1309,9 @@ inventory::submit! {
 mod tests {
     use super::*;
     use phosphor_core::core::debug::Debuggable;
+    use phosphor_core::core::machine::InputId;
+    use phosphor_core::gfx;
+    use phosphor_core::gfx::decode::decode_gfx;
 
     /// The tree fires the sound Z80 on exactly the cycles the hand-rolled
     /// accumulator did.
@@ -1938,44 +1385,28 @@ mod tests {
         // tx plane 0 (LSB) lives in the first half, plane 1 (MSB) at +0x800.
         board.tx_rom[0] = 0b1000_0000; // tile 0, row 0, col 0 → plane-0 bit set
         board.tx_rom[0x800] = 0b0100_0000; // tile 0, row 0, col 1 → plane-1 bit set
-        board.decode_gfx_roms();
+        board.reload_gfx();
 
-        assert_eq!(board.tx_cache().count(), 256);
+        let video = &board.video;
+        assert_eq!(video.tx_cache().count(), 256);
         assert_eq!(
-            (board.tx_cache().width(), board.tx_cache().height()),
+            (video.tx_cache().width(), video.tx_cache().height()),
             (8, 8)
         );
-        assert_eq!(board.bg_cache().count(), 1024);
-        assert_eq!(board.sprite_cache().count(), 128);
+        assert_eq!(video.bg_cache().count(), 1024);
         assert_eq!(
-            (board.sprite_cache().width(), board.sprite_cache().height()),
+            video.sprite_cache().count(),
+            128,
+            "six sprite ROMs, twice Zaxxon's three"
+        );
+        assert_eq!(
+            (video.sprite_cache().width(), video.sprite_cache().height()),
             (32, 32)
         );
 
         // Pixel (0,0) gets only plane 0 → value 1; pixel (1,0) only plane 1 → 2.
-        assert_eq!(board.tx_cache().pixel(0, 0, 0), 1);
-        assert_eq!(board.tx_cache().pixel(0, 1, 0), 2);
-    }
-
-    #[test]
-    fn palette_3_3_2_resistor_dac() {
-        let mut board = CongoBongoBoard::new();
-        // All bits set in entry 1 → white; entry 2 = red only (bits 0-2).
-        board.palette_prom[0] = 0x00;
-        board.palette_prom[1] = 0xFF;
-        board.palette_prom[2] = 0x07;
-        board.build_palette();
-
-        assert_eq!(board.palette_color(0), (0, 0, 0));
-        assert_eq!(board.palette_color(1), (255, 255, 255));
-        let (r, g, b) = board.palette_color(2);
-        assert_eq!((g, b), (0, 0));
-        assert_eq!(r, 255, "all three red bits on → full red");
-
-        // The PROM is mirrored into the upper half (CBS color bank).
-        board.palette_prom[0x100] = 0xFF;
-        board.build_palette();
-        assert_eq!(board.palette_color(0x100), (255, 255, 255));
+        assert_eq!(video.tx_cache().pixel(0, 0, 0), 1);
+        assert_eq!(video.tx_cache().pixel(0, 1, 0), 2);
     }
 
     #[test]
@@ -1983,18 +1414,20 @@ mod tests {
         let mut board = CongoBongoBoard::new();
         // Tile 1, row 0: col 0 → plane-0 set (pen 1, opaque); col 1 → pen 0.
         board.tx_rom[8] = 0b1000_0000;
-        board.decode_gfx_roms();
         // color 2 → pen base 2*8 = 16; pen 1 lands at palette[17].
         board.palette_prom[17] = 0xFF; // white
-        board.build_palette();
+        board.reload_gfx();
         board.main_map.region_data_mut(MainRegion::VideoRam)[0] = 1; // tile code
         board.main_map.region_data_mut(MainRegion::ColorRam)[0] = 2; // color
 
         board.render_scanline(0);
-        let buf = &board.scanline_buffer;
-        assert_eq!((buf[0], buf[1], buf[2]), (255, 255, 255), "opaque pen 1");
         assert_eq!(
-            (buf[3], buf[4], buf[5]),
+            board.video.scanline_pixel(0, 0),
+            (255, 255, 255),
+            "opaque pen 1"
+        );
+        assert_eq!(
+            board.video.scanline_pixel(1, 0),
             (0, 0, 0),
             "pen 0 transparent → black"
         );
@@ -2004,35 +1437,22 @@ mod tests {
     fn foreground_fg_color_offsets_palette() {
         let mut board = CongoBongoBoard::new();
         board.tx_rom[8] = 0b1000_0000; // tile 1, pen 1 at (0,0)
-        board.decode_gfx_roms();
         // fg_color (CREF1) adds 0x80, so color 0 pen 1 resolves at palette[0x81].
         board.palette_prom[0x81] = 0xFF;
-        board.build_palette();
+        board.reload_gfx();
         // fg_bank=1 → code 0x101 wraps to tile 1 (256-tile ROM); fg_color set.
         board.main_map.region_data_mut(MainRegion::VideoRam)[0] = 0x01;
         board.main_map.region_data_mut(MainRegion::ColorRam)[0] = 0x00;
-        board.latch2 = (1 << 6) | (1 << 1); // fg bank (BS) + fg color (CREF1)
+        board.write_latch2(6, true); // BS, the fg bank
+        board.write_latch2(1, true); // CREF1, the fg color
 
         board.render_scanline(0);
-        let buf = &board.scanline_buffer;
-        assert_eq!((buf[0], buf[1], buf[2]), (255, 255, 255));
+        assert_eq!(board.video.scanline_pixel(0, 0), (255, 255, 255));
     }
 
-    #[test]
-    fn background_skew_source_coords() {
-        let mut board = CongoBongoBoard::new();
-        // No scroll: srcy = ((0<<1)^0xfff)+1 = 0x1000 & 0xfff = 0; srcx(0) = 0x3f.
-        assert_eq!(board.bg_src_y(0), 0);
-        assert_eq!(CongoBongoBoard::bg_src_x(0, 0), 0x3F);
-        // Successive rows step the skew column left by one every two lines.
-        assert_eq!(CongoBongoBoard::bg_src_x(0, 1), 0x40);
-        assert_eq!(CongoBongoBoard::bg_src_x(2, 0), 0x3E);
-
-        // 11-bit scroll split across the two position bytes (0xC028/0xC029).
-        board.bg_position = [0x10, 0x01]; // bgpos = 0x110
-        assert_eq!(board.bg_src_y(0), 0xDE0);
-    }
-
+    /// Congo Bongo's map ROM is half Zaxxon's, so its tile index wraps at
+    /// 0x2000 and the bottom half of the 32x512 grid mirrors the top. That is a
+    /// board fact rather than a family one, so it is pinned here.
     #[test]
     fn background_pixmap_and_render() {
         let mut board = CongoBongoBoard::new();
@@ -2040,34 +1460,25 @@ mod tests {
         for b in board.tilemap_dat[0x2000..0x4000].iter_mut() {
             *b = 0x10;
         }
-        board.decode_gfx_roms();
-        board.build_bg_pixmap();
-        assert_eq!(board.bg_pixmap.len(), 256 * 4096);
-        assert_eq!(board.bg_pixmap[0], 8, "color 1, pen 0");
-
         board.palette_prom[8] = 0xFF; // palette[8] = white
-        board.build_palette();
+        board.reload_gfx();
+        assert_eq!(board.video.bg_pixmap().len(), 256 * 4096);
+        assert_eq!(board.video.bg_pixmap()[0], 8, "color 1, pen 0");
+        assert_eq!(
+            board.video.bg_pixmap()[0x2000 * 8 * 8],
+            8,
+            "the map wraps at 0x2000, so row 2048 repeats row 0"
+        );
 
         // Disabled → row stays black.
-        board.bg_enabled = false;
+        board.write_latch1(5, false); // BEN
         board.render_scanline(100);
-        let off = 100 * NATIVE_WIDTH * 3;
-        assert_eq!(
-            (board.scanline_buffer[off], board.scanline_buffer[off + 2]),
-            (0, 0)
-        );
+        assert_eq!(board.video.scanline_pixel(0, 100), (0, 0, 0));
 
         // Enabled, uniform map → every pixel resolves to palette[8] = white.
-        board.bg_enabled = true;
+        board.write_latch1(5, true);
         board.render_scanline(100);
-        assert_eq!(
-            (
-                board.scanline_buffer[off],
-                board.scanline_buffer[off + 1],
-                board.scanline_buffer[off + 2]
-            ),
-            (255, 255, 255)
-        );
+        assert_eq!(board.video.scanline_pixel(0, 100), (255, 255, 255));
     }
 
     #[test]
@@ -2085,17 +1496,10 @@ mod tests {
         sys.bus_write(BusMaster::Cpu(0), 0xC032, 0x00);
         sys.bus_write(BusMaster::Cpu(0), 0xC033, 0x01); // go
 
-        assert_eq!(&sys.board.sprite_ram[12..16], &[0xAA, 0xBB, 0xCC, 0xDD]);
-    }
-
-    #[test]
-    fn sprite_positioning_helpers_match_mame() {
-        // find_minimum_x (upright) = value + 0xf0, wrapped to 8 bits.
-        assert_eq!(CongoBongoBoard::find_minimum_x(0x10, false), 0x00);
-        assert_eq!(CongoBongoBoard::find_minimum_x(0x00, false), 0xF0);
-        // find_minimum_y returns a value in 0..=0x100 (top scanline + 1).
-        let y = CongoBongoBoard::find_minimum_y(0x20, false);
-        assert!((0..=0x100).contains(&y));
+        assert_eq!(
+            &sys.board.video.sprite_ram()[12..16],
+            &[0xAA, 0xBB, 0xCC, 0xDD]
+        );
     }
 
     #[test]
@@ -2150,28 +1554,30 @@ mod tests {
         // Sprite 0, row 0, col 0 → plane-0 set (pen 1). Sprite plane 0 is at the
         // top third of the ROM; byte 0 bit 7 is sub-cell (0,0) row 0 col 0.
         board.spr_rom[0] = 0b1000_0000;
-        board.decode_gfx_roms();
-        assert_eq!(board.sprite_cache.pixel(0, 0, 0), 1);
         // color 0, pen 1 → palette[1].
         board.palette_prom[1] = 0xFF;
-        board.build_palette();
+        board.reload_gfx();
+        assert_eq!(board.video.sprite_cache().pixel(0, 0, 0), 1);
 
         // One sprite, slot 0: Y, code 0, color 0, X. Pick X so the left column
         // lands at screen x 0: find_minimum_x(value) = value + 0xf0 = 0 → 0x10.
-        board.sprite_ram[0] = 0x80; // Y (places the sprite somewhere on screen)
-        board.sprite_ram[1] = 0x00; // code 0, no flip
-        board.sprite_ram[2] = 0x00; // color 0, no flip
-        board.sprite_ram[3] = 0x10; // X → screen column 0
+        let ram = board.video.sprite_ram_mut();
+        ram[0] = 0x80; // Y (places the sprite somewhere on screen)
+        ram[1] = 0x00; // code 0, no flip
+        ram[2] = 0x00; // color 0, no flip
+        ram[3] = 0x10; // X → screen column 0
 
-        let sy = CongoBongoBoard::find_minimum_y(0x80, false) as usize;
-        board.render_scanline(sy); // top row of the sprite
-        let off = sy * NATIVE_WIDTH * 3;
+        // find_minimum_y(0x80) is the sprite's top scanline. Scan for the row
+        // the sprite actually lands on rather than restating that math here,
+        // which `sega_zaxxon` already pins.
+        let sy = (0..240)
+            .find(|&y| {
+                board.render_scanline(y);
+                board.video.scanline_pixel(0, y) == (255, 255, 255)
+            })
+            .expect("sprite drawn on some visible row");
         assert_eq!(
-            (
-                board.scanline_buffer[off],
-                board.scanline_buffer[off + 1],
-                board.scanline_buffer[off + 2]
-            ),
+            board.video.scanline_pixel(0, sy),
             (255, 255, 255),
             "sprite pen 1 drawn at column 0"
         );
@@ -2311,11 +1717,11 @@ mod tests {
 
         // BEN (latch1 Q5) toggles the background enable.
         sys.bus_write(BusMaster::Cpu(0), 0xC01D, 0x01);
-        assert!(sys.board.bg_enabled);
+        assert!(sys.board.video.bg_enable());
 
         // Scroll, sprite-DMA, and sound latches store their bytes.
         sys.bus_write(BusMaster::Cpu(0), 0xC028, 0x84);
-        assert_eq!(sys.board.bg_position[0], 0x84);
+        assert_eq!(sys.board.video.bg_position()[0], 0x84);
         sys.bus_write(BusMaster::Cpu(0), 0xC032, 0x09);
         assert_eq!(sys.board.sprite_dma[2], 0x09);
         sys.bus_write(BusMaster::Cpu(0), 0xC038, 0x5A);
@@ -2341,7 +1747,10 @@ mod tests {
     fn save_load_round_trip() {
         let mut sys = CongoBongoSystem::new();
         sys.bus_write(BusMaster::Cpu(0), 0xA000, 0xC3);
-        sys.board.latch2 = 0xC0;
+        sys.board.write_latch2(6, true); // BS
+        sys.board.write_latch2(7, true); // CBS
+        sys.board.video.write_bg_position(0, 0x5C);
+        sys.board.video.sprite_ram_mut()[0x40] = 0x99;
         sys.board.sound_latch = 0x7E;
         sys.board.clock = 12345;
 
@@ -2353,6 +1762,10 @@ mod tests {
         assert_eq!(sys2.board.latch2, 0xC0);
         assert_eq!(sys2.board.sound_latch, 0x7E);
         assert_eq!(sys2.board.clock, 12345);
+        // The video state moved into the shared engine, so the round trip has to
+        // reach through the nested component rather than the board's own fields.
+        assert_eq!(sys2.board.video.bg_position()[0], 0x5C);
+        assert_eq!(sys2.board.video.sprite_ram()[0x40], 0x99);
     }
 
     #[test]
@@ -2376,8 +1789,8 @@ mod tests {
     }
 
     /// The gfxview `GfxRegion` layouts must decode byte-for-byte identically to
-    /// the runtime `decode_gfx_roms()` (already validated by the working
-    /// scanline renderer), so the offline export matches what the game shows.
+    /// the runtime `reload_gfx()` (already validated by the working scanline
+    /// renderer), so the offline export matches what the game shows.
     #[test]
     fn gfx_region_layouts_match_runtime_decode() {
         let mut board = CongoBongoBoard::new();
@@ -2390,27 +1803,27 @@ mod tests {
         for (i, b) in board.spr_rom.iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(13).wrapping_add(5);
         }
-        board.decode_gfx_roms();
+        board.reload_gfx();
 
         let fg = crate::gfx_registry::find("congobongo", "fg").unwrap();
         assert_caches_eq(
             &decode_gfx(&board.tx_rom, 0, fg.count as usize, fg.layout),
-            &board.tx_cache,
+            board.video.tx_cache(),
         );
         let bg = crate::gfx_registry::find("congobongo", "bg").unwrap();
         assert_caches_eq(
             &decode_gfx(&board.bg_rom, 0, bg.count as usize, bg.layout),
-            &board.bg_cache,
+            board.video.bg_cache(),
         );
         let spr = crate::gfx_registry::find("congobongo", "sprites").unwrap();
         assert_caches_eq(
             &decode_gfx(&board.spr_rom, 0, spr.count as usize, spr.layout),
-            &board.sprite_cache,
+            board.video.sprite_cache(),
         );
     }
 
     /// The gfxview palette hook must apply the same resistor-DAC math as the
-    /// runtime `build_palette()` — both route through `congo_palette_rgb`.
+    /// runtime path: both route through [`family::palette_rgb`].
     #[test]
     fn gfx_palette_matches_runtime_build() {
         let mut prom = [0u8; 0x200];
@@ -2420,9 +1833,11 @@ mod tests {
 
         let mut board = CongoBongoBoard::new();
         board.palette_prom.copy_from_slice(&prom);
-        board.build_palette();
+        board.reload_gfx();
 
-        assert_eq!(congo_palette_rgb(&prom), board.palette_rgb);
+        for (i, entry) in family::palette_rgb(&prom).iter().enumerate() {
+            assert_eq!(*entry, board.video.palette_color(i), "palette entry {i}");
+        }
     }
 
     fn assert_caches_eq(a: &gfx::GfxCache, b: &gfx::GfxCache) {
