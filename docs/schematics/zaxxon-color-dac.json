@@ -1,0 +1,85 @@
+{
+  "modules": {
+    "Zaxxon color DAC: two 3-bit ladders and one 2-bit ladder into equal 470 ohm pulldowns": {
+      "ports": {
+        "RED (P2-W)": { "direction": "output", "bits": [1] },
+        "GREEN (P2-19)": { "direction": "output", "bits": [2] },
+        "BLUE (P2-X)": { "direction": "output", "bits": [3] }
+      },
+      "cells": {
+        "uU98": {
+          "type": "U98 MRO16 28L22",
+          "port_directions": { "D0-D7 (1-9,11)": "output" },
+          "connections": { "D0-D7 (1-9,11)": [10] },
+          "attributes": {}
+        },
+        "uU96": {
+          "type": "U96 LS174",
+          "port_directions": { "D (3,4,6,11)": "input", "Q (2,5,7,10)": "output" },
+          "connections": { "D (3,4,6,11)": [10], "Q (2,5,7,10)": [11] },
+          "attributes": {}
+        },
+        "uU97": {
+          "type": "U97 LS174",
+          "port_directions": { "D (3,4,6,11)": "input", "Q (2,5,7,10)": "output" },
+          "connections": { "D (3,4,6,11)": [10], "Q (2,5,7,10)": [12] },
+          "attributes": {}
+        },
+        "uU95": {
+          "type": "U95 LS244",
+          "port_directions": {
+            "A (2,4,6,8)": "input",
+            "A (11,13,15,17)": "input",
+            "Y (18,16,14)": "output",
+            "Y (12,7,5)": "output",
+            "Y (9,3)": "output"
+          },
+          "connections": {
+            "A (2,4,6,8)": [11],
+            "A (11,13,15,17)": [12],
+            "Y (18,16,14)": [20],
+            "Y (12,7,5)": [21],
+            "Y (9,3)": [22]
+          },
+          "attributes": {}
+        },
+        "ladderR": {
+          "type": "R257 1k, R256 470, R255 220",
+          "port_directions": { "from U95 (18,16,14)": "input", "sum": "output" },
+          "connections": { "from U95 (18,16,14)": [20], "sum": [1] },
+          "attributes": {}
+        },
+        "ladderG": {
+          "type": "R254 1k, R253 470, R252 220",
+          "port_directions": { "from U95 (12,7,5)": "input", "sum": "output" },
+          "connections": { "from U95 (12,7,5)": [21], "sum": [2] },
+          "attributes": {}
+        },
+        "ladderB": {
+          "type": "R251 470, R250 220",
+          "port_directions": { "from U95 (9,3)": "input", "sum": "output" },
+          "connections": { "from U95 (9,3)": [22], "sum": [3] },
+          "attributes": {}
+        },
+        "termR": {
+          "type": "R249 470, C128 100p",
+          "port_directions": { "RED node": "input" },
+          "connections": { "RED node": [1] },
+          "attributes": {}
+        },
+        "termG": {
+          "type": "R248 470, C127 100p",
+          "port_directions": { "GREEN node": "input" },
+          "connections": { "GREEN node": [2] },
+          "attributes": {}
+        },
+        "termB": {
+          "type": "R247 470, C126 100p",
+          "port_directions": { "BLUE node": "input" },
+          "connections": { "BLUE node": [3] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

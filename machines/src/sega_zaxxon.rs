@@ -5,10 +5,17 @@
 //! **This engine has no package of its own, and should not grow one.** It is a
 //! shared subsystem rather than a board, so the drawings that cover it are the
 //! per-game packages, each recorded in that game's own file: currently only
-//! [`crate::congo_bongo`]. Nothing in this file rests on a drawing; the
-//! `U53`/`U54`/`U56`/`U74`/`U75` adder references in the background scroll math
-//! are carried over from the reference driver's own comments and have not been
-//! checked against a sheet.
+//! [`crate::congo_bongo`].
+//!
+//! One thing here does rest on a drawing: the palette, transcribed in
+//! [`docs/schematics/zaxxon-color-dac.md`](../../docs/schematics/zaxxon-color-dac.md)
+//! from Zaxxon's `IC Board A 834-0214` sheet 13. The rest does not. In
+//! particular the `U53`/`U54`/`U56`/`U74`/`U75` adder references in the
+//! background scroll math are carried over from the reference driver's own
+//! comments; Zaxxon's `IC Board B` sheet 6 does show that scroll built from
+//! 74LS283 adders fed by the vertical counter taps and an 11-bit position from
+//! P2, which is the shape those comments describe, but the reference
+//! designators on that sheet do not match and were not reconciled.
 //!
 //! The family is MAME's `sega/zaxxon.cpp`, which is *not* Sega G80: the G80
 //! raster and vector boards (`sega/segag80r.cpp`, `sega/segag80v.cpp`, Astro
@@ -47,7 +54,7 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_core::gfx::resistor::{combine_weights, compute_resistor_weights};
+use phosphor_core::gfx::resistor::compute_resnet_weights;
 use phosphor_core::gfx::sprite::{SpriteClip, draw_sprite_row};
 use phosphor_macros::Saveable;
 
@@ -155,11 +162,39 @@ pub const CHAR_INCREMENT_SPRITE: usize = 128 * 8;
 // Palette
 // ---------------------------------------------------------------------------
 
+/// The value the strongest of the three DAC networks is scaled to.
+const RGB_MAXIMUM: f64 = 255.0;
+
+/// What a PROM byte of 0xFF resolves to: not white, because the two-bit blue
+/// ladder tops out at 247 on the shared scale. Tests across the family plant
+/// 0xFF and expect "the brightest color the board can draw", and naming it
+/// keeps them from quietly re-asserting that it is white.
+#[cfg(test)]
+pub(crate) const BRIGHTEST: (u8, u8, u8) = (255, 255, 247);
+
 /// Build the 512-entry RGB palette from a family color PROM.
 ///
-/// 3-3-2 resistor DAC (per `zaxxon_palette` in `sega/zaxxon_v.cpp`): R = PROM
-/// bits 0-2 and G = bits 3-5 (1k/470/220 ohm), B = bits 6-7 (470/220 ohm), all
-/// with a 470 ohm pulldown.
+/// 3-3-2 resistor DAC: R = PROM bits 0-2 and G = bits 3-5 (1k/470/220 ohm),
+/// B = bits 6-7 (470/220 ohm), each summing into its own 470 ohm pulldown. That
+/// is the same network Galaxian uses, and it is built the same way here: each
+/// bit's weight is the Thevenin divider with the other bits grounded, and one
+/// scale is shared across all three channels.
+///
+/// **The shared scale is the point, and getting it wrong is invisible.** The
+/// two-bit blue ladder has less conductance above its node than the three-bit
+/// red and green ones, and all three pulldowns are equal, so blue tops out at
+/// 247 rather than 255 and the board's brightest color is slightly warm.
+/// Normalizing each channel to its own maximum instead, as this used to, makes
+/// blue reach 255 and shifts every mixed color: a byte of 0xF6 came out
+/// (201, 201, 255) rather than (222, 222, 247), a lavender where the board
+/// draws a near-white. Both look like plausible palettes, which is why this is
+/// stated here.
+///
+/// Read off the drawing rather than taken from a reference driver, because that
+/// is what settled it: the resistor values, the equal pulldowns, and the fact
+/// that nothing sits between a ladder and the monitor that could give a channel
+/// its own gain, are transcribed in
+/// [`docs/schematics/zaxxon-color-dac.md`](../../docs/schematics/zaxxon-color-dac.md).
 ///
 /// Only the low 256 PROM bytes are palette on any board in the family. The
 /// table is 512 entries because Congo Bongo's CBS color-bank latch adds 0x100
@@ -169,14 +204,32 @@ pub const CHAR_INCREMENT_SPRITE: usize = 128 * 8;
 /// foreground color codes, not palette, and are kept separately by
 /// [`ZaxxonVideo::color_codes`].
 pub fn palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 512] {
-    let rgweights = compute_resistor_weights(&[1000.0, 470.0, 220.0], Some(470.0));
-    let bweights = compute_resistor_weights(&[470.0, 220.0], Some(470.0));
+    let rg_raw = compute_resnet_weights(&[1000.0, 470.0, 220.0], 470.0, RGB_MAXIMUM);
+    let b_raw = compute_resnet_weights(&[470.0, 220.0], 470.0, RGB_MAXIMUM);
+
+    // Shared autoscale: the network with the greatest summed output maps to
+    // RGB_MAXIMUM, and the weaker two-bit blue network lands below it.
+    let max_out = [&rg_raw, &b_raw]
+        .iter()
+        .map(|w| w.iter().sum::<f64>())
+        .fold(0.0_f64, f64::max);
+    let scale = RGB_MAXIMUM / max_out;
+
+    let combine = |weights: &[f64], bits: &[u8]| -> u8 {
+        let v: f64 = weights
+            .iter()
+            .zip(bits)
+            .map(|(w, &b)| w * scale * b as f64)
+            .sum();
+        v.round().clamp(0.0, 255.0) as u8
+    };
+
     let mut out = [(0u8, 0u8, 0u8); 512];
     for (i, entry) in out.iter_mut().enumerate() {
         let v = palette_prom[i & 0xFF];
-        let r = combine_weights(&rgweights, &[v & 1, (v >> 1) & 1, (v >> 2) & 1]);
-        let g = combine_weights(&rgweights, &[(v >> 3) & 1, (v >> 4) & 1, (v >> 5) & 1]);
-        let b = combine_weights(&bweights, &[(v >> 6) & 1, (v >> 7) & 1]);
+        let r = combine(&rg_raw, &[v & 1, (v >> 1) & 1, (v >> 2) & 1]);
+        let g = combine(&rg_raw, &[(v >> 3) & 1, (v >> 4) & 1, (v >> 5) & 1]);
+        let b = combine(&b_raw, &[(v >> 6) & 1, (v >> 7) & 1]);
         *entry = (r, g, b);
     }
     out
@@ -1059,25 +1112,40 @@ mod tests {
         assert_eq!(zaxxon.tx_cache().pixel(0, 0, 0), 1);
     }
 
+    /// The blue channel topping out at 247 rather than 255 is the whole content
+    /// of this test, and it is what a per-channel normalization silently gets
+    /// wrong. The 0xF6 case is the byte that exposed it against a reference
+    /// capture of Zaxxon's attract screen.
     #[test]
-    fn palette_is_a_3_3_2_resistor_dac_mirrored_into_the_high_half() {
+    fn palette_is_a_3_3_2_resistor_dac_on_one_shared_scale() {
         let mut prom = [0u8; 0x200];
-        prom[1] = 0xFF; // all eight bits
+        prom[1] = 0xFF; // every bit on
         prom[2] = 0x07; // the three red bits only
+        prom[3] = 0xF6; // red and green bits 1-2, both blue bits
         let rgb = palette_rgb(&prom);
 
         assert_eq!(rgb[0], (0, 0, 0));
-        assert_eq!(rgb[1], (255, 255, 255));
+        assert_eq!(
+            rgb[1], BRIGHTEST,
+            "every bit on is not white: the two-bit blue ladder has less total \
+             conductance than the three-bit red and green ones, and on one \
+             shared scale that leaves the board's brightest color slightly warm"
+        );
         let (r, g, b) = rgb[2];
         assert_eq!((g, b), (0, 0));
         assert_eq!(r, 255, "all three red bits on gives full red");
+        assert_eq!(
+            rgb[3],
+            (222, 222, 247),
+            "both blue bits reach only 247, and red/green bits 1-2 reach 222"
+        );
 
         // Congo Bongo's CBS latch adds 0x100 to a palette index, and reads the
         // same 256 PROM bytes again. Zaxxon's upper PROM half is color codes
         // rather than palette, so this must come from the low half either way.
         prom[0x101] = 0x00;
         let rgb = palette_rgb(&prom);
-        assert_eq!(rgb[0x101], (255, 255, 255), "high half mirrors the low");
+        assert_eq!(rgb[0x101], BRIGHTEST, "high half mirrors the low");
     }
 
     #[test]
@@ -1144,7 +1212,7 @@ mod tests {
         video.render_scanline(0, &video_ram, &[]);
         assert_eq!(
             video.scanline_pixel(0, 0),
-            (255, 255, 255),
+            BRIGHTEST,
             "row 0 takes color 2 from the PROM"
         );
 
@@ -1162,7 +1230,7 @@ mod tests {
         let mut color_ram = [0u8; 0x400];
         color_ram[0] = 0x02;
         video.render_scanline(0, &video_ram, &color_ram);
-        assert_eq!(video.scanline_pixel(0, 0), (255, 255, 255));
+        assert_eq!(video.scanline_pixel(0, 0), BRIGHTEST);
     }
 
     #[test]

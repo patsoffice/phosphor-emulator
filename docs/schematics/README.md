@@ -175,3 +175,13 @@ section is there so that is obvious.
   for it today. Three of the four are transcribed as netlists. The one thing
   still missing is a frequency law for the LS629, which its datasheet does not
   give.
+- [`zaxxon-color-dac.md`](zaxxon-color-dac.md), the one entry here that is not
+  about audio, and the one that changed a picture. Zaxxon's palette runs three
+  resistor ladders into three equal 470 ohm pulldowns with no gain stage
+  anywhere, so its two-bit blue channel physically cannot reach what the
+  three-bit red and green ones do: the brightest color the board draws is
+  `(255, 255, 247)`. The emulator had normalized each channel to its own
+  maximum, which is only correct for a board that has a per-channel trim, and
+  this one does not. Also carries the sheet inventory for a partial manual, and
+  records that the two control latches and the `0xE0F0` decode are on sheets it
+  does not have.

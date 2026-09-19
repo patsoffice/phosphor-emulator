@@ -66,9 +66,9 @@ frame = "sha256:1df3a38c86de02c95a097054d0c5e296b9d6b57f1ddedd73e9e2c2ce8791840c
 [[frame]]
 machine = "congobongo"
 frames = 1800
-shows = "Attract demo: stage 1's isometric hill with the gorilla at the top right, the blue river, and the ape hopping between the burrows."
+shows = "Attract demo: stage 1's isometric hill with the gorilla at the top right, the blue river, and the ape hopping between the burrows. The picture is the same one it has always been; the hash moved when the color PROM's DAC was corrected. The 3-3-2 ladder had been normalized per channel, which let the two-bit blue reach 255, where the board runs all three channels into equal 470 ohm pulldowns with no gain stage between them and the monitor, so blue tops out at 247. That shifts almost every color slightly and so almost every pixel, without moving anything on screen. Confirmed against a reference capture: the header text now matches it exactly, (0, 222, 247) and (222, 222, 247) on identical pixel counts, where before it was (0, 201, 255) and (201, 201, 255). The circuit is transcribed in docs/schematics/zaxxon-color-dac.md."
 size = [224, 256]
-frame = "sha256:65e071431eb2c220a0eda7f5d827124dc2f9bf4d73e806d83ddb476cc71352fc"
+frame = "sha256:ef6b4191ae4e9c2caeb4170f0616b9f74951b510715a5d1cdadb7b285400c2ca"
 
 [[frame]]
 machine = "digdug"

@@ -1312,6 +1312,8 @@ mod tests {
     use phosphor_core::core::machine::InputId;
     use phosphor_core::gfx;
     use phosphor_core::gfx::decode::decode_gfx;
+    // What a PROM byte of 0xFF resolves to on this DAC, which is not white.
+    use crate::sega_zaxxon::BRIGHTEST;
 
     /// The tree fires the sound Z80 on exactly the cycles the hand-rolled
     /// accumulator did.
@@ -1421,11 +1423,7 @@ mod tests {
         board.main_map.region_data_mut(MainRegion::ColorRam)[0] = 2; // color
 
         board.render_scanline(0);
-        assert_eq!(
-            board.video.scanline_pixel(0, 0),
-            (255, 255, 255),
-            "opaque pen 1"
-        );
+        assert_eq!(board.video.scanline_pixel(0, 0), BRIGHTEST, "opaque pen 1");
         assert_eq!(
             board.video.scanline_pixel(1, 0),
             (0, 0, 0),
@@ -1447,7 +1445,7 @@ mod tests {
         board.write_latch2(1, true); // CREF1, the fg color
 
         board.render_scanline(0);
-        assert_eq!(board.video.scanline_pixel(0, 0), (255, 255, 255));
+        assert_eq!(board.video.scanline_pixel(0, 0), BRIGHTEST);
     }
 
     /// Congo Bongo's map ROM is half Zaxxon's, so its tile index wraps at
@@ -1478,7 +1476,7 @@ mod tests {
         // Enabled, uniform map → every pixel resolves to palette[8] = white.
         board.write_latch1(5, true);
         board.render_scanline(100);
-        assert_eq!(board.video.scanline_pixel(0, 100), (255, 255, 255));
+        assert_eq!(board.video.scanline_pixel(0, 100), BRIGHTEST);
     }
 
     #[test]
@@ -1573,12 +1571,12 @@ mod tests {
         let sy = (0..240)
             .find(|&y| {
                 board.render_scanline(y);
-                board.video.scanline_pixel(0, y) == (255, 255, 255)
+                board.video.scanline_pixel(0, y) == BRIGHTEST
             })
             .expect("sprite drawn on some visible row");
         assert_eq!(
             board.video.scanline_pixel(0, sy),
-            (255, 255, 255),
+            BRIGHTEST,
             "sprite pen 1 drawn at column 0"
         );
     }
