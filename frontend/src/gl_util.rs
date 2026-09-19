@@ -149,6 +149,45 @@ impl Drop for TextureTarget {
     }
 }
 
+/// The texture unit both renderers sample a cabinet's color overlay from.
+///
+/// Fixed rather than passed around because the two beam shaders are the only
+/// things that read it and neither has a unit to spare below it: the CRT stage
+/// uses 0 for the source and 1 for the halation field, and the vector stage uses
+/// 0 for its own composite.
+pub(crate) const OVERLAY_TEXTURE_UNIT: u32 = 2;
+
+/// Upload a rasterized color overlay and return its texture.
+///
+/// Linear filtering, because the sheet is stretched over the whole tube and a
+/// region boundary should not come out with the texel grid's staircase on it.
+/// Clamped, because the vector renderer's quads can reach outside the tube
+/// rectangle and wrapping would fold the far edge of the sheet over them.
+pub(crate) unsafe fn upload_overlay(rgb: &[u8], size: u32) -> gl::types::GLuint {
+    unsafe {
+        let mut tex = 0;
+        gl::GenTextures(1, &mut tex);
+        gl::BindTexture(gl::TEXTURE_2D, tex);
+        gl::TexImage2D(
+            gl::TEXTURE_2D,
+            0,
+            gl::RGB8 as i32,
+            size as i32,
+            size as i32,
+            0,
+            gl::RGB,
+            gl::UNSIGNED_BYTE,
+            rgb.as_ptr() as *const _,
+        );
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+        gl::BindTexture(gl::TEXTURE_2D, 0);
+        tex
+    }
+}
+
 pub(crate) unsafe fn compile_shader(
     src: &str,
     shader_type: gl::types::GLenum,

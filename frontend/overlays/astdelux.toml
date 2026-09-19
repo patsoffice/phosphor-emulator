@@ -1,0 +1,17 @@
+# Asteroids Deluxe (Atari, 1980)
+#
+# A cyan gel across the whole tube. The board draws in white only, exactly as
+# Asteroids does, and everything a player saw as blue-green was this sheet.
+#
+# The figure is the one the reference emulator's artwork carries, and it is a
+# transmission of the displayed value rather than of radiance: it was chosen
+# against a compositor that multiplies encoded color, which is what this
+# pipeline does too. See `screen_overlay.rs` on why that distinction is load
+# bearing and must not be "corrected" into linear light.
+
+name = "Color Overlay"
+
+[[region]]
+shape = "rect"
+bounds = [0.0, 0.0, 1.0, 1.0]
+color = [0.5333, 1.0, 1.0]

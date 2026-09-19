@@ -70,7 +70,8 @@ use phosphor_core::device::crt::{
 };
 
 use crate::gl_util::{
-    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, TextureTarget, link_program,
+    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, OVERLAY_TEXTURE_UNIT,
+    TextureTarget, link_program,
 };
 
 /// Ceiling on the profile's half-width, in taps.
@@ -268,6 +269,8 @@ uniform float sigma;
 uniform float bloom_var;
 uniform float gain;
 uniform int taps;
+uniform sampler2D overlay;
+uniform bool has_overlay;
 
 const float INV_SQRT_TAU = 0.39894228;
 
@@ -320,7 +323,24 @@ void main() {
         // into itself.
         sum += lit * exp(-(d * d) / (2.0 * sig * sig)) * INV_SQRT_TAU / sig;
     }
-    color = vec4(sum * gain, 1.0);
+
+    // The cabinet's color overlay, if it had one: a sheet of gel in front of the
+    // glass, so it attenuates what the tube emits. Sampled at `uv` rather than
+    // at `s`, because the sheet is glued to the cabinet and does not turn with a
+    // rotated monitor: `uv` is the picture as viewed and `s` is the machine's
+    // own framebuffer, and the flip and swap above are exactly the difference.
+    //
+    // Here rather than at the composite so that it lands before the clip to
+    // eight bits, which is where the light really loses it. A highlight the
+    // display cannot show still gives up the same fraction of its red. It is
+    // also why one multiply covers both the direct light and the halation
+    // skirt: the skirt is built from this pass's output, and a constant
+    // per-channel factor passes straight through a blur.
+    vec3 lit = sum * gain;
+    if (has_overlay) {
+        lit *= texture(overlay, uv).rgb;
+    }
+    color = vec4(lit, 1.0);
 }
 "#;
 
@@ -424,6 +444,11 @@ pub struct CrtRenderer {
     bloom_var_uniform: gl::types::GLint,
     gain_uniform: gl::types::GLint,
     taps_uniform: gl::types::GLint,
+    overlay_uniform: gl::types::GLint,
+    has_overlay_uniform: gl::types::GLint,
+    /// The cabinet's color overlay, uploaded once. Owned here. 0 for a machine
+    /// that had no sheet in front of its tube, which is most of them.
+    overlay_tex: gl::types::GLuint,
     /// The machine's frame as uploaded each frame. Owned here.
     src_tex: gl::types::GLuint,
     src_size: (u32, u32),
@@ -469,6 +494,8 @@ impl CrtRenderer {
             let bloom_var_uniform = uniform("bloom_var");
             let gain_uniform = uniform("gain");
             let taps_uniform = uniform("taps");
+            let overlay_uniform = uniform("overlay");
+            let has_overlay_uniform = uniform("has_overlay");
 
             let mut vao = 0;
             gl::GenVertexArrays(1, &mut vao);
@@ -525,6 +552,9 @@ impl CrtRenderer {
                 bloom_var_uniform,
                 gain_uniform,
                 taps_uniform,
+                overlay_uniform,
+                has_overlay_uniform,
+                overlay_tex: 0,
                 src_tex,
                 src_size: (0, 0),
                 out: TextureTarget::new(),
@@ -539,6 +569,25 @@ impl CrtRenderer {
                 composite_halo_gain_uniform,
                 targets: None,
                 halo_reported: false,
+            }
+        }
+    }
+
+    /// Hang a cabinet's color overlay in front of the tube, or take it away.
+    ///
+    /// Set once when the machine is chosen rather than per frame: the sheet is
+    /// physically part of the cabinet and cannot change while the game runs.
+    pub fn set_overlay(&mut self, overlay: Option<&crate::screen_overlay::ScreenOverlay>) {
+        unsafe {
+            if self.overlay_tex != 0 {
+                gl::DeleteTextures(1, &self.overlay_tex);
+                self.overlay_tex = 0;
+            }
+            if let Some(o) = overlay {
+                self.overlay_tex = crate::gl_util::upload_overlay(
+                    o.pixels(),
+                    crate::screen_overlay::ScreenOverlay::SIZE,
+                );
             }
         }
     }
@@ -648,6 +697,15 @@ impl CrtRenderer {
             // light being emitted.
             gl::Uniform1f(self.gain_uniform, beam.gain);
             gl::Uniform1i(self.taps_uniform, beam.taps);
+            // The cabinet's gel, on its own unit so it does not disturb the
+            // source on unit 0 or the halation field the composite puts on 1.
+            gl::Uniform1i(self.has_overlay_uniform, (self.overlay_tex != 0) as i32);
+            if self.overlay_tex != 0 {
+                gl::Uniform1i(self.overlay_uniform, OVERLAY_TEXTURE_UNIT as i32);
+                gl::ActiveTexture(gl::TEXTURE0 + OVERLAY_TEXTURE_UNIT);
+                gl::BindTexture(gl::TEXTURE_2D, self.overlay_tex);
+                gl::ActiveTexture(gl::TEXTURE0);
+            }
             gl::DrawArrays(gl::TRIANGLES, 0, 3);
 
             if let Some((_, core_tex)) = core
@@ -873,6 +931,9 @@ impl Drop for CrtRenderer {
         self.drop_targets();
         unsafe {
             gl::DeleteTextures(1, &self.src_tex);
+            if self.overlay_tex != 0 {
+                gl::DeleteTextures(1, &self.overlay_tex);
+            }
             gl::DeleteVertexArrays(1, &self.vao);
             gl::DeleteProgram(self.program);
             gl::DeleteProgram(self.blur_program);

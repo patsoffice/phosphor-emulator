@@ -24,7 +24,8 @@ use phosphor_core::device::crt::{
 use phosphor_core::device::dvg::VectorLine;
 
 use crate::gl_util::{
-    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, link_program,
+    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, OVERLAY_TEXTURE_UNIT,
+    link_program,
 };
 
 /// Intensity-to-brightness lookup table (4-bit, 0 = invisible).
@@ -55,6 +56,7 @@ in vec4 segment;
 in vec3 v_color;
 out vec3 f_color;
 out vec2 f_pos;
+out vec2 f_overlay_uv;
 flat out vec4 f_segment;
 uniform vec2 display_half_size;
 uniform int rotation;
@@ -69,6 +71,14 @@ void main() {
     if (rotation == 270) {
         ndc = vec2(ndc.x, -ndc.y);
     }
+    // Where this lands on the tube face as a player sees it, x from the left and
+    // y from the top, which is the space a cabinet's color overlay is described
+    // in. Taken here, after the rotation and *before* the flip below: the
+    // rotation is the monitor turning in the cabinet, which the sheet turns
+    // with, and the flip is a quirk of drawing into a texture, which it does
+    // not. Read after the flip, an overlay would come out upside down in
+    // exactly the case where a debug panel is open.
+    f_overlay_uv = vec2(ndc.x + 1.0, 1.0 - ndc.y) * 0.5;
     // Drawing into a texture rather than at the window. GL puts texel row 0 at
     // the bottom, where NDC y is -1, and egui draws texel row 0 at the top of
     // the quad, so the picture arrives upside down unless it is turned over
@@ -92,9 +102,12 @@ const FRAGMENT_SHADER_SRC: &str = r#"
 #version 150
 in vec3 f_color;
 in vec2 f_pos;
+in vec2 f_overlay_uv;
 flat in vec4 f_segment;
 out vec4 color;
 uniform float inv_two_sigma_sq;
+uniform sampler2D overlay;
+uniform bool has_overlay;
 void main() {
     // Distance from this fragment to the segment, not to the infinite line, so
     // the ends are round the way a round spot arriving and leaving is round.
@@ -108,7 +121,21 @@ void main() {
     // The profile peaks at the colour it was given, which is the same
     // convention the CPU rasterizer uses: a full-intensity vector reaches full
     // white along its centre and no further.
-    color = vec4(f_color * exp(-dot(e, e) * inv_two_sigma_sq), 1.0);
+    vec3 lit = f_color * exp(-dot(e, e) * inv_two_sigma_sq);
+
+    // The cabinet's color overlay: a gel in front of the glass, so it takes its
+    // share of what the beam emits. This is the whole of Asteroids Deluxe's
+    // color, whose board draws in white exactly as Asteroids does.
+    //
+    // This pass draws twice, once into the reduced field the glow is built from
+    // and once as the core, so tinting here lands on both and the composite
+    // that adds them must not tint again. Doing it per fragment rather than as
+    // a pass afterwards is also what lets the sheet vary across the tube, which
+    // a banded overlay needs.
+    if (has_overlay) {
+        lit *= texture(overlay, f_overlay_uv).rgb;
+    }
+    color = vec4(lit, 1.0);
 }
 "#;
 
@@ -164,6 +191,11 @@ pub struct VectorRenderer {
     uniform_flip_y: gl::types::GLint,
     uniform_inv_two_sigma_sq: gl::types::GLint,
     uniform_energy_scale: gl::types::GLint,
+    uniform_overlay: gl::types::GLint,
+    uniform_has_overlay: gl::types::GLint,
+    /// The cabinet's color overlay, uploaded once. Owned here. 0 for a machine
+    /// with no sheet in front of its tube.
+    overlay_tex: gl::types::GLuint,
     vertex_buf: Vec<Vertex>,
 
     blur_program: gl::types::GLuint,
@@ -225,6 +257,9 @@ impl VectorRenderer {
             uniform_flip_y,
             uniform_inv_two_sigma_sq,
             uniform_energy_scale,
+            uniform_overlay: uniform(program, "overlay"),
+            uniform_has_overlay: uniform(program, "has_overlay"),
+            overlay_tex: 0,
             // Six vertices per vector, and a busy frame runs to a couple of
             // thousand vectors.
             vertex_buf: Vec::with_capacity(16384),
@@ -235,6 +270,25 @@ impl VectorRenderer {
             composite_amount: uniform(composite_program, "amount"),
             fullscreen_vao,
             halo: None,
+        }
+    }
+
+    /// Hang a cabinet's color overlay in front of the tube, or take it away.
+    ///
+    /// Set once when the machine is chosen rather than per frame: the sheet is
+    /// physically part of the cabinet and cannot change while the game runs.
+    pub fn set_overlay(&mut self, overlay: Option<&crate::screen_overlay::ScreenOverlay>) {
+        unsafe {
+            if self.overlay_tex != 0 {
+                gl::DeleteTextures(1, &self.overlay_tex);
+                self.overlay_tex = 0;
+            }
+            if let Some(o) = overlay {
+                self.overlay_tex = crate::gl_util::upload_overlay(
+                    o.pixels(),
+                    crate::screen_overlay::ScreenOverlay::SIZE,
+                );
+            }
         }
     }
 
@@ -371,6 +425,12 @@ impl VectorRenderer {
         unsafe {
             gl::Uniform1f(self.uniform_inv_two_sigma_sq, 1.0 / (2.0 * sigma * sigma));
             gl::Uniform1f(self.uniform_energy_scale, energy_scale);
+            // Both beam passes come through here, which is what makes this the
+            // one place the gel has to be declared: the core and the glow's
+            // source then carry it alike, and the composite that adds them
+            // together must not apply it a second time.
+            gl::Uniform1i(self.uniform_has_overlay, (self.overlay_tex != 0) as i32);
+            gl::Uniform1i(self.uniform_overlay, OVERLAY_TEXTURE_UNIT as i32);
             gl::BindVertexArray(self.vao);
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
             gl::BufferData(
@@ -462,6 +522,17 @@ impl VectorRenderer {
         let core_scale = core_scale * settings.brightness.max(0.0);
 
         let half_size = (display_w as f32 / 2.0, display_h as f32 / 2.0);
+
+        // The cabinet's gel, bound for as long as the beam program is in use.
+        // Both beam passes below read it, and neither the blur nor the composite
+        // touches this unit, so binding it once here covers the frame.
+        unsafe {
+            if self.overlay_tex != 0 {
+                gl::ActiveTexture(gl::TEXTURE0 + OVERLAY_TEXTURE_UNIT);
+                gl::BindTexture(gl::TEXTURE_2D, self.overlay_tex);
+                gl::ActiveTexture(gl::TEXTURE0);
+            }
+        }
 
         // Pass one: the glow's source, into the reduced field.
         if halo_amount > 0.0 {
@@ -575,6 +646,9 @@ impl Drop for VectorRenderer {
     fn drop(&mut self) {
         self.drop_halo_targets();
         unsafe {
+            if self.overlay_tex != 0 {
+                gl::DeleteTextures(1, &self.overlay_tex);
+            }
             gl::DeleteBuffers(1, &self.vbo);
             gl::DeleteVertexArrays(1, &self.vao);
             gl::DeleteVertexArrays(1, &self.fullscreen_vao);

@@ -361,10 +361,23 @@ pub fn run(
         }
     }
 
+    // The sheet of colored plastic this cabinet had in front of its tube, if it
+    // had one. Loaded once: it is part of the cabinet and cannot change while
+    // the game runs, and both renderers keep it as a texture rather than being
+    // handed it per frame.
+    let screen_overlay = crate::screen_overlay::ScreenOverlay::for_machine(machine_name);
+    if let Some(o) = &screen_overlay {
+        log::info!("{machine_name}: color overlay '{}'", o.name);
+    }
+    video.set_overlay(screen_overlay.as_ref());
+
     // Detect vector display machines and create GL renderer.
     let mut vector_renderer = machine
         .vector_display_list()
         .map(|_| crate::vector_gl::VectorRenderer::new());
+    if let Some(r) = vector_renderer.as_mut() {
+        r.set_overlay(screen_overlay.as_ref());
+    }
 
     let audio_state = crate::audio::init(
         &sdl_audio,
@@ -1070,7 +1083,15 @@ pub fn run(
                     // buffer and write it at native dimensions, which is the
                     // picture turned a quarter turn on every machine with a
                     // rotated monitor.
-                    let (sw, sh, shot) = phosphor_harness::render_oriented(machine);
+                    let (sw, sh, mut shot) = phosphor_harness::render_oriented(machine);
+                    // Then the cabinet's gel over it, because a screenshot is
+                    // meant to be what the player was looking at. The harness
+                    // helper deliberately does not know about overlays: it is
+                    // also what the golden pins hash, and those pin what the
+                    // board draws rather than what the cabinet showed.
+                    if let Some(o) = &screen_overlay {
+                        o.apply(&mut shot, sw, sh);
+                    }
                     match crate::screenshot::save_screenshot(
                         &shot,
                         sw,

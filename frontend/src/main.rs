@@ -17,6 +17,7 @@ mod logging;
 mod movie;
 mod overlay;
 mod profile;
+mod screen_overlay;
 mod screenshot;
 mod settings_ui;
 mod state;

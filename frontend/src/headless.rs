@@ -107,6 +107,13 @@ pub fn run(
     // can be compared against one. Rendering straight into a native-sized buffer
     // wrote the picture a quarter turn off for every machine with a rotated
     // monitor, and silently, since the dimensions it printed agreed with it.
+    //
+    // A cabinet's color overlay is deliberately **not** applied here, and the
+    // sentence above is why: this capture exists to be diffed against a golden
+    // pin, and the pins hold what the board draws rather than what the cabinet
+    // showed. Tinting it would break the one thing headless mode is for. The
+    // interactive screenshot does apply it, because that one is a picture of
+    // what the player was looking at.
     let (dw, dh, rgb) = phosphor_harness::render_oriented(machine);
 
     let png_path = format!("{out}.png");

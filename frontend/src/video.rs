@@ -139,6 +139,12 @@ impl Video {
         }
     }
 
+    /// Hang the cabinet's color overlay in front of the tube, for the raster
+    /// path. The vector renderer is not owned here and is told separately.
+    pub fn set_overlay(&mut self, overlay: Option<&crate::screen_overlay::ScreenOverlay>) {
+        self.crt.set_overlay(overlay);
+    }
+
     /// How many pixels the CRT stage should draw into.
     ///
     /// The displayed picture, scaled up until it fills the window, because the

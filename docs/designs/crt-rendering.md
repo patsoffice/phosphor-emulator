@@ -122,6 +122,51 @@ built, since deriving per machine still beats a uniform shader and the knob
 covers the spread, but it is why the shollow notes are worth keeping rather than
 rounding off.
 
+## Color overlays are the exception to "monitor is not a property of a game"
+
+The paragraph above rules out a per-machine monitor table, and that ruling
+stands. A color overlay is not a counterexample to it, because it is not the
+monitor.
+
+The overlay is a sheet of colored plastic in front of the glass, and it is how a
+monochrome board shipped a color game before color tubes were cheap. Asteroids
+Deluxe draws in white exactly as Asteroids does, and every blue-green thing a
+player ever saw on one was the sheet. That makes it per game in the way a
+chassis is not: the sheet was cut for that game's artwork and shipped in that
+game's cabinet, and a kit conversion that swapped the boards swapped the sheet
+with them. There is no equivalent of "whatever the operator had in the shop",
+because a Lunar Lander gel in an Asteroids Deluxe cabinet is not a different
+picture, it is the wrong game's picture.
+
+So the two facts sit in different places for the same reason: focus quality
+varies per cabinet and belongs on a knob, and a gel does not vary at all and
+belongs in a file keyed by the machine. `frontend/overlays/*.toml` holds them,
+in the reference emulator's vocabulary (regions with normalized bounds and a
+color, multiplied over the picture) and its format changed from XML to TOML to
+match the rest of this tree's data.
+
+Three things follow, and the second is the one worth remembering.
+
+- **It composites inside the beam shaders, not after them.** The CRT stage's
+  intermediates are `RGBA16F` and deliberately carry values above 1.0; only the
+  last write into egui's texture clips to eight bits. Light is attenuated on its
+  way out of the tube, so a highlight the display cannot show still gives up the
+  same fraction of its red, and it gives it up before the clip rather than
+  after. It also lands the tint exactly once on both the direct light and the
+  halation skirt for nothing, since the skirt is built from the already-tinted
+  core and a constant per-channel factor commutes with a blur.
+- **The numbers are transmissions of displayed value, not of radiance, and
+  converting them to linear light without re-deriving them is a bug that will
+  look like a fix.** They were chosen by eye against a compositor that
+  multiplies encoded color. Asteroids Deluxe's 0.5333 decodes to about 0.25 in
+  linear light, so moving the space alone turns a cyan sheet into a barely
+  tinted one. Either both move or neither does.
+- **The golden pins never see it**, by the same argument as the CRT stage below:
+  the sheet is not drawn by the board. Adding an overlay to a machine cannot
+  move a hash. The interactive screenshot does apply it, because that one is a
+  picture of what the player was looking at; `--headless` deliberately does not,
+  because that one exists to be diffed against a pin.
+
 ## The decisions
 
 Three forks the epic deliberately left open, resolved with the requester on
