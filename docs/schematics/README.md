@@ -175,6 +175,13 @@ section is there so that is obvious.
   for it today. Three of the four are transcribed as netlists. The one thing
   still missing is a frequency law for the LS629, which its datasheet does not
   give.
+- [`zaxxon-discrete-sound.md`](zaxxon-discrete-sound.md), the whole of Zaxxon's
+  sound board, which has no sound chip on it: twelve active-low PPI bits gating
+  eleven analog voices into one passive mix node. The half of it worth reading
+  twice is the player-ship level, where the issue's description of the ladder
+  was wrong in three ways at once and `PA0` turns out to be the *more*
+  significant bit. Also eleven summing legs that are all the same 51 kOhm, so
+  the board's entire balance is the attenuator in front of each one.
 - [`zaxxon-color-dac.md`](zaxxon-color-dac.md), the one entry here that is not
   about audio, and the one that changed a picture. Zaxxon's palette runs three
   resistor ladders into three equal 470 ohm pulldowns with no gain stage
