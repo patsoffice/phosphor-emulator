@@ -733,15 +733,52 @@ const C43: f64 = 6.8e-6; // -> 46 ms
 const R48: f64 = 47_000.0; // U6 555, the homing missile's swept tone
 const R49: f64 = 68_000.0;
 const C45: f64 = 0.01e-6;
-/// `1.44 / ((R48 + 2*R49) * C45)`: the free-running pitch `C46` modulates.
+/// `1.44 / ((R48 + 2*R49) * C45)` = **787 Hz**: the pitch `U6` free-runs at when
+/// its control pin is left alone.
+///
+/// Nothing in the built circuit calls this, because [`Timer555`] integrates the
+/// capacitor against a live control pin rather than being handed a rate. It is
+/// the closed form that the component has to agree with when the control pin is
+/// parked, and `the_homing_missiles_555_free_runs_where_its_parts_say` is what
+/// makes it.
+#[allow(dead_code)] // checked against Timer555 by a test; see above
 fn homing_missile_hz() -> f64 {
     1.44 / ((R48 + 2.0 * R49) * C45)
 }
-/// **INVENTED.** How far the envelope on `U6`'s control-voltage pin pulls that
-/// pitch. The `U4` summing stage ahead of it is read (`R45` 68 k, `R46` 200 k,
-/// `R47` 10 k, `C46`), but a 555's control pin sweeps by an amount that depends
-/// on the source impedance, which was not worked out.
-const HOMING_MISSILE_SWEEP: f64 = 0.55;
+// R42 and R43 set U5's two thresholds. Nothing computes with them because the
+// conclusion they support is that the thresholds are never both reachable, so
+// the stage latches: see `homing_envelope_tau`. A test holds them to it.
+#[allow(dead_code)] // the claim it supports is checked by a test
+const R42: f64 = 51_000.0; // U5's comparator input, from the 7406
+#[allow(dead_code)] // the claim it supports is checked by a test
+const R43: f64 = 100_000.0; // its POSITIVE feedback: U5 is a latch, not an amp
+const R45: f64 = 68_000.0; // the envelope into U4's summing node
+const R46: f64 = 200_000.0; // NOISE 1 into the same node
+const R47: f64 = 10_000.0; // U4's feedback: gains of 0.147 and 0.05
+const C46: f64 = 2.2e-6; // U4's output into U6's control pin
+
+/// The impedance a bipolar 555's control pin presents, about **3.3 kOhm**.
+///
+/// **Not a reading**: it is the part's internal 5 k / 5 k / 5 k ladder seen from
+/// the tap between the upper two, so 5 k in parallel with 10 k. It matters
+/// because `C46` 2.2 uF against it is a 7 ms high-pass, which is six times
+/// faster than the 46 ms envelope `R44` and `C43` make. The envelope therefore
+/// reaches pin 5 **differentiated**: a chirp at the gate's edge rather than a
+/// held sweep, and the noise, which is broadband, passes whole.
+const CV_PIN_R: f64 = 5_000.0 * 10_000.0 / 15_000.0;
+
+/// `U5`(5,6,7) is a comparator with `R43` as **positive** feedback, so it
+/// latches rather than amplifying, and `R44` with `C43` slews its output.
+///
+/// With the gate shut the 7406 holds `R42` near ground and the latch sits at the
+/// bottom of its swing; with the gate open `R55` pulls `R42` to +12 V, the
+/// thresholds move above anything the capacitor can reach, and it sits at the
+/// top. So the node `C43` holds is a clean exponential between the op-amp's two
+/// rails with a 46 ms time constant, and the hysteresis is there to keep the
+/// edge clean rather than to oscillate.
+fn homing_envelope_tau() -> f64 {
+    R44 * C43
+}
 
 /// `U6` runs on +5 V (pins 4 and 8), so its square output swings to about
 /// `Vcc - 1.2`, and `R51`/`R52` divide that before `C47` and the 4016B.
@@ -1077,6 +1114,10 @@ struct Timer555 {
     /// Discharge path: `R_b`.
     r_discharge: f64,
     c: f64,
+    /// The part's own supply. `U18` and `U7` run on +12 V and `U6` on +5 V, and
+    /// the difference is not only the output level: the capacitor charges toward
+    /// this, so it is inside the rate as well.
+    vcc: f64,
     v_high: f64,
     v_low: f64,
     /// Report the timing capacitor rather than pin 3. See [`Timer555::tapping_the_cap`].
@@ -1087,13 +1128,18 @@ struct Timer555 {
 
 impl Timer555 {
     fn new(r_charge: f64, r_discharge: f64, c: f64) -> Self {
+        Self::on_supply(r_charge, r_discharge, c, V12)
+    }
+
+    fn on_supply(r_charge: f64, r_discharge: f64, c: f64, vcc: f64) -> Self {
         Self {
             r_charge,
             r_discharge,
             c,
-            // A bipolar 555 on this board's +12 V drops about 1.7 V at its
-            // output when sourcing and saturates near ground when sinking.
-            v_high: V12 - 1.7,
+            vcc,
+            // A bipolar 555 drops about 1.7 V at its output when sourcing and
+            // saturates near ground when sinking.
+            v_high: vcc - 1.7,
             v_low: V_SAT,
             tap_cap: false,
             cap: 0.0,
@@ -1114,22 +1160,22 @@ impl Timer555 {
         self.tap_cap = true;
         // The capacitor is where this one starts its life, at the lower
         // threshold, rather than discharged.
-        self.cap = V12 / 3.0;
+        self.cap = self.vcc / 3.0;
         self
     }
 }
 
 impl CustomComponent for Timer555 {
     fn reset(&mut self) {
-        self.cap = if self.tap_cap { V12 / 3.0 } else { 0.0 };
+        self.cap = if self.tap_cap { self.vcc / 3.0 } else { 0.0 };
         self.high = false;
     }
 
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let upper = inputs[0].clamp(0.05, V12);
+        let upper = inputs[0].clamp(0.05, self.vcc);
         let lower = upper * 0.5;
         if self.high {
-            self.cap += (V12 - self.cap) * dt / (self.r_charge * self.c);
+            self.cap += (self.vcc - self.cap) * dt / (self.r_charge * self.c);
             if self.cap >= upper {
                 self.high = false;
             }
@@ -1676,16 +1722,46 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let bs_gated = b.multiply("BATTLESHIP_SW", bs_level, battleship);
     let battleship_leg = mix_leg(&mut b, "BATTLESHIP_LEG", bs_gated, LEG_BATTLESHIP);
 
-    // --- The homing missile: a 555 swept by an RC envelope -------------------
-    let hm_env = b.rc_envelope("HOMING_ENV", homing_missile, R44 * C43, R44 * C43);
-    let hm_sweep = b.gain(
-        "HOMING_SWEEP",
-        hm_env,
-        homing_missile_hz() * HOMING_MISSILE_SWEEP,
+    // --- The homing missile: a 555 whose control pin is driven ---------------
+    // Not a frequency multiplied by an envelope. `U4`(5,6,7) sums the envelope
+    // and `NOISE 1` and hands the result to `U6`'s pin 5, and what comes out of
+    // a 555 with a live control pin is not a shifted square but a different
+    // duty cycle as well, so the part is simulated rather than solved.
+    //
+    // `C46` is the reason the two inputs arrive differently. Against the pin's
+    // own 3.3 kOhm it is a 7 ms high-pass, six times faster than the envelope
+    // behind it, so the envelope reaches the pin as a chirp at the gate's edge
+    // while the noise passes whole and stays. The voice is a noise-warbled tone
+    // with a chirp on the front, not a tone that sweeps and holds: the previous
+    // model multiplied the pitch by an envelope that never decayed while the
+    // gate was held, so it sat an octave high for the whole note.
+    let hm_latch = b.logic_levels(
+        "U5_LATCH",
+        homing_missile,
+        V6 - OPAMP_SWING,
+        V6 + OPAMP_SWING,
     );
-    let hm_base = b.constant("HOMING_BASE", homing_missile_hz());
-    let hm_freq = b.add("HOMING_FREQ", &[hm_base, hm_sweep]);
-    let hm_tone = b.variable_square("HOMING_TONE", hm_freq);
+    let hm_c43 = b.rc_envelope(
+        "U5_C43",
+        hm_latch,
+        homing_envelope_tau(),
+        homing_envelope_tau(),
+    );
+    let hm_midrail = b.constant("U4_SUM_MIDRAIL", -V6);
+    let hm_env_dev = b.add("U4_SUM_ENV_DEV", &[hm_c43, hm_midrail]);
+    let hm_env_leg = b.gain("U4_SUM_ENV", hm_env_dev, -R47 / R45);
+    let hm_noise_leg = b.gain("U4_SUM_NOISE", noise1, -R47 / R46);
+    let hm_sum = b.add("U4_SUM", &[hm_env_leg, hm_noise_leg]);
+    // C46 into the control pin's own impedance: what survives is the AC.
+    let hm_cv_ac = b.rc_high_pass("C46", hm_sum, CV_PIN_R, C46);
+    // The pin's DC is the part's own two thirds of its +5 V supply.
+    let hm_cv_rest = b.constant("U6_CV_REST", V5 * 2.0 / 3.0);
+    let hm_cv = b.add("U6_CV", &[hm_cv_ac, hm_cv_rest]);
+    let hm_tone = b.custom(
+        "U6_555",
+        vec![hm_cv],
+        Box::new(Timer555::on_supply(R48 + R49, R49, C45, V5)),
+    );
     // U6 runs on +5 V, so its square reaches about Vcc - 1.2; R51/R52 then
     // divide it before C47 and the 4016B. Half the swing each side of the
     // mid-rail, because C47 blocks the DC.
@@ -2430,6 +2506,56 @@ mod tests {
         );
         assert!((lo - 300.0).abs() < 5.0, "bottom of the sweep {lo} Hz");
         assert!((hi - 600.0).abs() < 10.0, "top of the sweep {hi} Hz");
+    }
+
+    /// `U6`'s control pin is driven, so its rate is simulated rather than
+    /// solved. Park the pin where the part's own divider would and the component
+    /// has to land on the closed form; and check the claim that `U5` latches.
+    #[test]
+    fn the_homing_missiles_555_free_runs_where_its_parts_say() {
+        let mut t = Timer555::on_supply(R48 + R49, R49, C45, V5);
+        let dt = 1.0 / 384_000.0;
+        let cv = [V5 * 2.0 / 3.0];
+        for _ in 0..38_400 {
+            t.step(&cv, dt);
+        }
+        let (mut last, mut rises, mut first, mut end) = (0.0f64, 0usize, 0usize, 0usize);
+        for i in 0..384_000 {
+            let v = t.step(&cv, dt);
+            if last < 1.0 && v >= 1.0 {
+                rises += 1;
+                if rises == 1 {
+                    first = i;
+                }
+                end = i;
+            }
+            last = v;
+        }
+        assert!(rises >= 3, "only {rises} periods seen");
+        let hz = (rises - 1) as f64 / ((end - first) as f64 * dt);
+        assert!(
+            (hz - homing_missile_hz()).abs() < 3.0,
+            "{hz} Hz against the parts' {}",
+            homing_missile_hz()
+        );
+
+        // U5 latches rather than oscillating: with the gate shut its threshold
+        // band sits BELOW what the capacitor settles to, and with the gate open
+        // it sits ABOVE, so neither state can cross back. Thresholds are
+        // `V_gate * R43/(R42+R43) + Vout * R42/(R42+R43)`.
+        let threshold =
+            |v_gate: f64, v_out: f64| (v_gate / R42 + v_out / R43) / (1.0 / R42 + 1.0 / R43);
+        let (lo_rail, hi_rail) = (V6 - OPAMP_SWING, V6 + OPAMP_SWING);
+        // Shut: the 7406 holds the input near ground, the output is at the low
+        // rail, and the capacitor settles there too, which is BELOW the
+        // threshold that would flip it back up.
+        assert!(
+            threshold(V_SAT, lo_rail) < lo_rail,
+            "shut: it would restart"
+        );
+        // Open: R55 pulls the input to +12 V and the capacitor cannot reach the
+        // threshold that would flip it down.
+        assert!(threshold(V12, hi_rail) > hi_rail, "open: it would restart");
     }
 
     #[test]
