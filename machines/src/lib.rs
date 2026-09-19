@@ -652,6 +652,7 @@ macro_rules! register_machine {
 pub(crate) use register_machine;
 
 pub mod astdelux;
+pub mod astdelux_sound;
 pub mod asteroids;
 pub mod asteroids_sound;
 pub mod atari_avg;

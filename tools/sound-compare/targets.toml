@@ -359,10 +359,33 @@ mixer difference the moment the device models it. phosphor-emulator-3m0n."""
 [[target]]
 id = "astdelux-discrete"
 machines = ["astdelux"]
-status = "missing"
+status = "partial"
 notes = """
-Explosion and latch paths mixed with the board's POKEYs. The register writes are
-stubbed; the POKEYs work. Phase 8 item 1."""
+MODELED 2026-09-19 in machines/src/astdelux_sound.rs, from sheet 2 side B of the
+Cabaret drawing package. Thrust and explosion, which are the two sounds the POKEY
+at M7/8 does not make; before this the 0x3600 and 0x3E00 writes were stubs and
+audio-latch Q3 was discarded, so both were silent.
+
+`partial` and not `implemented-needs-validation` because nothing has been
+compared: there is no adapter and there are no scenarios here, and the unit tests
+in the module check the circuit against the drawing rather than against a
+reference rendering.
+
+Built from the drawing rather than from a reference netlist, and it differs from
+one in three places: the explosion's pitch is the four gates on P7's load inputs
+(divide by 16-N, giving 12/6/3/5) rather than a table, its volume is R6's four
+preferred values 5.6k/12k/22k/47k rather than a linear fraction, and both paths
+share the one R8/P8 register as the board has them rather than each owning a
+noise source.
+
+NEEDS VALIDATION on the level the discrete paths sit at against the POKEY. The
+three summing resistors into P11 are known (R85 4.7k explosion, R158 3.3k thrust,
+R69 100k POKEY, against R86 10k feedback) and they set the ratio *among* the
+three, but a weight multiplies a voltage and the POKEY's AUD swing against an
+LM324 output is not on any sheet. DISCRETE_SWING_OVER_POKEY is the one fitted
+number and the only thing between this and a mix derived entirely from the
+drawing. Retiring it means expressing both sides in volts, which is the same open
+question asteroids-discrete has for its own mixer; answer them together."""
 
 [[target]]
 id = "namco-54xx-explosion"

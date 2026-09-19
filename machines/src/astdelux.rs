@@ -254,6 +254,10 @@ pub struct AsteroidsDeluxeSystem {
     // POKEY sound chip at 0x2C00–0x2C0F
     pokey: Pokey,
 
+    /// Thrust and explosion, the two sounds the POKEY does not make. They sum
+    /// with it at P11; see [`crate::astdelux_sound`].
+    sound: crate::astdelux_sound::AsteroidsDeluxeDiscreteSound,
+
     // I/O — active-HIGH inputs (default 0x00 = all released)
     in0: u8,
     in1: u8,
@@ -328,6 +332,7 @@ impl AsteroidsDeluxeSystem {
             // Asteroids Deluxe: VROM at DVG 0x0800, size 0x1000
             board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1000, atari_dvg::WINDOW),
             pokey: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
+            sound: crate::astdelux_sound::AsteroidsDeluxeDiscreteSound::new(),
             in0: 0x00,
             in1: 0x00,
             dip_switches: 0x00,
@@ -379,6 +384,7 @@ impl AsteroidsDeluxeSystem {
             AsteroidsDeluxeBus {
                 board: &mut self.board,
                 pokey: &mut self.pokey,
+                sound: &mut self.sound,
                 earom: &mut self.earom,
                 in0: self.in0,
                 in1: self.in1,
@@ -431,6 +437,7 @@ impl Default for AsteroidsDeluxeSystem {
 struct AsteroidsDeluxeBus<'a> {
     board: &'a mut AtariDvgBoard,
     pokey: &'a mut Pokey,
+    sound: &'a mut crate::astdelux_sound::AsteroidsDeluxeDiscreteSound,
     earom: &'a mut Er2055,
     in0: u8,
     in1: u8,
@@ -575,7 +582,12 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                 0x3200..=0x323F => self.earom.latch(addr & 0x3F, data),
 
                 0x3400 => self.board.watchdog_frame_count = 0,
-                0x3600 => { /* explosion sound stub */ }
+
+                // Explosion. The memory map splits this byte as `Explosion
+                // pitch` on D7-D6 and `Explosion volume` on D5-D2, and F6
+                // latches all six. This used to be discarded, which is why
+                // nothing this board blew up made a sound.
+                0x3600 => self.sound.write_explosion(data),
 
                 // EAROM control: 0x3A00
                 // Bit 0: CK (clock), Bit 1: !C1, Bit 2: C2, Bit 3: CS1
@@ -599,21 +611,34 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                     self.earom.write_control(clock, cs1, c1, c2);
                 }
 
-                // Audio latch (LS259). Addressable: the low three address bits
-                // pick the output and the value is data bit 7, not bit 0. Only
-                // Q4, RAMSEL, is modeled; the rest are lamps, coin counters and
-                // sound enables that nothing here reads back.
+                // Audio latch, the M10 LS259. Addressable: the low three address
+                // bits pick the output and the value is data bit 7, not bit 0,
+                // because DB7 is what reaches the latch's D input.
+                //
+                // Two of the eight do something here. Q4 is `Bank select`,
+                // which is RAMSEL. Q3 is `Ship thrust sound`, and it was being
+                // dropped along with the lamps and coin counters until this
+                // board grew the circuit to put it into: the drawing takes it
+                // to the control pin of the 4016B at R11, which gates the noise
+                // into the thrust filter. High closes the switch, so it is not
+                // inverted.
                 //
                 // Asteroids carries RAMSEL on its output latch at 0x3200
                 // instead, as a plain byte write with the select on bit 2. The
                 // two boards differ because this one is not fitted with that
                 // latch at all.
                 0x3C00..=0x3C07 => {
-                    if addr & 0x07 == 4 {
-                        *self.ramsel = data & 0x80 != 0;
+                    let bit = (addr & 0x07) as u8;
+                    let value = data & 0x80 != 0;
+                    if bit == 4 {
+                        *self.ramsel = value;
                     }
+                    self.sound.write_audio_latch_bit(bit, value);
                 }
-                0x3E00 => { /* noise reset stub */ }
+
+                // `Noise generator reset`, which clears the R8 and P8 shift
+                // registers both sound paths take their noise from.
+                0x3E00 => self.sound.pulse_noise_reset(),
                 _ => {}
             },
 
@@ -691,10 +716,30 @@ impl MachineCore for AsteroidsDeluxeSystem {
         let (cpu, mut bus) = self.split();
         atari_dvg::run_frame(cpu, &mut bus);
 
-        // Drain POKEY audio samples
-        let samples = self.pokey.drain_audio();
+        // The discrete thrust and explosion circuitry runs on the same CPU clock
+        // the POKEY does, so a frame of it is a frame of them.
+        self.sound.tick(atari_dvg::TIMING.cycles_per_frame());
+
+        // Sum the POKEY and the two discrete paths, which is what P11 does with
+        // R69, R85 and R158 into R86. The shares come from those resistors; see
+        // `astdelux_sound`. Summing in i32 and clamping once at the end is the
+        // op-amp's rails: three sources that each stay in range can still ask
+        // for more than the output can give, and wrapping there would turn a
+        // loud moment into a click.
+        let pokey = self.pokey.drain_audio();
+        let mut discrete = vec![0i16; pokey.len()];
+        let n = self.sound.fill_audio(&mut discrete);
+        let pokey_share = crate::astdelux_sound::POKEY_MIX_SHARE;
         self.audio_buffer
-            .extend(samples.iter().map(|&s| (s * 32767.0) as i16));
+            .extend(pokey.iter().enumerate().map(|(i, &s)| {
+                let chip = (s as f64 * pokey_share * 32767.0) as i32;
+                // The two streams are produced at the same rate from the same
+                // clock, so they line up; a short drain on either side simply
+                // contributes nothing for those samples rather than shifting
+                // the other stream against it.
+                let disc = discrete.get(i).filter(|_| i < n).copied().unwrap_or(0) as i32;
+                (chip + disc).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            }));
 
         // Clear NMI at frame boundary to avoid stale edges.
         self.board.nmi_pending = false;
@@ -709,6 +754,7 @@ impl MachineCore for AsteroidsDeluxeSystem {
     fn reset(&mut self) {
         self.board.reset();
         self.pokey.reset();
+        self.sound.reset();
         // The pots are wiring, not state: a reset must leave the DIP switches
         // still driving them, exactly as the cabinet's do. `Pokey::reset` clears
         // the pot inputs, so this has to come after it.
