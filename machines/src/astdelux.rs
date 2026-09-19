@@ -326,7 +326,7 @@ impl AsteroidsDeluxeSystem {
         let mut sys = Self {
             cpu: M6502::new(),
             // Asteroids Deluxe: VROM at DVG 0x0800, size 0x1000
-            board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1000),
+            board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1000, atari_dvg::WINDOW),
             pokey: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
             in0: 0x00,
             in1: 0x00,
@@ -636,7 +636,13 @@ impl Bus for AsteroidsDeluxeBus<'_> {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_renderable!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING, vectors);
+crate::impl_board_renderable!(
+    AsteroidsDeluxeSystem,
+    board,
+    atari_dvg::TIMING,
+    vector_field,
+    vectors
+);
 
 impl AudioSource for AsteroidsDeluxeSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {

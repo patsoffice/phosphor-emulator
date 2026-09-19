@@ -9,7 +9,9 @@ use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::crt::{
     BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, beam_sigma_units, halation_sigma_units,
 };
-use phosphor_core::device::dvg::{Dvg, MIN_CYCLES_PER_UNIT, VectorLine, raster_size_for_field};
+use phosphor_core::device::dvg::{
+    Dvg, MIN_CYCLES_PER_UNIT, VectorLine, VisibleWindow, raster_size_for_field,
+};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
@@ -30,17 +32,90 @@ pub(crate) enum Region {
 // Timing constants
 // ---------------------------------------------------------------------------
 
+/// What the Asteroids and Asteroids Deluxe monitor swept, in DVG field units.
+///
+/// The DVG counts a 1024-square field, but a deflection amplifier's gain and
+/// offset are pots, and what a cabinet showed is wherever they were set. The
+/// reference frames these two at 1045 by 789 with the box centered on field
+/// (512, 511), which is the field's own center horizontally and within half a
+/// unit of it vertically.
+///
+/// Two things corroborate the numbers, since they are read out of a reference
+/// emulator's screen setup rather than off a schematic. The box is 1.3245 wide
+/// for one tall, which is the 4:3 tube; and its center is where the games
+/// actually draw, measured over 3000 frames at 513 for Asteroids. The
+/// horizontal 10 units either side of the field are overscan: the beam swept
+/// slightly wider than the counters could reach, so X is uncropped and only Y
+/// is really a crop.
+///
+/// Before this the whole field was presented, which put a quarter of the
+/// picture's height in blank margin and then pillarboxed the square result
+/// inside a 4:3 window, so the picture was small twice over.
+pub const WINDOW: VisibleWindow = VisibleWindow {
+    x: -10,
+    y: 117,
+    width: 1045,
+    height: 789,
+};
+
+/// What the Lunar Lander monitor swept. See [`WINDOW`] for the derivation.
+///
+/// 1045 by 801, and **not** centered on the field: the box runs from field Y
+/// -19 to 782, centered at 381 rather than 512. That is not a different monitor
+/// but a differently adjusted one, and it follows the game, whose picture sits
+/// low in the field: its measured center is 396, against Asteroids' 513.
+/// Framing a cabinet was a V-CENTER pot, and whoever set it centered what the
+/// board drew.
+pub const WINDOW_LLANDER: VisibleWindow = VisibleWindow {
+    x: -10,
+    y: -19,
+    width: 1045,
+    height: 801,
+};
+
 // Master clock: 12.096 MHz
 // CPU clock: 12.096 / 8 = 1.512 MHz
 // NMI: 3 KHz / 12 ≈ 250 Hz → every ~6048 CPU cycles
 // Frame: ~60 Hz → ~25200 CPU cycles
+/// Asteroids and Asteroids Deluxe: the display is redrawn every fourth NMI.
+///
+/// The reference divides the same chain one step further for the refresh,
+/// `MASTER/4096/12/4`, which is 61.523 Hz and is exactly four NMI periods. That
+/// only comes out to a whole number of cycles now that the NMI is 6144 rather
+/// than the 6048 a rounded 250 Hz gave; see [`NMI_PERIOD_CYCLES`].
 pub const TIMING: TimingConfig = TimingConfig {
-    cpu_clock_hz: 1_512_000,     // 12.096 MHz / 8
-    cycles_per_scanline: 25_200, // no scanline hardware; whole frame
+    cpu_clock_hz: 1_512_000, // 12.096 MHz / 8
+    // No scanline hardware: the whole frame is one "line". 61.523 Hz.
+    cycles_per_scanline: NMI_PERIOD_CYCLES * 4,
     total_scanlines: 1,
-    display_width: 1024, // vector display
-    display_height: 1024,
-    display_aspect: Some((4, 3)),
+    // The visible window, not the DVG's field: the generator emits its display
+    // list relative to [`WINDOW`], so this is the extent those coordinates are
+    // in. See [`VisibleWindow`].
+    display_width: WINDOW.width,
+    display_height: WINDOW.height,
+    // SQUARE UNITS, not 4:3. The two deflection DACs are the same ten bits into
+    // the same full-scale, so a unit is the same size on both axes. Declaring
+    // 4:3 here stretched a picture that was already correctly proportioned:
+    // Asteroids' content is 946 by 777 units, which reached the screen at 1.62
+    // against the 1.22 it should be, a third too wide.
+    //
+    // With the window cropped rather than the whole field presented, 4:3 is
+    // what square units now come out as on their own: 1045 by 789 is 1.3245.
+    // Saying so here as well would be stating the same fact twice, in a place
+    // where the two could drift apart.
+    display_aspect: None,
+};
+
+/// Lunar Lander: the display is redrawn every sixth NMI, not every fourth.
+///
+/// `MASTER/4096/12/6`, which is 41.016 Hz. The board is otherwise the same, so
+/// this differs from [`TIMING`] in the frame length and the monitor's framing.
+/// It ran at 60 Hz before, which was half again too fast.
+pub const TIMING_LLANDER: TimingConfig = TimingConfig {
+    cycles_per_scanline: NMI_PERIOD_CYCLES * 6,
+    display_width: WINDOW_LLANDER.width,
+    display_height: WINDOW_LLANDER.height,
+    ..TIMING
 };
 
 /// Period of the board's free-running NMI, in CPU cycles.
@@ -148,7 +223,8 @@ pub fn run_frame<B: AtariDvgBus>(cpu: &mut M6502, bus: &mut B) {
 /// Shared hardware for Atari DVG-based arcade games (1979–1980).
 ///
 /// Hardware: MOS 6502 @ 1.512 MHz, Atari DVG vector display.
-/// Video: 1024×1024 vector display via Digital Vector Generator.
+/// Video: Digital Vector Generator counting a 1024-square field, of which the
+/// monitor swept the part named by [`WINDOW`] or [`WINDOW_LLANDER`].
 /// Used by: Asteroids, Asteroids Deluxe, Lunar Lander.
 ///
 /// Each game provides its own memory map, I/O decode, and ROM definitions
@@ -218,10 +294,20 @@ pub struct AtariDvgBoard {
 }
 
 impl AtariDvgBoard {
-    /// Create a new board with a pre-configured memory map and DVG ROM placement.
-    pub fn new(map: AddressSpace16, vrom_dvg_offset: usize, vrom_size: usize) -> Self {
+    /// Create a new board with a pre-configured memory map, DVG ROM placement,
+    /// and the part of the DVG field this game's monitor swept.
+    ///
+    /// The window is per game rather than per board: the two Asteroids share
+    /// [`WINDOW`] and Lunar Lander has [`WINDOW_LLANDER`]. See those for why the
+    /// same monitor is framed two ways.
+    pub fn new(
+        map: AddressSpace16,
+        vrom_dvg_offset: usize,
+        vrom_size: usize,
+        window: VisibleWindow,
+    ) -> Self {
         Self {
-            dvg: Dvg::new(),
+            dvg: Dvg::new(window),
             map,
             clock: 0,
             nmi_counter: 0,
@@ -349,9 +435,19 @@ impl AtariDvgBoard {
         self.display_list.clear();
     }
 
+    /// The extent the display list's coordinates are in: the monitor's window,
+    /// which the DVG was handed at construction and emits relative to.
+    ///
+    /// The board asks the generator rather than reading a `TIMING`, because the
+    /// two games on this board are framed differently and only the generator
+    /// knows which one it is wired for.
+    pub fn field_size(&self) -> (u32, u32) {
+        self.dvg.window().size()
+    }
+
     /// Render the vector display list into an RGB24 framebuffer.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        let field = TIMING.display_size();
+        let field = self.field_size();
         let (rw, rh) = raster_size_for_field(field.0, field.1);
         rasterize_vectors(
             &self.display_list,
@@ -374,15 +470,15 @@ impl AtariDvgBoard {
 
 impl Renderable for AtariDvgBoard {
     fn display_size(&self) -> (u32, u32) {
-        // The timing's dimensions are the display list's coordinate extent; how
-        // many pixels to draw it into comes from the tube. See
+        // The window is the display list's coordinate extent; how many pixels
+        // to draw it into comes from the tube. See
         // `Renderable::vector_field_size`.
-        let (w, h) = TIMING.display_size();
-        phosphor_core::device::dvg::raster_size_for_field(w, h)
+        let (w, h) = self.field_size();
+        raster_size_for_field(w, h)
     }
 
     fn vector_field_size(&self) -> Option<(u32, u32)> {
-        Some(TIMING.display_size())
+        Some(self.field_size())
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {
@@ -390,18 +486,7 @@ impl Renderable for AtariDvgBoard {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        let field = TIMING.display_size();
-        let (rw, rh) = raster_size_for_field(field.0, field.1);
-        rasterize_vectors(
-            &self.display_list,
-            buffer,
-            rw,
-            rh,
-            field,
-            true,
-            // The viewer's settings, minus the glow this path cannot afford.
-            &display_settings().without_halation(),
-        );
+        AtariDvgBoard::render_frame(self, buffer);
     }
 
     fn vector_display_list(&self) -> Option<&[VectorLine]> {
@@ -442,8 +527,8 @@ std::thread_local! {
 /// reach, so a vector running far off screen costs only the part that shows.
 /// Vector Y=0 is at bottom; the framebuffer uses Y=0 at top.
 ///
-/// `width` and `height` define the display dimensions (e.g. 1024×1024 for DVG,
-/// 580×570 for Tempest AVG).
+/// `width` and `height` define the display dimensions (e.g. 1045×789 for
+/// Asteroids' DVG, 580×570 for Tempest's AVG).
 pub(crate) fn rasterize_vectors(
     display_list: &[VectorLine],
     buffer: &mut [u8],
@@ -945,6 +1030,84 @@ mod tests {
     use super::*;
     use phosphor_core::core::AccessKind;
 
+    /// What the monitor showed of the DVG's field.
+    ///
+    /// The two windows are transcribed from a reference emulator's screen
+    /// setup, which is a number somebody chose and not a figure off a
+    /// schematic. These are the two independent facts that say the
+    /// transcription is right, so that a mistyped digit fails here rather than
+    /// quietly reframing a game.
+    mod window {
+        use super::*;
+
+        /// Both cabinets had a 4:3 tube, and a DVG unit is square, so a window
+        /// measured in units has to come out at 4:3 on its own.
+        ///
+        /// The tolerance is 3% because the windows are 0.7% and 2.2% off, which
+        /// is a size pot against a nominal ratio and not a derivation anyone
+        /// should expect to land exactly. It is still tight enough to be worth
+        /// having: the square field these replaced is 33% off, and a
+        /// transposed digit moves an axis by more than a tenth.
+        #[test]
+        fn each_window_is_a_four_by_three_tube() {
+            for (name, w) in [("asteroids", WINDOW), ("llander", WINDOW_LLANDER)] {
+                let aspect = f64::from(w.width) / f64::from(w.height);
+                let off = (aspect / (4.0 / 3.0) - 1.0).abs();
+                assert!(off < 0.03, "{name}: {aspect:.4} is not 4:3 ({off:.3} off)");
+            }
+        }
+
+        /// The horizontal framing is the same on both, and is not a crop: the
+        /// beam swept 10 units wider than the counters can reach at each end,
+        /// so the whole 0..1023 field is on the tube with overscan either side.
+        /// Only the vertical framing removes anything.
+        #[test]
+        fn the_field_is_cropped_vertically_and_overscanned_horizontally() {
+            for (name, w) in [("asteroids", WINDOW), ("llander", WINDOW_LLANDER)] {
+                assert!(w.x < 0, "{name}: X should overscan, starts at {}", w.x);
+                assert!(
+                    w.x + w.width as i32 > 1024,
+                    "{name}: X should overscan past the field"
+                );
+                assert!(
+                    w.height < 1024,
+                    "{name}: Y should crop, is {} tall",
+                    w.height
+                );
+            }
+            assert_eq!(
+                (WINDOW.x, WINDOW.width),
+                (WINDOW_LLANDER.x, WINDOW_LLANDER.width),
+                "the same monitor: horizontal framing should not differ by game"
+            );
+        }
+
+        /// Lunar Lander's window sits low in the field and Asteroids' is
+        /// centered in it, which is the whole reason these are two constants.
+        /// Centering was a pot, and whoever set it centered what the board drew:
+        /// Lunar Lander's picture has its own center around field Y 396 against
+        /// Asteroids' 513, measured over 3000 frames.
+        #[test]
+        fn llander_is_framed_lower_than_asteroids() {
+            let center = |w: VisibleWindow| w.y + w.height as i32 / 2;
+            assert_eq!(
+                center(WINDOW),
+                511,
+                "Asteroids should sit on the field's center"
+            );
+            assert_eq!(center(WINDOW_LLANDER), 381);
+        }
+
+        /// The timing a machine reports its geometry through and the window its
+        /// generator emits into are one fact, and a display list expressed in
+        /// one extent while the renderer is told another draws the wrong size.
+        #[test]
+        fn the_timings_report_their_own_windows() {
+            assert_eq!(TIMING.display_size(), WINDOW.size());
+            assert_eq!(TIMING_LLANDER.display_size(), WINDOW_LLANDER.size());
+        }
+    }
+
     /// The beam rasterizer, on its own, without a machine around it.
     mod beam {
         use super::*;
@@ -1288,7 +1451,7 @@ mod tests {
                     0x0800,
                     AccessKind::ReadOnly,
                 );
-            AtariDvgBoard::new(map, 0x0800, 0x0800)
+            AtariDvgBoard::new(map, 0x0800, 0x0800, WINDOW)
         }
 
         #[test]

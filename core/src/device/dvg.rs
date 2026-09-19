@@ -22,6 +22,49 @@
 //! - MAME `src/devices/video/avgdvg.cpp`
 //! - Jed Margolin, "The Secret Life of Vector Generators"
 
+/// The part of a generator's coordinate field the monitor actually showed.
+///
+/// A vector generator's field is the numeric range its position counters can
+/// reach, which is a property of the counters and not of any tube. What reached
+/// a player was the part of it the deflection amplifiers swept across the
+/// phosphor, set by the monitor's centering and size pots: a smaller box, placed
+/// wherever the game's picture sat in the field.
+///
+/// `x`/`y` are the field coordinate at the window's bottom-left corner, so they
+/// are negative where the tube overscanned the field. A generator emits its
+/// display list relative to this corner, which makes the list's extent
+/// `width` by `height` and leaves every consumer (the rasterizer, the GL path,
+/// the golden hashes) working in one space with no origin to thread through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleWindow {
+    /// Field X at the window's left edge. Negative if the tube overscanned.
+    pub x: i32,
+    /// Field Y at the window's bottom edge. Negative if the tube overscanned.
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl VisibleWindow {
+    /// The whole 1024-square DVG field, unframed.
+    ///
+    /// No cabinet showed this: a monitor swept about three quarters of the
+    /// field's height. It is the neutral value for a generator under test,
+    /// where the coordinates a program produces are the thing being checked and
+    /// a framing offset would only have to be subtracted back out.
+    pub const FULL_DVG_FIELD: Self = Self {
+        x: 0,
+        y: 0,
+        width: 1024,
+        height: 1024,
+    };
+
+    /// The window's extent, for a `TimingConfig` or a `vector_field_size`.
+    pub const fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
 /// A line segment produced by vector generator execution (DVG or AVG).
 ///
 /// Coordinates are in the generator's native space, with (0, 0) at the
@@ -154,6 +197,11 @@ pub struct Dvg {
     /// True when the DVG has executed a HALT instruction.
     halted: bool,
 
+    /// The part of the field the monitor showed, which the display list is
+    /// emitted relative to. Wiring, not state: a load leaves it alone.
+    #[save_skip]
+    window: VisibleWindow,
+
     /// Accumulated display list for the current frame.
     #[save_skip(default)]
     display_list: Vec<VectorLine>,
@@ -199,7 +247,9 @@ impl Debuggable for Dvg {
 }
 
 impl Dvg {
-    pub fn new() -> Self {
+    /// Create a DVG framed by `window`: the part of its 1024-square field the
+    /// board's monitor swept. See [`VisibleWindow`].
+    pub fn new(window: VisibleWindow) -> Self {
         Self {
             pc: 0,
             stack: [0; 4],
@@ -209,8 +259,14 @@ impl Dvg {
             scale: 0,
             intensity: 0,
             halted: true,
+            window,
             display_list: Vec::with_capacity(512),
         }
+    }
+
+    /// The part of the field this generator is framed to.
+    pub fn window(&self) -> VisibleWindow {
+        self.window
     }
 
     /// Trigger DVG execution. Called when the CPU writes to the VG_GO register.
@@ -511,8 +567,14 @@ impl Dvg {
             return;
         }
 
-        let x = self.xpos & 0x3FF;
-        let y = self.ypos & 0x3FF;
+        // Field coordinate, then window coordinate. The clip above is the DVG's
+        // own (bit 10 of a counter, which is hardware) and happens in field
+        // units; the shift here is the monitor's framing and is the only place
+        // the two spaces meet. A point outside the window keeps its coordinate,
+        // now negative or past the far edge, rather than being dropped: a
+        // vector that runs off the tube still has to be drawn up to the edge.
+        let x = (self.xpos & 0x3FF) - self.window.x;
+        let y = (self.ypos & 0x3FF) - self.window.y;
 
         // Connect from the previous endpoint (if any) to the current position.
         // Intensity 0 means a blank (invisible) move.
@@ -573,7 +635,7 @@ impl super::Device for Dvg {
 
 impl Default for Dvg {
     fn default() -> Self {
-        Self::new()
+        Self::new(VisibleWindow::FULL_DVG_FIELD)
     }
 }
 
@@ -601,7 +663,7 @@ mod tests {
     #[test]
     fn halt_immediately() {
         let vmem = build_vmem(&[0xB000]); // HALT
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         assert!(dvg.is_halted());
@@ -619,7 +681,7 @@ mod tests {
             0x7000 | 200, // LABS word1: intensity=7, x=200
             0xB000,       // HALT
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         assert!(dvg.is_halted());
@@ -641,7 +703,7 @@ mod tests {
             0x0000, // (unused)
             0xD000, // RTS
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         assert!(dvg.is_halted());
@@ -659,7 +721,7 @@ mod tests {
             0xB000, // HALT (should NOT reach here)
             0xB000, // HALT (should reach here)
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         assert!(dvg.is_halted());
@@ -678,7 +740,7 @@ mod tests {
             0xF064, // word1: intensity=15, dx=100
             0xB000, // HALT
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         assert!(dvg.is_halted());
@@ -699,7 +761,7 @@ mod tests {
             0x0064,       // VCTR word1: intensity=0, dx=100
             0xB000,       // HALT
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
 
@@ -721,7 +783,7 @@ mod tests {
             0xF0F1,       // SVEC: dvy_hi=0, intensity=15, dvx_hi=1
             0xB000,       // HALT
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
 
@@ -744,7 +806,7 @@ mod tests {
             0xB000, // HALT (final return destination)
             0xD000, // RTS (subroutine body)
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         assert!(dvg.is_halted());
@@ -752,7 +814,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state() {
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.pc = 100;
         dvg.xpos = 500;
@@ -783,7 +845,7 @@ mod tests {
 
     #[test]
     fn go_clears_halt_and_display_list() {
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.display_list.push(VectorLine {
             x0: 0.0,
             y0: 0.0,
@@ -807,7 +869,7 @@ mod tests {
     fn max_instruction_limit_prevents_infinite_loop() {
         // JMP to self — infinite loop. Should terminate via safety limit.
         let vmem = build_vmem(&[0xE000]); // JMP to word 0
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
         // Should NOT be halted (the loop was broken by the safety limit,
@@ -827,7 +889,7 @@ mod tests {
             0xF464, // word1: intensity=15, dx=0x464
             0xB000, // HALT
         ]);
-        let mut dvg = Dvg::new();
+        let mut dvg = Dvg::new(VisibleWindow::FULL_DVG_FIELD);
         dvg.go();
         dvg.execute(&vmem);
 

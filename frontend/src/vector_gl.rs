@@ -389,7 +389,7 @@ impl VectorRenderer {
     /// drawn into a centered sub-viewport of `view_aspect` (width / height) so
     /// pixel aspect is corrected and the field is letterboxed, not stretched to
     /// fill. `display_w`/`display_h` are the vector coordinate space dimensions
-    /// (e.g. 1024×1024 for DVG, 580×570 for Tempest AVG).
+    /// (e.g. 1045×789 for Asteroids' DVG, 580×570 for Tempest's AVG).
     /// `rotation` is the screen-level rotation in degrees (0 or 270).
     /// `target` is the framebuffer the beam lands in: 0 for the window, or one
     /// wrapping the texture egui draws, which is what lets a debug panel lay out

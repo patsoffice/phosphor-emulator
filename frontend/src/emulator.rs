@@ -1777,6 +1777,31 @@ mod tests {
         assert_eq!((w, h), (224, (224.0_f32 / 0.75).round() as u32)); // 224×299
     }
 
+    /// A cropped DVG window reaches the screen at the tube's shape with no bars.
+    ///
+    /// The three DVG games declare no aspect, because the generator's units are
+    /// square and the crop to what the monitor swept already has the shape in
+    /// it. That only works if presenting at the native ratio is what fills a
+    /// 4:3 screen, so this is the assertion the golden PNG cannot make: it
+    /// holds the raster, and whether the raster is then pillarboxed is decided
+    /// here. Presented square, as the whole 1024-unit field was, the picture
+    /// lost a quarter of the window's width to bars.
+    #[test]
+    fn a_cropped_vector_window_fills_a_four_by_three_screen() {
+        for (name, native, want) in [
+            ("asteroids", (1045, 789), 4.0 / 3.0),
+            ("llander", (1045, 801), 4.0 / 3.0),
+        ] {
+            let (w, h, a) = presentation(native.0, native.1, None, false);
+            assert_eq!((w, h), native, "{name}: square units are presented as-is");
+            assert!((a / want - 1.0).abs() < 0.03, "{name}: {a:.4} is not 4:3");
+        }
+
+        // What it replaced: square, so a 4:3 screen pillarboxes it.
+        let (_, _, square) = presentation(1024, 1024, None, false);
+        assert!((square - 1.0).abs() < 1e-4);
+    }
+
     #[test]
     fn rotation_swaps_axes_before_aspect() {
         // Tempest: native 580×570 landscape space, screen-rotated to portrait,

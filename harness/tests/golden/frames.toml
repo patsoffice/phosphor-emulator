@@ -27,18 +27,18 @@ reason = "The machine's ROM table names a revision (djr1-c_5b_f-2.5b) that neith
 [[frame]]
 machine = "astdelux"
 frames = 1800
-shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright. The words are what this pins; the rubble is a demo game and moves whenever the machine's state evolves differently. It last moved when RAMSEL began swapping the two 256-byte SRAMs it had been ignoring, which changes where the demo keeps its working state and so where the asteroids drift, and changes none of the text."
-size = [1024, 1024]
-frame = "sha256:340cb908cdc4b8c955c3773af300cd3bba201a2328b0a18fcea9c9fa87b87e7b"
-vectors = "sha256:579794a8b1107df61c12f4502f70f08a1e2281a11fe75ac1201f6ce676782dd5"
+shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright. The words are what this pins; the rubble is a demo game and moves whenever the machine's state evolves differently. It last moved when RAMSEL began swapping the two 256-byte SRAMs it had been ignoring, which changes where the demo keeps its working state and so where the asteroids drift, and changes none of the text. The frame is 1045 by 789 rather than 1024 square because it is now cropped to the part of the DVG's field the monitor swept (atari_dvg::WINDOW); the display list is the same one, translated by the window's origin, so that recapture moved the hash without moving the rubble."
+size = [1045, 789]
+frame = "sha256:412305fa84ceb15190ebadbdf447108d315dc25e15444922d58d11e07cca88ea"
+vectors = "sha256:1ffca0922e31bfb41986b177bae1cf04854cf332e7f2ed3bd8a8595e7c1e519a"
 
 [[frame]]
 machine = "asteroid"
 frames = 1800
-shows = "Attract mode: 1 COIN 1 PLAY over drifting asteroids with a small saucer, above the 1979 Atari copyright. It read PUSH START until the option mux was fixed, because the broken decode delivered the Language toggle as the coinage setting and the game saw Free Play; the default byte is the manual's suggested 1 coin / 1 play."
-size = [1024, 1024]
-frame = "sha256:291fb6a06b1b2fc5b136804c5875d985a8609bcb1327ac17690da3bc085337c4"
-vectors = "sha256:db9ca70558b794e4ddac4b6731ec84347367fe69da0d1fb249502efc3c7e72d7"
+shows = "Attract mode: 1 COIN 1 PLAY over drifting asteroids with a small saucer, above the 1979 Atari copyright. It read PUSH START until the option mux was fixed, because the broken decode delivered the Language toggle as the coinage setting and the game saw Free Play; the default byte is the manual's suggested 1 coin / 1 play. The frame is 1045 by 789 rather than 1024 square because it is now cropped to the part of the DVG's field the monitor swept (atari_dvg::WINDOW); the display list is the same one, translated by the window's origin, so this hash moved without the machine moving at all."
+size = [1045, 789]
+frame = "sha256:7b9eb1466f956beacf845bfb70a3ab21decb16270110e584487a5041667e9583"
+vectors = "sha256:82b4622802b5ab08da6259ad936f1d207f0f7d4337750b52a6740d1827ccae78"
 
 [[frame]]
 machine = "burgertime"
@@ -166,10 +166,10 @@ frame = "sha256:5129c5c150136ddf04c9ac408fd8dcf2f74ea281a6b3863fe70344037ed78132
 [[frame]]
 machine = "llander"
 frames = 1800
-shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with 750 FUEL UNITS PER COIN. It read a literal X until the option mux was fixed and the undriven data-bus bits were made to float high, which this ROM depends on because its fuel routine reads 0x2800 without masking. 750 is the default byte's setting, and the game's own self-test prints the same number. INSERT COINS BLINKS and is NOT pinned: this capture catches it off, where the capture before phosphor-emulator-mtme caught it on. The terrain is static in attract and was byte-identical across that change; only the lander's drift and the blink phase moved."
-size = [1024, 1024]
-frame = "sha256:a3f39872f605747c6540018046cf8e2ebd41ed1b241ab640c1087c0c680102f7"
-vectors = "sha256:3842c47f7916a021f160b05dd1724daaf7d5149fde58c4ef9b5293b1158473f2"
+shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and 750 FUEL UNITS PER COIN. It read a literal X until the option mux was fixed and the undriven data-bus bits were made to float high, which this ROM depends on because its fuel routine reads 0x2800 without masking. 750 is the default byte's setting, and the game's own self-test prints the same number. INSERT COINS BLINKS and is NOT what this pins: it went off when the NMI period was corrected and back on when the refresh became 41.016 Hz, both in phosphor-emulator-mtme. The terrain is static in attract and has been byte-identical across both; what moves is the lander's drift and the blink phase. The frame is 1045 by 801 rather than 1024 square because it is now cropped to the part of the DVG's field the monitor swept (atari_dvg::WINDOW_LLANDER, which sits lower in the field than the Asteroids one because this board draws lower); the display list is the same one, translated by the window's origin, so that recapture moved the hash and nothing else."
+size = [1045, 801]
+frame = "sha256:e48aba225e4e7416925a402b8382e5e7c6b35dd57ccbe9de8d0e97de1a91a5c9"
+vectors = "sha256:8327a313c4306a142623bb5ffaae376e4cf21e6fcd57985a107268c8d1af5c81"
 
 [[frame]]
 machine = "marble"

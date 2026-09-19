@@ -244,7 +244,7 @@ impl AsteroidsSystem {
         Self {
             cpu: M6502::new(),
             // Asteroids: VROM at DVG 0x1000, size 0x0800
-            board: AtariDvgBoard::new(Self::build_map(), 0x1000, 0x0800),
+            board: AtariDvgBoard::new(Self::build_map(), 0x1000, 0x0800, atari_dvg::WINDOW),
             sound: AsteroidsDiscreteSound::new(),
             in0: 0x00,
             in1: 0x00,
@@ -470,7 +470,13 @@ impl Bus for AsteroidsBus<'_> {
 // Renderable + MachineDebug delegate to the shared board; audio is owned by the
 // game wrapper's discrete sound device, so AudioSource is implemented by hand
 // (the board has no sound hardware to delegate to).
-crate::impl_board_renderable!(AsteroidsSystem, board, atari_dvg::TIMING, vectors);
+crate::impl_board_renderable!(
+    AsteroidsSystem,
+    board,
+    atari_dvg::TIMING,
+    vector_field,
+    vectors
+);
 crate::impl_board_debug!(AsteroidsSystem, board, atari_dvg::TIMING);
 
 impl phosphor_core::core::machine::AudioSource for AsteroidsSystem {

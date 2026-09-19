@@ -286,7 +286,7 @@ impl LunarLanderSystem {
         Self {
             cpu: M6502::new(),
             // Lunar Lander: VROM at DVG 0x0800, size 0x1800
-            board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1800),
+            board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1800, atari_dvg::WINDOW_LLANDER),
             sound: LunarLanderDiscreteSound::new(),
             // Active-LOW bits idle HIGH: IN0 bits 1,2,3,4,5,7
             in0: 0xBE,
@@ -508,8 +508,14 @@ impl Bus for LunarLanderBus<'_> {
 
 // Renderable + MachineDebug delegate to the shared board; audio is owned by the
 // game wrapper's discrete sound device, so AudioSource is hand-written.
-crate::impl_board_renderable!(LunarLanderSystem, board, atari_dvg::TIMING, vectors);
-crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING);
+crate::impl_board_renderable!(
+    LunarLanderSystem,
+    board,
+    atari_dvg::TIMING_LLANDER,
+    vector_field,
+    vectors
+);
+crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING_LLANDER);
 
 impl phosphor_core::core::machine::AudioSource for LunarLanderSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
@@ -550,7 +556,7 @@ impl InputConfigurable for LunarLanderSystem {
 }
 
 impl MachineCore for LunarLanderSystem {
-    crate::machine_core_metadata!("llander", atari_dvg::TIMING, atari_dvg::clock_tree);
+    crate::machine_core_metadata!("llander", atari_dvg::TIMING_LLANDER, atari_dvg::clock_tree);
 
     fn run_frame(&mut self) {
         // Sweep the thrust pedal toward its target before the CPU reads it, so a
@@ -569,7 +575,8 @@ impl MachineCore for LunarLanderSystem {
         atari_dvg::run_frame(cpu, &mut bus);
 
         // Advance the discrete sound circuit for the frame's worth of CPU cycles.
-        self.sound.tick(atari_dvg::TIMING.cycles_per_frame());
+        self.sound
+            .tick(atari_dvg::TIMING_LLANDER.cycles_per_frame());
 
         // Clear NMI at frame boundary to avoid stale edges.
         self.board.nmi_pending = false;
