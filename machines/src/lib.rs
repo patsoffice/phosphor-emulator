@@ -719,6 +719,7 @@ pub mod williams;
 pub mod xevious;
 pub mod z80dma;
 pub mod zaxxon;
+pub mod zaxxon_sound;
 
 pub use astdelux::AsteroidsDeluxeSystem;
 pub use asteroids::AsteroidsSystem;

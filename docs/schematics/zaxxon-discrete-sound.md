@@ -131,19 +131,29 @@ bits inverted by it:
 
 | `PA0` | `PA1` | Node X | Node Y (the control) | LED current through `R17` 390 Ω |
 |---|---|---|---|---|
-| 0 | 0 | 0.96 V | **0.76 V** | 0 (below the LED's forward drop) |
-| 0 | 1 | 1.43 V | **4.18 V** | 7.6 mA |
-| 1 | 0 | 9.98 V | **7.39 V** | 15.9 mA |
-| 1 | 1 | 10.54 V | **10.92 V** | 24.9 mA |
+| 0 | 0 | 10.54 V | **10.93 V** | 24.9 mA |
+| 0 | 1 | 9.98 V | **7.39 V** | 15.9 mA |
+| 1 | 0 | 1.43 V | **4.18 V** | 7.6 mA |
+| 1 | 1 | 0.96 V | **0.76 V** | 0 (below the LED's forward drop) |
 
 Two things follow, and both matter.
 
-**`PA0` is the more significant bit, and the level is high when the bits are
-high.** The steps are 3.42 V, 3.21 V and 3.53 V: a near-linear two-bit DAC whose
-code is `PA0 * 2 + PA1`. Every other bit on this PPI is active low; these two
-are not gates and do not behave like the others. A model that reads the pair as
-`data & 3` (with `PA0` as bit 0) gets codes 1 and 2 the wrong way round, which
-is a wrong engine pitch in two of four states and sounds entirely plausible.
+**`PA0` is the more significant bit, and the level falls as the bits rise.** The
+steps are 3.54 V, 3.21 V and 3.42 V: a near-linear two-bit DAC whose code is
+`3 - (PA0 * 2 + PA1)`. `PA0` is worth about twice `PA1` because it reaches the
+ladder through `R12` 6.8 kΩ where `PA1` reaches it through `R16` 100 kΩ, and the
+whole thing runs backwards from the bit values because `U30`'s 7406 sections
+invert both.
+
+A model that reads the pair as `data & 3` is therefore wrong twice over: it puts
+the two middle states the wrong way round, and it rises where the board falls.
+Both mistakes are entirely plausible to listen to, which is why they are worth
+writing down.
+
+The maximum is at `PA0 = PA1 = 0` and the minimum, with `PC1`'s LED dark, is the
+`1, 1` that `RP1` leaves at power-on. So this pair is consistent with the rest of
+the port after all: the engine is at its quietest and lowest when nothing has
+been written.
 
 **`C25` is 15 uF against a Thevenin resistance of about 26 kΩ**, so node Y does
 not step between those levels, it glides with a time constant near 0.4 s. The
@@ -407,11 +417,13 @@ sources.
 - **The PPI map, at component level.** Every voice is labeled on `U23`'s pins on
   the drawing. Fourteen signals: twelve gates, and two that are not.
 - **Player ship A and B set a near-linear two-bit level with `PA0` as the MSB,
-  and the level is high when the bits are high.** Four solved control voltages,
-  a 0.4 s glide between them, and an LDR that makes pitch and loudness one
-  control. Every part of that contradicts a `data & 3` volume fit.
+  and the level falls as the bits rise.** Four solved control voltages, a 0.4 s
+  glide between them, and an LDR that makes pitch and loudness one control.
+  Every part of that contradicts a `data & 3` volume fit, which has the two
+  middle states swapped and the slope inverted.
 - **The board is silent at reset** and stays silent until the program writes,
-  because all fourteen lines are pulled high and the amplifier mutes itself
+  because all fourteen lines are pulled high (which for the level pair is the
+  bottom of the ladder, with `PC1`'s LED dark) and the amplifier mutes itself
   across `RES`.
 - **The MB4391's control pin attenuates: high control, low gain.** This is
   inferred rather than read from a datasheet, and it is inferred from five
