@@ -269,7 +269,22 @@ weeks."""
 id = "zaxxon-discrete"
 machines = ["zaxxon"]
 device = "machines/src/zaxxon_sound.rs"
+adapter = "zaxxon-discrete"
 status = "implemented-unvalidated"
+scenarios = [
+  "zaxxon/alarm2",
+  "zaxxon/alarm3",
+  "zaxxon/base-missile",
+  "zaxxon/battleship",
+  "zaxxon/cannon",
+  "zaxxon/homing-missile",
+  "zaxxon/laser",
+  "zaxxon/m-exp",
+  "zaxxon/s-exp",
+  "zaxxon/ship-engine-a",
+  "zaxxon/ship-engine-b",
+  "zaxxon/shot",
+]
 notes = """
 BUILT FROM THE DRAWING, AND THERE IS NOTHING TO COMPARE IT AGAINST. The board has
 no sound chip: twelve active-low bits of the i8255 at U23 gate eleven analog
@@ -280,22 +295,33 @@ row previously said: p131 is the cabinet wiring).
 
 `implemented-unvalidated` and NOT `implemented-needs-validation`, which is the
 honest end state rather than a waypoint. The reference driver plays recorded WAV
-samples, so a comparison would measure whoever made the recordings. Same as
-congo-percussion, and for the same reason there is no adapter and there are no
-scenarios: registering one would claim a comparison that cannot be run. It can
-only reach `validated` by someone reviewing the device against the drawing, which
-is a different piece of work from anything sndcmp does.
+samples, so a comparison against it would measure whoever made the recordings,
+and no scenario here will ever change that. It can only reach `validated` by
+someone reviewing the device against the drawing, which is a different piece of
+work from anything sndcmp does.
+
+THE ADAPTER AND SCENARIOS ARE NOT A CLAIM THAT SUCH A COMPARISON EXISTS. This row
+previously said there could be none because there was nothing to compare against,
+and that was half the picture: the other comparison this tool supports is one
+revision of a device against the next, and on a board transcribed by hand from a
+1982 drawing that is the comparison that keeps paying. Reading `R96` off the
+wrong node moved the battleship two octaves, and the way that was told from an
+improvement was to capture the voice either side and listen to both. Twelve
+scenarios, one per voice, exist so that is one command rather than a scratch test
+somebody writes again each time.
 
 What IS derived, and is what a review would check: the seven 74123 one-shot
 widths at the plain part's 0.28 constant, the three Sallen-Key noise bands, the
 two Wien engine resonators, the 556-into-74393 alarm divider, the player ship's
-two-bit level solved as a resistive network, and the eleven-leg mix, whose
-balance is entirely the attenuator ahead of each leg because the summing
-resistors are all the same 51k.
+two-bit level solved as a resistive network, both battleship oscillators and the
+50 % duty and 3.378 Vpp swing that follow from their resistors, and the
+eleven-leg mix, whose balance is entirely the attenuator ahead of each leg
+because the summing resistors are all the same 51k.
 
 What is NOT: the MCD-725H opto-isolator's transfer curve, the MB4391's control
-law beyond its direction, Q6's collector-emitter resistance, and the battleship's
-and shot's oscillator pitches. Each is named INVENTED in place in the device."""
+law beyond its direction, Q6's collector-emitter resistance, the op-amps' output
+swing, and the shot's oscillator pitch. Each is named INVENTED in place in the
+device."""
 
 [[target]]
 id = "atari-system1-audio"

@@ -1,0 +1,21 @@
+schema = 1
+id = "zaxxon/shot"
+target = "zaxxon-discrete"
+duration_s = 1.5
+description = "Enemy fire: an 11 ms one-shot into the U18/U19 555 chain"
+
+# One trigger. This voice's oscillator is read as a part list and not solved, so
+# what the capture is for is the before-and-after when somebody does solve it.
+[[action]]
+at_s = 0.5
+control = "shot"
+value = true
+
+[[action]]
+at_s = 0.52
+control = "shot"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 1.5

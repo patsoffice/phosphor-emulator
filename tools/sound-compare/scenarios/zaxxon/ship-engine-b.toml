@@ -1,0 +1,27 @@
+schema = 1
+id = "zaxxon/ship-engine-b"
+target = "zaxxon-discrete"
+duration_s = 3.0
+description = "Engine tone B (482 Hz Wien) at the top of the ladder"
+
+# The other of U32's two decoded outputs, on the same LDR-tuned noise. Held at
+# one level so the pair with ship-engine-a isolates the resonator rather than
+# the ladder.
+[[action]]
+at_s = 0.3
+control = "ship-level"
+value = 3
+
+[[action]]
+at_s = 0.3
+control = "ship-tone-b"
+value = true
+
+[[action]]
+at_s = 2.5
+control = "ship-tone-b"
+value = false
+
+[analysis]
+start_s = 0.25
+end_s = 3.0

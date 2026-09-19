@@ -1,0 +1,23 @@
+schema = 1
+id = "zaxxon/battleship"
+target = "zaxxon-discrete"
+duration_s = 3.0
+description = "The battleship drone: a 122 Hz square through the 4016B at U17"
+
+# A level, held. The 4016B either passes U10's oscillator or removes the leg
+# from the network, so there is no envelope and nothing decays: what the capture
+# shows is the oscillator itself, which is the point. U9's slow stage does not
+# reach it, so nothing in here sweeps.
+[[action]]
+at_s = 0.5
+control = "battleship"
+value = true
+
+[[action]]
+at_s = 2.5
+control = "battleship"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 3.0

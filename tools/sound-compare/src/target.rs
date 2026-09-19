@@ -68,6 +68,7 @@ static ALL: &[&TargetSpec] = &[
     &crate::targets::galaxian::SPEC,
     &crate::targets::llander::SPEC,
     &crate::targets::mariobros::SPEC,
+    &crate::targets::zaxxon::SPEC,
 ];
 
 pub fn all() -> &'static [&'static TargetSpec] {

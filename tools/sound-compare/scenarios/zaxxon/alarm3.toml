@@ -1,0 +1,21 @@
+schema = 1
+id = "zaxxon/alarm3"
+target = "zaxxon-discrete"
+duration_s = 1.0
+description = "Alarm 3, low fuel: 132 ms of U49's 1QC tap at 2535 Hz"
+
+# One trigger. The same circuit as alarm 2 on the other divider tap, so an
+# octave up, sharing one leg into SJ.
+[[action]]
+at_s = 0.3
+control = "alarm3"
+value = true
+
+[[action]]
+at_s = 0.32
+control = "alarm3"
+value = false
+
+[analysis]
+start_s = 0.25
+end_s = 1.0

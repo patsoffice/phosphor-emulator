@@ -1,0 +1,22 @@
+schema = 1
+id = "zaxxon/laser"
+target = "zaxxon-discrete"
+duration_s = 4.0
+description = "The force field: U7's 5.31 Hz repeat gating a decaying tone"
+
+# Held long enough for several repeats, because the repetition rate is the part
+# that is derived. D3 shunts R66 on the charge, so the 555 is high for 18.8 % of
+# each 188 ms period; a capture shorter than about a second cannot show that.
+[[action]]
+at_s = 0.5
+control = "laser"
+value = true
+
+[[action]]
+at_s = 3.5
+control = "laser"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 4.0

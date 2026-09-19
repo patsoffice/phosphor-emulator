@@ -1,0 +1,22 @@
+schema = 1
+id = "zaxxon/homing-missile"
+target = "zaxxon-discrete"
+duration_s = 3.0
+description = "The homing missile: U6's 555 swept through its control-voltage pin"
+
+# Held. The 46 ms envelope on C43 and the noise summed with it both arrive at
+# the 555's pin 5, so the sweep happens at the start of the hold and the rest is
+# the free-running 787 Hz with noise on it.
+[[action]]
+at_s = 0.5
+control = "homing-missile"
+value = true
+
+[[action]]
+at_s = 2.5
+control = "homing-missile"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 3.0

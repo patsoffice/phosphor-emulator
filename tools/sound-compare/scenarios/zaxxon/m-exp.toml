@@ -1,0 +1,21 @@
+schema = 1
+id = "zaxxon/m-exp"
+target = "zaxxon-discrete"
+duration_s = 4.0
+description = "The medium (ship) explosion: 43 ms one-shot, 226 Hz noise band"
+
+# One trigger. The loudest leg on the board at 0.851, against the small
+# explosion's 0.353; capture both and the difference should be about 7.6 dB.
+[[action]]
+at_s = 0.5
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.52
+control = "m-exp"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 4.0

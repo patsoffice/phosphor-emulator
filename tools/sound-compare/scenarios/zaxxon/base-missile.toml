@@ -1,0 +1,22 @@
+schema = 1
+id = "zaxxon/base-missile"
+target = "zaxxon-discrete"
+duration_s = 9.0
+description = "The base missile: a 151 ms one-shot into a 482 Hz noise band"
+
+# One trigger, and a long run: R59 and R60 recover C49 through 440 kOhm, which
+# is 6.6 seconds. A shorter capture would cut the envelope off mid-decay and
+# make the voice look far shorter than it is.
+[[action]]
+at_s = 0.5
+control = "base-missile"
+value = true
+
+[[action]]
+at_s = 0.52
+control = "base-missile"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 9.0

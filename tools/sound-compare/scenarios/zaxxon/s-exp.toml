@@ -1,0 +1,23 @@
+schema = 1
+id = "zaxxon/s-exp"
+target = "zaxxon-discrete"
+duration_s = 4.0
+description = "The small (enemy) explosion: 10 ms one-shot, 321 Hz noise band"
+
+# One trigger. D7 pulls C61 down and it crawls back through 940 kOhm, a 2.07 s
+# time constant, so this runs nearly two of them. The pair with m-exp is the
+# board's clearest balance check: the medium explosion's leg is 0.851 and this
+# one's is 0.353, and nothing else on the sheet is that easy to compare by ear.
+[[action]]
+at_s = 0.5
+control = "s-exp"
+value = true
+
+[[action]]
+at_s = 0.52
+control = "s-exp"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 4.0

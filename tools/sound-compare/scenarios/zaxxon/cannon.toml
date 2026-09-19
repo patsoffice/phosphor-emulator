@@ -1,0 +1,23 @@
+schema = 1
+id = "zaxxon/cannon"
+target = "zaxxon-discrete"
+duration_s = 2.5
+description = "The player's gun: a bridged-T corner falling 7.3 kHz to 1.8 kHz"
+
+# One trigger. C79 6.8 uF decays into R127 100 kOhm, so the sweep takes 0.68 s
+# and the capture runs three time constants past it. This is the voice the
+# bridged-T reading changed by 24 dB and an octave, so it is the one most worth
+# capturing either side of a change.
+[[action]]
+at_s = 0.5
+control = "cannon"
+value = true
+
+[[action]]
+at_s = 0.52
+control = "cannon"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 2.5

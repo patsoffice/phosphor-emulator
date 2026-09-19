@@ -1,0 +1,44 @@
+schema = 1
+id = "zaxxon/ship-engine-a"
+target = "zaxxon-discrete"
+duration_s = 5.0
+description = "Engine tone A (723 Hz Wien) through all four ladder levels"
+
+# The engine is the one voice where the level bits matter, so this walks them.
+# C25 is 15 uF against about 26 kOhm, so node Y glides with a 0.4 s time
+# constant and the pitch bends between steps rather than jumping; the one-second
+# spacing leaves that visible. The level FALLS as the bits rise, so 3 here is
+# the loudest and brightest and 0 is the LED dark.
+[[action]]
+at_s = 0.3
+control = "ship-level"
+value = 3
+
+[[action]]
+at_s = 0.3
+control = "ship-tone-a"
+value = true
+
+[[action]]
+at_s = 1.5
+control = "ship-level"
+value = 2
+
+[[action]]
+at_s = 2.5
+control = "ship-level"
+value = 1
+
+[[action]]
+at_s = 3.5
+control = "ship-level"
+value = 0
+
+[[action]]
+at_s = 4.5
+control = "ship-tone-a"
+value = false
+
+[analysis]
+start_s = 0.25
+end_s = 5.0

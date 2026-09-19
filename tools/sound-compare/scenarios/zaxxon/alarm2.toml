@@ -1,0 +1,22 @@
+schema = 1
+id = "zaxxon/alarm2"
+target = "zaxxon-discrete"
+duration_s = 1.0
+description = "Alarm 2, target lock: 132 ms of U49's 1QD tap at 1268 Hz"
+
+# One trigger. The one-shot is the whole envelope, so the capture is a 132 ms
+# burst and then nothing. Alarm 2 is the LOW tone of the pair, which is read off
+# which 7426 input its one-shot reaches across the sheet seam.
+[[action]]
+at_s = 0.3
+control = "alarm2"
+value = true
+
+[[action]]
+at_s = 0.32
+control = "alarm2"
+value = false
+
+[analysis]
+start_s = 0.25
+end_s = 1.0
