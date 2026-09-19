@@ -617,17 +617,111 @@ fn battleship_swing_v() -> f64 {
     schmitt_window_v(R98, R99)
 }
 
-/// The shot's pitch, from `R156`/`R157` 33 k with `C92` 1000 pF around `U19`:
-/// `1 / (2*pi*R*C)`.
-///
-/// Derived on the assumption that `U19`'s section has the same second-order
-/// shape as the board's other filters, which was **not** traced. Treat it as
-/// better than a guess and worse than a reading.
-const SHOT_HZ: f64 = 4_823.0;
-const SHOT_Q: f64 = 3.0;
+// The shot is a TONE, and there is no noise anywhere in it. This file used to
+// band-pass `NOISE 2` at a frequency taken from `R156` and `C92` on the
+// assumption that `U19`'s section had the same second-order shape as the
+// neighboring filters. It does not: `U19(5,6,7)` with `C92` in its feedback and
+// `U19(9,10,8)` around `R161`/`R162` are **the same integrator-and-Schmitt
+// relaxation oscillator as the battleship**, down to the transistor sinking the
+// summing node, and `R156`/`R157`/`R158` are its reference divider rather than a
+// filter's input. Two voices, one circuit, read twice.
+//
+// What is different here is that this oscillator's reference is not a fixed
+// divider off a rail. It is a live node, so the pitch is swept, and everything
+// below exists to work out by how much.
+const R143: f64 = 3_300.0; // +5 V into the shaper node
+const R144: f64 = 560.0; // U21's Qbar into the same node
+const R145_R146: f64 = 1_270_000.0; // +12 V down to node X, in series
+const R147: f64 = 1_000_000.0; // node X down to node Y
+const R148: f64 = 2_200_000.0; // node Y to ground
+const C88: f64 = 0.047e-6; // the shaper node into X
+const C89: f64 = 0.68e-6; // on node Y: the VCA's decay
+const R149: f64 = 5_600.0; // X's buffer into U19's inverting amp
+const R150: f64 = 33_000.0; // that amp's feedback: a gain of -5.9
+const R151_R152: f64 = 20_000.0; // U18 555 charge path, in series
+const R152: f64 = 10_000.0; // its discharge path
+const C90: f64 = 3.3e-6; // its timing cap
+const R153: f64 = 2_700.0; // the 555's output into node A
+const R154: f64 = 8_200.0; // the envelope's other way into node A
+const R155: f64 = 820.0; // node A's load to ground
+const C91: f64 = 15e-6; // node A's smoothing
+const R156: f64 = 33_000.0; // the oscillator's integrator input
+const R159: f64 = 15_000.0; // its sink, through Q7
+const C92: f64 = 1000e-12; // its integrator cap
+const R161: f64 = 33_000.0; // its Schmitt input, from +6 V
+const R162: f64 = 100_000.0; // its Schmitt feedback
+const R164: f64 = 1_000_000.0; // out of the oscillator
+const R165: f64 = 220_000.0; // to ground: a divider of 0.18
 
-/// **INVENTED.** How fast the shot's tone burst decays after its 11 ms one-shot.
-const SHOT_DECAY_S: f64 = 0.035;
+/// The shaper node between `R143` and `R144`, when `U21`'s `Qbar` is at `q_bar`.
+///
+/// **`R144` is driven by `Qbar` (pin 4), not `Q`.** `Q` (pin 13) is drawn and
+/// goes nowhere, and the difference is the whole polarity of the voice: the node
+/// rests HIGH and the trigger pulls it down, which is the same shape the two
+/// explosions and the base missile use, for the same reason (see
+/// [`inverted_envelope`]). Both ends sit at +5 V at rest, so the node does too.
+fn shot_shaper_v(q_bar: f64) -> f64 {
+    (V5 / R143 + q_bar / R144) / (1.0 / R143 + 1.0 / R144)
+}
+
+/// Node Y, the `MB4391 U16` control, at rest and at the bottom of a trigger.
+///
+/// `D10`'s anode is on `Y` and its cathode on the shaper node, so `Y` is clamped
+/// one diode drop above it. Its own DC, from `R145`/`R146` and `R147` against
+/// `R148`, would put it at 5.9 V, and the clamp holds it below that.
+fn shot_vca_rest_v() -> f64 {
+    (shot_shaper_v(V5) + V_DIODE).min(V12 * R148 / (R145_R146 + R147 + R148))
+}
+
+fn shot_vca_floor_v() -> f64 {
+    shot_shaper_v(V_SAT) + V_DIODE
+}
+
+/// Node X, the pitch shaper, at rest: `R145` and `R146` from +12 V against
+/// `R147` down to the clamped `Y`.
+fn shot_pitch_rest_v() -> f64 {
+    let rest = shot_vca_rest_v();
+    rest + (V12 - rest) / (R145_R146 + R147) * R147
+}
+
+/// How far `C88` carries the shaper node's step into node X, expressed as the
+/// high-pass corner `C88` makes against everything X is tied to.
+///
+/// `R145` and `R146` reach +12 V and `R147` and `R148` reach ground, so X sits on
+/// 0.91 MOhm and the step decays over 43 ms. `D10`'s state changes that by about
+/// a third while the trigger is low, which is inside what the op-amp's clipping
+/// hides.
+fn shot_pitch_r() -> f64 {
+    let up = R145_R146;
+    let down = R147 + R148;
+    up * down / (up + down)
+}
+
+/// Node A's weights: the 555's output through `R153`, and `U19`'s inverting
+/// amplifier through `R154`, into `R155`'s 820 ohms to ground.
+///
+/// `R155` is the reason this voice is not simply the 555's square: it holds the
+/// node down to a fifth of what either source would give alone, which is what
+/// keeps the oscillator in its audible range.
+fn shot_node_a_weights() -> (f64, f64) {
+    let sum = 1.0 / R153 + 1.0 / R154 + 1.0 / R155;
+    ((1.0 / R153) / sum, (1.0 / R154) / sum)
+}
+
+/// The oscillator's rate against node A, **3331 Hz per volt**.
+///
+/// `R157` and `R158` are both 33 k, so the integrator's virtual ground is half
+/// of node A, and the rate is linear in it. Same helper as the battleship,
+/// because it is the same circuit.
+fn shot_hz_per_volt() -> f64 {
+    relaxation_hz(0.5, R156, R159, C92, schmitt_window_v(R161, R162))
+}
+
+/// What the oscillator's square is worth at the VCA: `R164` 1 M into `R165`
+/// 220 k, so 0.18 of the op-amp's swing.
+fn shot_out_v() -> f64 {
+    2.0 * OPAMP_SWING * R165 / (R164 + R165)
+}
 
 // ---------------------------------------------------------------------------
 // The three sheet-12 voices
@@ -929,6 +1023,86 @@ impl CustomComponent for TunedBandPass {
 
 /// Two resistances in parallel, for a network whose branches are both modeled
 /// nodes rather than constants.
+/// A 555 astable whose **control pin is live**, which is the only reason this
+/// needs to be a component rather than a frequency.
+///
+/// Two of this board's 555s have something driving pin 5, and a 555 with a
+/// moving control voltage is not a moving frequency: the part compares its
+/// capacitor against the control pin and against half of it, so raising the
+/// control raises both thresholds, and the charge and discharge legs stretch by
+/// different amounts because one works against `vcc` and the other against
+/// ground. The duty cycle moves with the pitch, and it is the duty that this
+/// board is using.
+///
+/// The cap's own state is what carries that across a step: when the shot's
+/// envelope throws the control from 1 V to 11 V, the part does not speed up, it
+/// stops mid-charge and climbs for as long as the new threshold takes, which is
+/// the one long pulse at the head of the voice.
+///
+/// Input `[0]`: the control pin, in volts.
+struct Timer555 {
+    /// Charge path: `R_a + R_b`.
+    r_charge: f64,
+    /// Discharge path: `R_b`.
+    r_discharge: f64,
+    c: f64,
+    v_high: f64,
+    v_low: f64,
+    cap: f64,
+    high: bool,
+}
+
+impl Timer555 {
+    fn new(r_charge: f64, r_discharge: f64, c: f64) -> Self {
+        Self {
+            r_charge,
+            r_discharge,
+            c,
+            // A bipolar 555 on this board's +12 V drops about 1.7 V at its
+            // output when sourcing and saturates near ground when sinking.
+            v_high: V12 - 1.7,
+            v_low: V_SAT,
+            cap: 0.0,
+            high: false,
+        }
+    }
+}
+
+impl CustomComponent for Timer555 {
+    fn reset(&mut self) {
+        self.cap = 0.0;
+        self.high = false;
+    }
+
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        let upper = inputs[0].clamp(0.05, V12);
+        let lower = upper * 0.5;
+        if self.high {
+            self.cap += (V12 - self.cap) * dt / (self.r_charge * self.c);
+            if self.cap >= upper {
+                self.high = false;
+            }
+        } else {
+            self.cap -= self.cap * dt / (self.r_discharge * self.c);
+            if self.cap <= lower {
+                self.high = true;
+            }
+        }
+        if self.high { self.v_high } else { self.v_low }
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.cap);
+        w.write_u8(u8::from(self.high));
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.cap = r.read_f64_le()?;
+        self.high = r.read_u8()? != 0;
+        Ok(())
+    }
+}
+
 /// An output that can only move so many volts per second, which is what an
 /// op-amp does when the capacitor across its feedback is the only thing that can
 /// absorb its input current.
@@ -1336,9 +1510,92 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         vec![shot.into()],
         Box::new(OneShot74123::new(OS_SHOT)),
     );
-    let shot_env = b.rc_envelope("SHOT_ENV", shot_pulse, 1e-4, SHOT_DECAY_S);
-    let shot_tone = b.second_order("SHOT_TONE", noise2, FilterMode::BandPass, SHOT_HZ, SHOT_Q);
-    let shot_voice = b.multiply("SHOT_OUT", shot_tone, shot_env);
+    // The shaper node between `R143` and `R144`. `Qbar` rests high and the
+    // trigger pulls it down, so this node falls on a shot and recovers after.
+    let shot_shaper = b.logic_levels(
+        "U21_QBAR_NODE",
+        shot_pulse,
+        shot_shaper_v(V5),
+        shot_shaper_v(V_SAT),
+    );
+
+    // --- The VCA control: node Y, clamped by D10 -----------------------------
+    // Exactly the two explosions' shape, and for the same reason: the capacitor
+    // sits charged at rest and the diode drags it down on a trigger. Expressed
+    // as a drop from rest rather than as an absolute voltage, so that the
+    // circuit starts at its DC operating point instead of opening the VCA while
+    // C89 charges. The attack is through D10 and R143/R144 in parallel, which is
+    // 479 ohms; the release is C89 against R147 in parallel with R148.
+    let shot_drop_tgt = b.logic_levels(
+        "SHOT_ENV_TGT",
+        shot_pulse,
+        0.0,
+        shot_vca_rest_v() - shot_vca_floor_v(),
+    );
+    let shot_drop = b.rc_envelope(
+        "SHOT_ENV_DROP",
+        shot_drop_tgt,
+        C89 * (R143 * R144 / (R143 + R144)),
+        C89 * (R147 * R148 / (R147 + R148)),
+    );
+    let shot_drop_neg = b.gain("SHOT_ENV_NEG", shot_drop, -1.0);
+    let shot_rest = b.constant("SHOT_ENV_REST", shot_vca_rest_v());
+    let shot_ctrl = b.add("SHOT_VCA_CTRL", &[shot_drop_neg, shot_rest]);
+    let shot_g = mb4391_gain(&mut b, "SHOT_VCA", shot_ctrl);
+
+    // --- The pitch shaper: node X, and the amplifier that clips on it --------
+    // `C88` carries the shaper node's step into X, which otherwise sits at 8.4 V
+    // on the divider from +12 V. `U19(12,13,14)` buffers X and `U19(1,2,3)`
+    // inverts it with a gain of -5.9 about the +6 V mid-rail, which for a step
+    // this size means the amplifier is not amplifying: it spends the whole voice
+    // pinned at one rail or the other, high while the trigger runs and low
+    // otherwise.
+    let shot_x_step = b.rc_high_pass("U19_NODE_X", shot_shaper, shot_pitch_r(), C88);
+    let shot_x_rest = b.constant("U19_NODE_X_REST", shot_pitch_rest_v());
+    let shot_x = b.add("U19_NODE_X_SUM", &[shot_x_step, shot_x_rest]);
+    let shot_midrail_neg = b.constant("U19_MIDRAIL_NEG", -V6);
+    let shot_x_dev = b.add("U19_NODE_X_DEV", &[shot_x, shot_midrail_neg]);
+    let shot_amp_raw = b.gain("U19_SHOT_AMP", shot_x_dev, -R150 / R149);
+    let shot_amp_ref = b.constant("U19_SHOT_AMP_REF", V6);
+    let shot_amp_sum = b.add("U19_SHOT_AMP_SUM", &[shot_amp_raw, shot_amp_ref]);
+    let shot_amp = b.clamp(
+        "U19_SHOT_AMP_CLIP",
+        shot_amp_sum,
+        V6 - OPAMP_SWING,
+        V6 + OPAMP_SWING,
+    );
+
+    // --- U18's 555, and node A ----------------------------------------------
+    // The amplifier drives the 555's control pin AND reaches node A through
+    // R154, so one shaper sets both the warble's rate and the pitch it warbles
+    // around. R155's 820 ohms against R153 and R154 is what scales the pair into
+    // the oscillator's range.
+    let shot_555 = b.custom(
+        "U18_555",
+        vec![shot_amp],
+        Box::new(Timer555::new(R151_R152, R152, C90)),
+    );
+    let (w_555, w_amp) = shot_node_a_weights();
+    let shot_a_555 = b.gain("SHOT_A_555", shot_555, w_555);
+    let shot_a_amp = b.gain("SHOT_A_ENV", shot_amp, w_amp);
+    let shot_a_raw = b.add("SHOT_A_SUM", &[shot_a_555, shot_a_amp]);
+    let shot_a = b.low_pass_hz(
+        "SHOT_NODE_A",
+        shot_a_raw,
+        1.0 / (std::f64::consts::TAU * C91 * (1.0 / (1.0 / R153 + 1.0 / R154 + 1.0 / R155))),
+    );
+
+    // --- The oscillator ------------------------------------------------------
+    // 3331 Hz per volt at node A, from the same helper the battleship uses. Its
+    // duty is 45.5 % rather than 50 %, because R156 against R159 is 2.2 to 1
+    // where the battleship's pair is exactly 2 to 1; the difference is a little
+    // more second harmonic and it is below what a square-versus-square
+    // comparison shows.
+    let shot_freq = b.gain("SHOT_FREQ", shot_a, shot_hz_per_volt());
+    let shot_square = b.variable_square("U19_SHOT_OSC", shot_freq);
+    let half = shot_out_v() / 2.0;
+    let shot_tone = b.logic_levels("SHOT_TONE", shot_square, -half, half);
+    let shot_voice = b.multiply("SHOT_OUT", shot_tone, shot_g);
     let shot_leg = mix_leg(&mut b, "SHOT_LEG", shot_voice, LEG_SHOT);
 
     // --- The battleship ------------------------------------------------------
@@ -2004,6 +2261,47 @@ mod tests {
             edge_s < half_period_s / 5.0,
             "edge against 1QC's half period"
         );
+    }
+
+    /// The shot is the battleship's oscillator again with a swept reference, and
+    /// the two claims worth pinning are that its VCA rests MUTED and that its
+    /// rate follows node A rather than a filter's `1/(2*pi*R*C)`.
+    #[test]
+    fn the_shots_oscillator_is_the_battleships_with_a_live_reference() {
+        // Qbar rests high, so both ends of the shaper sit at +5 V and D10 holds
+        // the control above the MB4391's mute point. Under the `Q` reading this
+        // rests at 1.5 V, which is full gain, and the board screams at power-on.
+        assert!((shot_shaper_v(V5) - V5).abs() < 1e-9);
+        assert!(
+            shot_vca_rest_v() > mb4391_mute_v(),
+            "the shot rests at {} V, which is not muted",
+            shot_vca_rest_v()
+        );
+        assert!(
+            shot_vca_floor_v() < mb4391_full_v(),
+            "a trigger only reaches {} V",
+            shot_vca_floor_v()
+        );
+
+        // Same helper as the battleship, because it is the same circuit: the
+        // rate is linear in node A and nothing about it is a filter corner.
+        let per_volt = shot_hz_per_volt();
+        assert!((per_volt - 3330.8).abs() < 1.0, "{per_volt} Hz/V");
+        // What the old model used, from reading C92 and R156 as a filter.
+        let as_a_filter = 1.0 / (std::f64::consts::TAU * R156 * C92);
+        assert!(
+            (as_a_filter - 4823.0).abs() < 5.0,
+            "the figure this replaced"
+        );
+
+        // R155 820 ohms is what holds node A down to a fifth of its sources.
+        let (w_555, w_amp) = shot_node_a_weights();
+        assert!((w_555 - 0.216).abs() < 0.002, "R153's share: {w_555}");
+        assert!((w_amp - 0.071).abs() < 0.002, "R154's share: {w_amp}");
+
+        // And the decay: C89 against R147 in parallel with R148.
+        let decay = C89 * (R147 * R148 / (R147 + R148));
+        assert!((decay - 0.468).abs() < 0.005, "{decay} s");
     }
 
     #[test]

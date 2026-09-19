@@ -1,0 +1,197 @@
+{
+  "modules": {
+    "zaxxon battleship: two relaxation oscillators, one of which reaches nothing": {
+      "ports": {
+        "C59 -> U17 (1,2)": { "direction": "output", "bits": [40] }
+      },
+      "cells": {
+        "uref": {
+          "type": "R80 2M2 / R81 220k",
+          "port_directions": { "+12V": "input", "1.091 V": "output" },
+          "connections": { "+12V": ["1"], "1.091 V": [2] },
+          "attributes": {}
+        },
+        "u9a": {
+          "type": "U9a buffer",
+          "port_directions": { "+ (3)": "input", "out (1)": "output" },
+          "connections": { "+ (3)": [2], "out (1)": [3] },
+          "attributes": {}
+        },
+        "r82": {
+          "type": "R82 30k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [3], "out": [4] },
+          "attributes": {}
+        },
+        "r83r84": {
+          "type": "R83 51k / R84 51k",
+          "port_directions": { "in": "input", "0.545 V": "output" },
+          "connections": { "in": [3], "0.545 V": [5] },
+          "attributes": {}
+        },
+        "c5657": {
+          "type": "C56+C57 1u65",
+          "port_directions": { "pin 6": "input", "pin 7": "output" },
+          "connections": { "pin 6": [4], "pin 7": [6] },
+          "attributes": {}
+        },
+        "u9b": {
+          "type": "U9b integrator",
+          "port_directions": {
+            "- (6)": "input",
+            "+ (5)": "input",
+            "out (7)": "output"
+          },
+          "connections": { "- (6)": [4], "+ (5)": [5], "out (7)": [6] },
+          "attributes": {}
+        },
+        "u9c": {
+          "type": "U9c Schmitt",
+          "port_directions": {
+            "- (9)": "input",
+            "+ (10)": "input",
+            "out (8)": "output"
+          },
+          "connections": { "- (9)": [6], "+ (10)": [7], "out (8)": [8] },
+          "attributes": {}
+        },
+        "r86": {
+          "type": "R86 51k",
+          "port_directions": { "+6V": "input", "out": "output" },
+          "connections": { "+6V": ["1"], "out": [7] },
+          "attributes": {}
+        },
+        "r88": {
+          "type": "R88 100k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [8], "out": [7] },
+          "attributes": {}
+        },
+        "r89d5": {
+          "type": "R89 10k / D5",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [8], "out": [9] },
+          "attributes": {}
+        },
+        "q4": {
+          "type": "Q4 C1684 / R87 2k2",
+          "port_directions": { "B": "input", "C": "output" },
+          "connections": { "B": [9], "C": [10] },
+          "attributes": {}
+        },
+        "r85": {
+          "type": "R85 2k2",
+          "port_directions": { "Q4 C": "input", "-> pin 6": "output" },
+          "connections": { "Q4 C": [10], "-> pin 6": [4] },
+          "attributes": {}
+        },
+        "r92": {
+          "type": "R92 30k",
+          "port_directions": { "U9 (7)": "input", "U10 (1)": "output" },
+          "connections": { "U9 (7)": [6], "U10 (1)": [21] },
+          "attributes": {}
+        },
+        "r90r91": {
+          "type": "R90 120k/R91 100k",
+          "port_directions": { "in": "input", "0.496 V": "output" },
+          "connections": { "in": [3], "0.496 V": [20] },
+          "attributes": {}
+        },
+        "u9d": {
+          "type": "U9d buffer",
+          "port_directions": { "+ (12)": "input", "out (11)": "output" },
+          "connections": { "+ (12)": [20], "out (11)": [22] },
+          "attributes": {}
+        },
+        "u10a": {
+          "type": "U10a",
+          "port_directions": {
+            "+ (3)": "input",
+            "- (2) = out": "input",
+            "out (1)": "output"
+          },
+          "connections": {
+            "+ (3)": [22],
+            "- (2) = out": [21],
+            "out (1)": [21]
+          },
+          "attributes": {}
+        },
+        "r93": {
+          "type": "R93 30k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [21], "out": [23] },
+          "attributes": {}
+        },
+        "r94r95": {
+          "type": "R94 51k / R95 51k",
+          "port_directions": { "in": "input", "0.248 V": "output" },
+          "connections": { "in": [21], "0.248 V": [24] },
+          "attributes": {}
+        },
+        "c58": {
+          "type": "C58 10n",
+          "port_directions": { "pin 6": "input", "pin 7": "output" },
+          "connections": { "pin 6": [23], "pin 7": [25] },
+          "attributes": {}
+        },
+        "u10b": {
+          "type": "U10b integrator",
+          "port_directions": {
+            "- (6)": "input",
+            "+ (5)": "input",
+            "out (7)": "output"
+          },
+          "connections": { "- (6)": [23], "+ (5)": [24], "out (7)": [25] },
+          "attributes": {}
+        },
+        "u10c": {
+          "type": "U10c Schmitt",
+          "port_directions": {
+            "- (9)": "input",
+            "+ (10)": "input",
+            "out (8)": "output"
+          },
+          "connections": { "- (9)": [25], "+ (10)": [26], "out (8)": [27] },
+          "attributes": {}
+        },
+        "r98": {
+          "type": "R98 51k",
+          "port_directions": { "+6V": "input", "out": "output" },
+          "connections": { "+6V": ["1"], "out": [26] },
+          "attributes": {}
+        },
+        "r99": {
+          "type": "R99 100k",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [27], "out": [26] },
+          "attributes": {}
+        },
+        "r100d6": {
+          "type": "R100 10k / D6",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [27], "out": [28] },
+          "attributes": {}
+        },
+        "q5": {
+          "type": "Q5 C1684 / R97 2k2",
+          "port_directions": { "B": "input", "C": "output" },
+          "connections": { "B": [28], "C": [29] },
+          "attributes": {}
+        },
+        "r96": {
+          "type": "R96 15k",
+          "port_directions": { "Q5 C": "input", "-> pin 6": "output" },
+          "connections": { "Q5 C": [29], "-> pin 6": [23] },
+          "attributes": {}
+        },
+        "u10d": {
+          "type": "U10d",
+          "port_directions": { "+ (12) = pin 10": "input", "out (14)": "output" },
+          "connections": { "+ (12) = pin 10": [26], "out (14)": [40] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

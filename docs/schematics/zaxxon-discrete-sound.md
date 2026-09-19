@@ -312,6 +312,18 @@ gates a `4016B` section. What that section passes is built from two copies of
 one circuit, an op-amp integrator driving an inverting Schmitt trigger with a
 transistor closing the loop:
 
+![zaxxon battleship oscillator](zaxxon-battleship-oscillator.svg)
+
+[`zaxxon-battleship-oscillator.json`](zaxxon-battleship-oscillator.json). The
+slow stage is the upper row and the fast one the lower, and the argument is in
+the pins. `R85` and `R96` both arrive at their integrator's **pin 6**, the
+inverting input, not at the divider that feeds pin 5: that is what makes each
+loop reverse and it is the one thing a block diagram of this voice cannot say.
+`R92` leaves `U9`'s pin 7 and arrives at `U10a`'s output, which is strapped to
+its own inverting input, so the slow stage drives a follower and nothing else.
+And `U10d`'s pin 12 sits on pin 10, the Schmitt's hysteresis node, rather than
+on pin 8.
+
 | | slow (`U9`) | fast (`U10`) |
 |---|---|---|
 | reference into the integrator | `R80` 2.2 MΩ / `R81` 220 kΩ off +12 V, buffered by `U9`(2,3,1): **1.091 V** | that, divided by `R90` 120 kΩ / `R91` 100 kΩ and buffered twice: **0.496 V** |
@@ -372,19 +384,90 @@ kind of result and it is the point of reading the sheet: a 7 % duty pulse at
 3 Hz is exactly what somebody would *want* to shape this voice with, and
 modeling it anyway would have been modeling a wire that is not drawn.
 
-## The shot and the three sheet-12 voices
+## The shot: the same oscillator again, with its reference swept
+
+`SHOT` (`PC0`) is a **tone**, and there is no noise anywhere in it. That is the
+first thing to say, because the obvious reading of `R156` 33 kΩ with `C92`
+1000 pF around a `U19` section is a filter, and every other `U19`-class stage on
+this board is one. It is not. `U19`(5,6,7) with `C92` in its feedback and
+`U19`(9,10,8) around `R161` 33 kΩ / `R162` 100 kΩ are **the battleship's
+oscillator built a third time**, transistor and all, and `R156` with `R157` and
+`R158` is its reference divider rather than a filter's input.
+
+The difference from the battleship is that here the reference is a live node, so
+the pitch is swept. Everything else on the voice exists to work out by how much.
+
+![zaxxon shot oscillator](zaxxon-shot-oscillator.svg)
+
+[`zaxxon-shot-oscillator.json`](zaxxon-shot-oscillator.json). Two pin-level
+facts carry the voice, and both are invisible in a part list. `R159` arrives at
+`U19b`'s **pin 6**, the same summing-node junction the battleship's `R85` and
+`R96` make, which is what says this is an oscillator and not a filter. And the
+one-shot's **`Qbar`** on pin 4 is what drives the shaper, while `Q` on pin 13 is
+drawn and connects to nothing: that is the difference between a VCA that rests
+muted and one that rests wide open.
+
+The node table for the part that is not a chip:
+
+| Net | Reaches |
+|---|---|
+| shaper node | `R143`.b, `R144`.b, `C88`.a, `D10` cathode |
+| node X | `C88`.b, `R146`.b, `R147`.a, `U19`.12 |
+| node Y | `R147`.b, `R148`.a, `C89`.a, `D10` anode, `U20`.3 |
+| node A | `R153`.b, `R154`.b, `R155`.a, `C91`.a, `R156`.a, `R157`.a |
+| `U19b` summing node | `R156`.b, `C92`.a, `R159`.b, `U19`.6 |
+
+**`R144` is driven by `Qbar`, not `Q`.** `Q` on pin 13 is drawn and connects to
+nothing. This is not a detail: it inverts the whole voice. With `Qbar` the
+shaper node rests at +5 V, `D10` holds node `Y` a diode drop above it at 5.6 V,
+which is above the `MB4391`'s 4.76 V mute point, and the trigger drags `Y` down
+to 1.50 V and opens the VCA. That is the two explosions' shape exactly, and
+under the other reading the voice would scream at power-on.
+
+`C89` 0.68 uF then recovers through `R147` in parallel with `R148`, a **468 ms**
+time constant, and `Y` crosses back above the mute point at about 630 ms. That
+is the shot's length, and the reference recording of this voice is 990 ms.
+
+Two things follow from node X that are worth stating plainly:
+
+- **`U19`(1,2,3) is not amplifying.** `C88` carries the shaper node's 4.1 V step
+  into X, and a gain of -5.9 about a +6 V reference turns that into 24 V of
+  demand on an amplifier with 10 V to give. It sits pinned at one rail or the
+  other: high while the trigger runs, low the rest of the time. Same finding as
+  the alarm stage, on a different part of the same chip.
+- **It drives the 555's control pin, not its timing.** `U18` is an astable on
+  `R151`/`R152` 10 kΩ and `C90` 3.3 uF, which alone would be 14.5 Hz, but pin 5
+  is live. A 555's control pin is its upper threshold and half of it is the
+  lower, so raising it stretches the charge leg against `V_cc` far more than the
+  discharge leg against ground: the part runs near 39 Hz at an 11 % duty with
+  the amplifier low, and near 7 Hz at 84 % with it high. The duty is what this
+  board is using.
+
+Node A is then the 555 through `R153` 2.7 kΩ and the amplifier through `R154`
+8.2 kΩ, loaded by `R155`'s **820 Ω** to ground and smoothed by `C91` 15 uF at an
+18 Hz corner. `R155` is the part that makes the voice work: it holds the node to
+about a fifth of what either source alone would give, which is what keeps the
+oscillator's reference in the range where it sounds like a shot.
+
+The rate is linear in node A, because `R157` and `R158` are equal and the
+integrator's virtual ground is therefore half of it:
+
+```text
+f = (A/2) / (window * C92 * (R156 + R156*R159/(R156 - R159)))
+  = A * 3331 Hz/V        with window = R161/(R161+R162) * swing = 2.48 V
+```
+
+so the voice covers roughly 1.1 kHz at rest to 10 kHz at the head of a trigger,
+warbling with the 555. Its duty is 45.5 % rather than the battleship's exact
+50 %, because `R156` against `R159` is 2.2 to 1 where the battleship's pair is 2
+to 1. It reaches `MB4391 U16` ch B through `R164` 1 MΩ against `R165` 220 kΩ, a
+divider of **0.18**, and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
+
+## The three sheet-12 voices
 
 These were read at block level: enough to name every part and the signal flow,
 not enough to state a center frequency or a sweep law from the values.
 
-- **`SHOT` (`PC0`)** triggers `U21` half A (`C87` 2.2 uF, `R142` 18 kΩ, **11.1
-  ms**), whose `Q` drives `R144` 560 Ω, `R143` 3.3 kΩ, `C88` 0.047 uF and `D10`
-  into a network of `R145` 270 kΩ, `R146`/`R147` 1 MΩ and `R148` 2.2 MΩ around
-  `U19` and `U20`. A 555 at `U18` (`R151`/`R152` 10 kΩ, `R153` 2.7 kΩ, `R154`
-  8.2 kΩ, `R155` 820 Ω, `C90` 3.3 uF, `C91` 15 uF) and a further `U19` stage
-  (`R156`-`R159` 33 kΩ/15 kΩ, `C92` 1000 pF, `R161` 33 kΩ, `R162` 100 kΩ, `Q7`,
-  `D11`, `R163` 10 kΩ) produce the tone. It reaches `MB4391 U16` ch B through
-  `R164` 1 MΩ and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
 - **`HOMING MISSILE` (`PA4`)** goes to `U30` 7406 (1 -> 2) with `R55` 10 kΩ to
   +12 V, then `R42` 51 kΩ into `U5` with `R43` 100 kΩ, `R44` 6.8 kΩ and `C43`
   6.8 uF (**46 ms**), buffered by `U4`, summed through `R45` 68 kΩ with `NOISE 1`
@@ -548,6 +631,10 @@ sources.
   nothing sweeps it. Both of its oscillators are solved from read values, their
   40.5:1 ratio holds whatever the op-amps' swing turns out to be, and the slow
   one is a solved circuit that reaches no audio at all.
+- **The shot is a swept tone, not filtered noise**, on a third copy of that same
+  integrator-and-Schmitt oscillator. Its rate is 3331 Hz per volt at node A, its
+  `Qbar`-driven shaper rests the VCA muted and decays over 468 ms, and its 555
+  is modulated through its control pin rather than its timing resistors.
 - **The alarm stage is a comparator**, driven a hundred times past its rails,
   whose output is slew-limited by `C99` to 0.4 V per microsecond.
 - **Seven 74123 one-shot widths**, from their own R and C:
@@ -590,10 +677,10 @@ sources.
   traced by its crossing height at the sheet seam to `U15` ch A, the 321 Hz path.
   `M-EXP` to `U13` ch A is by elimination, corroborated by the medium explosion
   being the lower and louder of the two.
-- **The shot's oscillator at component level.** It is transcribed as a part list
-  above and was not solved, so its pitch in the model is not derived from the
-  drawing. The battleship's two oscillators, which used to sit in this bullet
-  beside it, are now solved end to end.
+- **The 555's output levels.** `U18`'s and `U6`'s swing is a property of the
+  part rather than of the drawing. The shot's node A is directly proportional to
+  it, so its pitch scales with a number no sheet gives; the bipolar part's usual
+  1.7 V of headroom is what the model uses.
 - **What `R92` 30 kΩ is for.** Everything either side of it is read: it runs from
   the slow oscillator's integrator output to a node that is a unity follower's
   output. As drawn it can do nothing, and no other path off that oscillator
@@ -660,16 +747,33 @@ first pass, replaced in the second by `1QB` because two files in MAME's sample
 set measure near 5 kHz, and restored here. `1QB` is not wired to anything. The
 sample set is a recording of one board and cannot settle which pin a wire is on.
 
+And a fifth, on the shot, which is the same mistake as the cannon's for the
+third time: **`U19`(5,6,7) was read as a filter because its neighbors are
+filters.** A 33 kΩ resistor and a 1000 pF capacitor around an op-amp section
+look exactly like the band-pass the explosions use, and the pitch that falls out
+of `1/(2*pi*R*C)` is a plausible 4.8 kHz, so nothing about the wrong reading
+looked wrong. What it is instead is the battleship's oscillator, which this file
+had already solved forty lines further up without either transcription noticing
+the other. Three voices on this board are the same circuit and it took three
+separate traces to see it.
+
+The lesson that generalizes: **a part list is not a topology, and this format
+lets one masquerade as the other.** Every value in the old shot bullet was
+correct. It named `R156`, `C92`, `R161`, `R162`, `Q7` and `D11`, and a reader
+could have rebuilt the oscillator from it. What it did not say was what was
+connected to what, and the model built from it band-passed noise at a frequency
+the circuit never produces.
+
 ## Confidence
 
 A good scan. The PPI map, the ladder network, the seven one-shot R/C pairs, the
 three Sallen-Key filters and the whole eleven-leg mix table were read at 400 dpi
 with every designator and value legible, and those are the parts to trust.
 
-The battleship's two oscillators are now read at component level and solved, and
-so are the two junctions their rates turn on. The shot oscillator, the sheet-12
-555 chains, and the routing of control voltages across the sheet seam are still
-read at block level and are marked so above.
+The battleship's and the shot's oscillators are now read at component level and
+solved, and so are the junctions their rates turn on. The sheet-12 555 chains,
+and the routing of control voltages across the sheet seam other than the shot's
+and the alarms', are still read at block level and are marked so above.
 
 This is a hand transcription and can be wrong. Nothing in it is checked by a
 test; the section above it is what keeps that honest.
