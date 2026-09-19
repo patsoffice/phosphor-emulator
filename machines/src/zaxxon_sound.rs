@@ -84,8 +84,11 @@ const V_DIODE: f64 = 0.6;
 /// MM5837's oscillator is specified at a supply this board does not give it
 /// (`Vss` sits at +12 V with `Vdd` and `Vgg` grounded, so the part runs at 12 V
 /// against the datasheet's nominal 14 V) and the part-to-part spread is wide.
-/// 100 kHz is the commonly quoted typical and is a convention, not a reading.
-const MM5837_HZ: f64 = 100_000.0;
+///
+/// 48 kHz is MAME's `nld_mm5837` default, which also warns outside 24-56 kHz;
+/// that range is the part's published spread and is the reason this is not the
+/// 100 kHz figure the file first carried, which is outside it.
+const MM5837_HZ: f64 = 48_000.0;
 
 /// `U2`'s output swing about the mid-rail, after `C66` blocks its DC.
 ///
@@ -243,21 +246,55 @@ const C34: f64 = 0.68e-6; // and C35
 // The MB4391 VCAs
 // ---------------------------------------------------------------------------
 
-/// Control voltage at or above which an `MB4391` is muted, and the voltage at
-/// or below which it passes its input unattenuated.
+/// The `MB4391`'s supply, which the drawing does not give.
 ///
-/// **The direction is established, the numbers are INVENTED.** Five independent
-/// uses on this board agree that the control pin attenuates: both explosion
-/// envelopes sit charged at rest and are pulled *down* on a trigger, and both
-/// engine tones' capacitors sit at +6 V when their 74LS139 output is inactive
-/// and are pulled to ground when it is selected. Under the opposite polarity the
-/// board would howl at reset and go quiet when a voice fired.
+/// Its symbols on sheets 11 and 12 show only `IN`, `CON`, `OUT` and `RO`; the
+/// `VCC` and `GND` pins are not drawn. +5 V is inferred, and the inference is
+/// the strongest single check in this file: see [`mb4391_mute_v`].
+const MB4391_VCC: f64 = 5.0;
+
+/// Control voltage at or above which an `MB4391` is muted.
 ///
-/// [`MB4391_MUTE_V`] is 5 V rather than 6 because the two explosion controls
-/// rest on a divider between +5 V and a charged capacitor, so 5 V is their idle
-/// and the board must be silent there.
-const MB4391_MUTE_V: f64 = 5.0;
-const MB4391_FULL_V: f64 = 1.0;
+/// **The direction is established from this board; the shape and the thresholds
+/// are a second opinion, not a reading.** Five independent uses here agree that
+/// the control pin attenuates: both explosion envelopes sit charged at rest and
+/// are pulled *down* on a trigger, and both engine tones' capacitors sit at
+/// +6 V when their 74LS139 output is inactive and are pulled to ground when it
+/// is selected. Under the opposite polarity the board would howl at reset and go
+/// quiet when a voice fired.
+///
+/// The numbers come from MAME's netlist for Borderline
+/// (`src/mame/sega/nl_brdrline.cpp`), a Sega/Gremlin board of the same era
+/// carrying the same part. That netlist is explicitly a guess: its author
+/// labels it "values by guesses" and the file's own header says "MB4391 is
+/// missing, a fake substitution is used". So this corroborates rather than
+/// establishes. It is worth adopting over the linear ramp this file first
+/// carried for two reasons:
+///
+/// - it is expressed against the part's supply (`VCC - 0.24` to
+///   `VCC/2 + 0.34`), which is what lets it be transferred to another board at
+///   all, and it confirms the pinout read off the Zaxxon sheets exactly:
+///   `IN 1, CON 2, RO 14, OUT 15` and `IN 5, CON 6, RO 10, OUT 11`;
+/// - at `VCC` = 5 V it lands on **Zaxxon's own envelopes**. The explosion
+///   shaper read off sheet 11 rests at 5.00 V (the `R104`/`R105` divider's idle)
+///   and bottoms at 2.80 V (the same divider with `C61` pulled to a diode drop).
+///   The mute and full-gain points are 4.76 V and 2.84 V. The circuit's envelope
+///   sweeps precisely the VCA's control range and stops just past each end,
+///   which is what a board designer would arrange and is not something two
+///   unrelated guesses would produce by accident. It is also the reason to
+///   believe [`MB4391_VCC`] is 5 V.
+///
+/// The gain is that ramp **squared**, and the part's maximum gain is unity: it
+/// is an attenuator, with no make-up gain to find.
+fn mb4391_mute_v() -> f64 {
+    MB4391_VCC - 0.24
+}
+
+/// Control voltage at or below which an `MB4391` passes its input unattenuated.
+/// See [`mb4391_mute_v`].
+fn mb4391_full_v() -> f64 {
+    MB4391_VCC / 2.0 + 0.34
+}
 
 // ---------------------------------------------------------------------------
 // The 74123 one-shots (sheets 11 and 12)
@@ -313,6 +350,11 @@ const R127_FB: f64 = 47_000.0; // U12's band-pass feedback (see below)
 const R128: f64 = 10_000.0; // the band-pass input resistor
 const R130: f64 = 100.0; // in series with Q6, from the tuning node to ground
 const C81: f64 = 0.01e-6; // the two band-pass feedback caps (C81 = C82)
+// C83 10 uF then R134 into R135 to ground: a 2:1 divider on the way to C84 and
+// MB4391 U13 ch B. Read on sheet 11's right half, and missed on the first pass,
+// which left the cannon twice as loud as the board makes it.
+const R134: f64 = 100_000.0;
+const R135: f64 = 100_000.0;
 
 // `R127` really does appear twice on sheet 11, once as the 100 k envelope shunt
 // and once as the 47 k band-pass feedback, both legible at 400 dpi. One of them
@@ -399,6 +441,11 @@ fn homing_missile_hz() -> f64 {
 /// on the source impedance, which was not worked out.
 const HOMING_MISSILE_SWEEP: f64 = 0.55;
 
+/// `U6` runs on +5 V (pins 4 and 8), so its square output swings to about
+/// `Vcc - 1.2`, and `R51`/`R52` divide that before `C47` and the 4016B.
+const R51: f64 = 12_000.0;
+const R52: f64 = 3_300.0;
+
 const R58: f64 = 470.0; // base missile envelope discharge
 const C49: f64 = 15e-6;
 const R59_R60: f64 = 440_000.0; // its recovery -> 6.6 s
@@ -421,6 +468,21 @@ fn laser_repeat_hz() -> f64 {
 /// `U7` drives was read as a part list and not solved.
 const LASER_HZ: f64 = 1_450.0;
 const LASER_DECAY_S: f64 = 0.055;
+
+/// `R75`/`R76` divide `U8`'s output before `C55` and the 4016B. This is what
+/// sets the laser's level against the rest of the board, and it is read.
+const R75: f64 = 10_000.0;
+const R76: f64 = 2_200.0;
+
+/// The swing an op-amp on this board's single +12 V supply delivers about the
+/// +6 V mid-rail.
+///
+/// Not a reading: the drawing dimensions no op-amp's output stage. It is the
+/// rail less the usual pair of volts of headroom, and it is the reference every
+/// voice whose own chain is read only at block level is expressed against, so
+/// that those voices are at least the right size relative to the ones that are
+/// derived end to end.
+const OPAMP_SWING: f64 = 5.0;
 
 // ---------------------------------------------------------------------------
 // The mix (sheet 11 p133, sheet 12 p135)
@@ -463,7 +525,7 @@ const C_BLOCK: f64 = 1e-6;
 /// is no voltage on this board that corresponds to full scale. This puts a
 /// single loud voice at roughly a third of full scale and leaves room for the
 /// several that overlap in play.
-const OUTPUT_GAIN: f64 = 3.0;
+const OUTPUT_GAIN: f64 = 3.2;
 
 // ---------------------------------------------------------------------------
 // Custom components
@@ -665,14 +727,15 @@ struct ZaxxonInputs {
     alarm3: LogicInputId,
 }
 
-/// An `MB4391`'s gain from its control voltage: `1` at or below
-/// [`MB4391_FULL_V`], `0` at or above [`MB4391_MUTE_V`], linear between.
+/// An `MB4391`'s gain from its control voltage: the clamped ramp between
+/// [`mb4391_full_v`] and [`mb4391_mute_v`], squared.
 fn mb4391_gain(b: &mut DiscreteCircuitBuilder, name: &str, control: NodeId) -> NodeId {
-    let span = MB4391_MUTE_V - MB4391_FULL_V;
+    let span = mb4391_mute_v() - mb4391_full_v();
     let slope = b.gain(&format!("{name}_SLOPE"), control, -1.0 / span);
-    let offset = b.constant(&format!("{name}_OFFSET"), MB4391_MUTE_V / span);
+    let offset = b.constant(&format!("{name}_OFFSET"), mb4391_mute_v() / span);
     let sum = b.add(&format!("{name}_SUM"), &[slope, offset]);
-    b.clamp(name, sum, 0.0, 1.0)
+    let ramp = b.clamp(&format!("{name}_RAMP"), sum, 0.0, 1.0);
+    b.multiply(name, ramp, ramp)
 }
 
 /// The shared envelope shape of the two explosions and the base missile: a
@@ -714,13 +777,29 @@ fn inverted_envelope(
 
 /// One voice's leg into `SJ`: the series/shunt attenuator and the 1 uF block.
 /// The 51 kOhm common is [`R_COMMON`] and is applied by the mixer.
+///
+/// The board's balance is these eleven pairs, and that is only the whole answer
+/// where the eleven sources arrive at a swing the drawing accounts for. Getting
+/// that wrong is not a subtlety: an earlier pass here gave each voice whatever
+/// amplitude its own synthesis happened to produce, the sources spanned 36:1 for
+/// reasons that were entirely artefacts, and the transcribed ratios were
+/// swamped. Measured against a recorded movie, the medium explosion (leg 0.851,
+/// the loudest on the board) came out thirteen times quieter than the laser
+/// (leg 0.149, nearly the quietest).
+///
+/// Every source feeding a leg is now sized by something read off the sheet: the
+/// two 4016B-switched voices by their own dividers (`R51`/`R52` and
+/// `R75`/`R76`), the cannon by `R134`/`R135`, the seven VCA'd voices by the
+/// noise chain's read gains and the `MB4391`'s unity ceiling, and the alarms by
+/// `R173`/`R172` into the rail. `voice_levels_follow_the_leg_table` is what
+/// keeps that true.
 fn mix_leg(
     b: &mut DiscreteCircuitBuilder,
     name: &str,
     src: NodeId,
     (rs, rp): (f64, f64),
 ) -> NodeId {
-    let attenuated = b.gain(&format!("{name}_ATT"), src, rp / (rs + rp));
+    let attenuated = b.gain(&format!("{name}_SRC"), src, rp / (rs + rp));
     b.rc_high_pass(name, attenuated, R_COMMON, C_BLOCK)
 }
 
@@ -863,10 +942,12 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     // control pin comes from was NOT traced, and the same envelope inverted is
     // the only source on the sheet that leaves the board silent at rest.
     let cannon_ctrl_neg = b.gain("CANNON_VCA_NEG", cannon_env, -1.0);
-    let cannon_ctrl_rest = b.constant("CANNON_VCA_REST", MB4391_MUTE_V);
+    let cannon_ctrl_rest = b.constant("CANNON_VCA_REST", mb4391_mute_v());
     let cannon_ctrl = b.add("CANNON_VCA_CTRL", &[cannon_ctrl_neg, cannon_ctrl_rest]);
     let cannon_g = mb4391_gain(&mut b, "CANNON_VCA", cannon_ctrl);
-    let cannon_voice = b.multiply("CANNON_OUT", cannon_bp, cannon_g);
+    let cannon_vca = b.multiply("CANNON_OUT", cannon_bp, cannon_g);
+    // C83 into R134, with R135 to ground: the 2:1 divider ahead of C84.
+    let cannon_voice = b.gain("CANNON_R134", cannon_vca, R135 / (R134 + R135));
     let cannon_leg = mix_leg(&mut b, "CANNON_LEG", cannon_voice, LEG_CANNON);
 
     // --- The shot ------------------------------------------------------------
@@ -899,7 +980,11 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         BATTLESHIP_HZ * 3.0,
         BATTLESHIP_Q,
     );
-    let bs_gated = b.multiply("BATTLESHIP_SW", bs_band, battleship);
+    // U10's output reaches the 4016B through C59 with no divider, so this voice
+    // arrives at its leg at the full op-amp swing. Its leg is correspondingly
+    // one of the smallest on the board, at 0.0909.
+    let bs_level = b.gain("BATTLESHIP_LEVEL", bs_band, OPAMP_SWING);
+    let bs_gated = b.multiply("BATTLESHIP_SW", bs_level, battleship);
     let battleship_leg = mix_leg(&mut b, "BATTLESHIP_LEG", bs_gated, LEG_BATTLESHIP);
 
     // --- The homing missile: a 555 swept by an RC envelope -------------------
@@ -912,7 +997,11 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let hm_base = b.constant("HOMING_BASE", homing_missile_hz());
     let hm_freq = b.add("HOMING_FREQ", &[hm_base, hm_sweep]);
     let hm_tone = b.variable_square("HOMING_TONE", hm_freq);
-    let hm_level = b.logic_levels("HOMING_LEVEL", hm_tone, -V6 * 0.5, V6 * 0.5);
+    // U6 runs on +5 V, so its square reaches about Vcc - 1.2; R51/R52 then
+    // divide it before C47 and the 4016B. Half the swing each side of the
+    // mid-rail, because C47 blocks the DC.
+    let hm_swing = (V5 - 1.2) * 0.5 * R52 / (R51 + R52);
+    let hm_level = b.logic_levels("HOMING_LEVEL", hm_tone, -hm_swing, hm_swing);
     let hm_gated = b.multiply("HOMING_SW", hm_level, homing_missile);
     let homing_leg = mix_leg(&mut b, "HOMING_LEG", hm_gated, LEG_HOMING_MISSILE);
 
@@ -940,7 +1029,8 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let laser_env = b.rc_envelope("LASER_ENV", laser_repeat, 1e-4, LASER_DECAY_S);
     let laser_carrier = b.triangle("LASER_TONE", LASER_HZ);
     let laser_voice = b.multiply("LASER_AM", laser_carrier, laser_env);
-    let laser_level = b.gain("LASER_LEVEL", laser_voice, V6 * 0.5);
+    // U8's output divided by R75/R76 before C55 and the 4016B.
+    let laser_level = b.gain("LASER_LEVEL", laser_voice, OPAMP_SWING * R76 / (R75 + R76));
     let laser_gated = b.multiply("LASER_SW", laser_level, laser);
     let laser_leg = mix_leg(&mut b, "LASER_LEG", laser_gated, LEG_LASER);
 
@@ -1109,6 +1199,87 @@ impl ZaxxonSound {
     }
 }
 
+/// The eleven legs, in the order they appear in the debug panel, with the node
+/// name each one's voice lands on.
+///
+/// This is the view that answers "which voice is actually contributing", which
+/// is not a question the output sample can answer once eleven legs have been
+/// summed. Each is reported as a magnitude in millivolts at `SJ`'s side of the
+/// leg, so a voice that is gated off reads zero and one that is sounding does
+/// not.
+const DEBUG_LEGS: [(&str, &str); 11] = [
+    ("SHIP_A", "SHIP_A_LEG"),
+    ("SHIP_B", "SHIP_B_LEG"),
+    ("HOMING", "HOMING_LEG"),
+    ("BASEMIS", "BASE_MISSILE_LEG"),
+    ("LASER", "LASER_LEG"),
+    ("BATTLE", "BATTLESHIP_LEG"),
+    ("S_EXP", "S_EXP_LEG"),
+    ("M_EXP", "M_EXP_LEG"),
+    ("CANNON", "CANNON_LEG"),
+    ("SHOT", "SHOT_LEG"),
+    ("ALARM", "ALARM_LEG"),
+];
+
+/// The gate inputs, in PPI order, so the panel shows the cause beside the effect.
+const DEBUG_GATES: [(&str, &str); 13] = [
+    ("g_SHIP_A", "SHIP_TONE_A"),
+    ("g_SHIP_B", "SHIP_TONE_B"),
+    ("g_HOMING", "HOMING_MISSILE"),
+    ("g_BASEMIS", "BASE_MISSILE"),
+    ("g_LASER", "LASER"),
+    ("g_BATTLE", "BATTLESHIP"),
+    ("g_S_EXP", "S_EXP"),
+    ("g_M_EXP", "M_EXP"),
+    ("g_CANNON", "CANNON"),
+    ("g_SHOT", "SHOT"),
+    ("g_ALARM2", "ALARM2"),
+    ("g_ALARM3", "ALARM3"),
+    ("SHIP_LVL", "SHIP_LEVEL"),
+];
+
+impl phosphor_core::device::Device for ZaxxonSound {
+    fn name(&self) -> &'static str {
+        "Zaxxon Discrete"
+    }
+    fn reset(&mut self) {
+        self.reset();
+    }
+}
+
+impl phosphor_core::core::debug::Debuggable for ZaxxonSound {
+    fn debug_registers(&self) -> Vec<phosphor_core::core::debug::DebugRegister> {
+        use phosphor_core::core::debug::DebugRegister;
+        let mv = |name: &str| -> u64 {
+            self.circuit
+                .node_by_name(name)
+                .map(|n| (self.circuit.value(n).abs() * 1000.0) as u64)
+                .unwrap_or(0)
+        };
+        let mut out = Vec::with_capacity(DEBUG_GATES.len() + DEBUG_LEGS.len() + 1);
+        for (label, node) in DEBUG_GATES {
+            out.push(DebugRegister {
+                name: label,
+                value: mv(node),
+                width: DebugRegister::DECIMAL,
+            });
+        }
+        for (label, node) in DEBUG_LEGS {
+            out.push(DebugRegister {
+                name: label,
+                value: mv(node),
+                width: DebugRegister::DECIMAL,
+            });
+        }
+        out.push(DebugRegister {
+            name: "SJ",
+            value: mv("SJ"),
+            width: DebugRegister::DECIMAL,
+        });
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +1358,83 @@ mod tests {
                 rms(&out)
             );
         }
+    }
+
+    /// Drive one voice alone and return the peak its leg puts on `SJ`, in volts.
+    fn leg_peak(node: &str, ports: (u8, u8, u8), ms: u64) -> f64 {
+        let mut snd = ZaxxonSound::new(CPU_HZ);
+        snd.set_ports(IDLE.0, IDLE.1, IDLE.2);
+        snd.tick(CPU_HZ / 50);
+        snd.set_ports(ports.0, ports.1, ports.2);
+        let id = snd
+            .circuit()
+            .node_by_name(node)
+            .unwrap_or_else(|| panic!("no node {node}"));
+        let mut peak: f64 = 0.0;
+        let slice = CPU_HZ / 2000; // half a millisecond
+        for _ in 0..(ms * 2) {
+            snd.circuit.tick(slice);
+            peak = peak.max(snd.circuit().value(id).abs());
+        }
+        peak
+    }
+
+    /// No voice may dominate the mix by more than the leg table allows.
+    ///
+    /// **This is the test the device shipped without, and the defect it would
+    /// have caught was real.** Measured against a recorded movie, the medium
+    /// explosion (leg 0.851, the loudest on the board) came out thirteen times
+    /// quieter than the laser (leg 0.149, nearly the quietest), because each
+    /// voice reached its leg at whatever amplitude its own synthesis happened to
+    /// produce. The leg table was faithful and governed nothing.
+    ///
+    /// It does not pin a level per voice, because the board does not give one:
+    /// several chains are read at block level and their absolute amplitude is
+    /// genuinely unknown. What it pins is the thing the drawing *does* settle,
+    /// that no voice is orders of magnitude out of line with the rest, which is
+    /// the failure that actually happened.
+    #[test]
+    fn voice_levels_follow_the_leg_table() {
+        /// A voice, its leg node, the latches that drive it, and how long to
+        /// hold them for.
+        type Case = (&'static str, &'static str, (u8, u8, u8), u64);
+        let cases: [Case; 11] = [
+            ("ship tone A", "SHIP_A_LEG", (0xF3, 0xFF, 0xFF), 600),
+            ("ship tone B", "SHIP_B_LEG", (0xF7, 0xFF, 0xFF), 600),
+            ("homing missile", "HOMING_LEG", (0xEF, 0xFF, 0xFF), 400),
+            ("base missile", "BASE_MISSILE_LEG", (0xDF, 0xFF, 0xFF), 400),
+            ("laser", "LASER_LEG", (0xBF, 0xFF, 0xFF), 700),
+            ("battleship", "BATTLESHIP_LEG", (0x7F, 0xFF, 0xFF), 600),
+            ("small explosion", "S_EXP_LEG", (0xFF, 0xEF, 0xFF), 400),
+            ("medium explosion", "M_EXP_LEG", (0xFF, 0xDF, 0xFF), 400),
+            ("cannon", "CANNON_LEG", (0xFF, 0x7F, 0xFF), 400),
+            ("shot", "SHOT_LEG", (0xFF, 0xFF, 0xFE), 200),
+            ("alarms", "ALARM_LEG", (0xFF, 0xFF, 0xFB), 400),
+        ];
+
+        let peaks: Vec<(&str, f64)> = cases
+            .iter()
+            .map(|(label, node, ports, ms)| (*label, leg_peak(node, *ports, *ms)))
+            .collect();
+        let summary: Vec<String> = peaks
+            .iter()
+            .map(|(l, p)| format!("{l} {:.0} mV", p * 1000.0))
+            .collect();
+        let summary = summary.join(", ");
+
+        let loudest = peaks.iter().map(|(_, p)| *p).fold(0.0f64, f64::max);
+        let quietest = peaks.iter().map(|(_, p)| *p).fold(f64::MAX, f64::min);
+        assert!(quietest > 0.0, "every voice must reach SJ. {summary}");
+        // The leg table itself spans 59:1 from the medium explosion to the
+        // alarms, and the alarms sit behind a gain of 220, so some spread is the
+        // board. A hundredfold is not.
+        assert!(
+            loudest / quietest < 100.0,
+            "the mix spans {:.0}:1, which is wider than the leg table can \
+             account for; a voice's source amplitude is doing the work the \
+             series/shunt pairs should be doing. {summary}",
+            loudest / quietest
+        );
     }
 
     /// The output scaling is a headroom choice rather than a reading (see

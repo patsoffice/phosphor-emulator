@@ -7,7 +7,7 @@
 //!
 //! | Drawing | Sheets | PDF pages | What is on them |
 //! |---|---|---|---|
-//! | `IC Board A 834-0214 rev A` | 11-12 of 16 | 131-135 | The discrete sound board: the 8255 at U23, an MM5837 noise source, 74123 one-shots, MB4391 VCAs and an LA4460 power amp |
+//! | `IC Board A 834-0214 rev A` | 11-12 of 16 | 132-135 | The discrete sound board: the 8255 at U23, an MM5837 noise source, 74123 one-shots, MB4391 VCAs and an LA4460 power amp |
 //! | `IC Board A 834-0214 rev A` | 13 of 16 | 136-137 | Controls, the latched coin inputs, and the color PROM and its resistor DAC |
 //! | `IC Board A 834-0214 rev A` | 14 of 16 | 138-139 | The Z80 at U24, program ROM at U27/U28, video RAM and its address mux |
 //! | `IC Board B 834-0211 rev A` | 6-8 of 9 | 140-145 | Background scroll adders and map ROMs, the sync chain, sprite ROMs and the 93422 line buffers |
@@ -19,10 +19,12 @@
 //! this file still rest on the reference driver alone, and say so where they are
 //! written.
 //!
-//! What has been read is transcribed in
-//! [`docs/schematics/zaxxon-color-dac.md`](../../docs/schematics/zaxxon-color-dac.md):
-//! the color DAC, because the palette had been wrong and the drawing is what
-//! settled it. Confirmed in passing while reading, and not separately
+//! What has been read is transcribed in two files:
+//! [`docs/schematics/zaxxon-color-dac.md`](../../docs/schematics/zaxxon-color-dac.md)
+//! for the color DAC, because the palette had been wrong and the drawing is what
+//! settled it, and
+//! [`docs/schematics/zaxxon-discrete-sound.md`](../../docs/schematics/zaxxon-discrete-sound.md)
+//! for the whole sound board. Confirmed in passing while reading, and not separately
 //! transcribed: the 11-bit background scroll arrives on P2 as POS0-POS10, every
 //! GFX and program ROM socket number in the tables below matches the drawing,
 //! and each coin input really is a flip-flop cleared by its own enable line.
@@ -37,34 +39,35 @@
 //!   skew, which is the pseudo-3D view
 //! - Sprites: 32x32 3bpp, written straight into a 256-byte sprite RAM at 0xA000
 //!   (no DMA engine; that too is a Congo Bongo addition)
-//! - Sound: **entirely discrete.** An i8255 PPI's three output ports gate twelve
-//!   analog voices on the sound board. Not emulated yet; see [Sound](#sound).
+//! - Sound: **entirely discrete.** An i8255 PPI's three output ports gate eleven
+//!   analog voices on the sound board; see [Sound](#sound).
 //!
 //! Everything this board shares with Congo Bongo is in [`crate::sega_zaxxon`].
 //!
 //! # Sound
 //!
-//! There is no sound chip on this board to emulate. All twelve voices (player
-//! ship A-D, homing missile, base missile, laser, battleship, small and medium
-//! explosion, cannon, shot, two alarms) are analog circuits, each gated by one
-//! active-low bit of the PPI's port A, B or C. The reference driver plays
-//! recorded WAV samples of them, which is a recording of somebody's board rather
-//! than a model of any board, so it is not a target to match.
+//! There is no sound chip on this board to emulate. Twelve active-low bits of
+//! the PPI gate eleven analog voices (two engine tones, homing missile, base
+//! missile, laser, battleship, small and medium explosion, cannon, shot, and the
+//! two alarms which share a leg), and two further bits set a level rather than
+//! gating anything. All eleven meet at one passive summing node, `SJ`, and leave
+//! through an LA4460 in bridge configuration.
 //!
-//! IC Board A sheets 11 and 12 are the whole circuit, and they label every voice
-//! on the 8255's pins, so the port map above is read rather than inherited. The
-//! parts are an MM5837 noise generator at U2, a 74123 one-shot per percussive
-//! voice, MB4391 VCAs, a handful of 555s, and an LA4460 into the speaker.
-//! Player ship A and B are not gates at all: they drive a two-resistor ladder
-//! (R11 1.2k, R14 2.4k) through 7406 open-collector inverters, so those two bits
-//! set a level. Rebuilding this is `phosphor-emulator-uy54`.
+//! [`crate::zaxxon_sound`] models it, built on the `DiscreteCircuit` framework
+//! from the transcription in
+//! [`docs/schematics/zaxxon-discrete-sound.md`](../../docs/schematics/zaxxon-discrete-sound.md).
+//! The drawing is the only reference: the reference driver plays recorded WAV
+//! samples, which is a recording of somebody's board rather than a model of any
+//! board, so there is nothing to compare against and the row in
+//! `tools/sound-compare/targets.toml` says `implemented-unvalidated`.
 //!
-//! What is implemented here is the gate path and nothing beyond it: the PPI is
-//! wired to the bus and its three output latches are tracked, so the trigger
-//! edges a synthesis pass needs are already visible. The machine is silent, and
-//! declares itself so with `no_audio` rather than emitting something wrong. The
-//! row in `tools/sound-compare/targets.toml` says the same.
+//! The two things worth knowing before touching a constant there: **player ship
+//! A and B are a two-bit level with `PA0` as the more significant bit and the
+//! level falling as the bits rise**, which is not what a `data & 3` volume fit
+//! produces; and the board's entire mix balance is the attenuator ahead of each
+//! leg, because all eleven summing resistors are the same 51 kOhm.
 
+use crate::zaxxon_sound::ZaxxonSound;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
@@ -414,6 +417,11 @@ pub struct ZaxxonBoard {
     #[save(id = 12)]
     pub(crate) ppi: I8255,
 
+    /// The sound board the PPI gates: eleven analog voices and a mix bus.
+    #[debug_device("Sound")]
+    #[save(id = 16)]
+    pub(crate) sound: ZaxxonSound,
+
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
     #[save(id = 13)]
@@ -458,6 +466,7 @@ impl ZaxxonBoard {
             latch2: 0x00,
             int_enabled: false,
             ppi: I8255::new(),
+            sound: ZaxxonSound::new(TIMING.cpu_clock_hz),
             clocks: clock_tree(),
             clock: 0,
             vblank_irq_pending: false,
@@ -596,6 +605,27 @@ impl ZaxxonBoard {
             let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
+
+        // The sound board is analog and free-running: it keeps oscillating
+        // whether or not the program writes, so it advances every cycle rather
+        // than on a write.
+        self.sound.tick(1);
+    }
+
+    /// Push the PPI's three output latches to the sound board.
+    ///
+    /// Called after every PPI write rather than per cycle, because the latches
+    /// only change there and the gates are what the writes are for.
+    fn sync_sound(&mut self) {
+        let a = self.ppi.read_output_a();
+        let b = self.ppi.read_output_b();
+        let c = self.ppi.read_output_c();
+        self.sound.set_ports(a, b, c);
+    }
+
+    /// Drain the sound board's output.
+    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.sound.fill_audio(buffer)
     }
 
     /// Render one native screen scanline (`abs_y` = bitmap row 0-239).
@@ -632,6 +662,8 @@ impl ZaxxonBoard {
         self.clock = 0;
 
         self.ppi.reset();
+        self.sound.reset();
+        self.sync_sound();
         self.clocks.reset();
 
         self.main_map.region_data_mut(MainRegion::Ram).fill(0);
@@ -780,7 +812,10 @@ impl Bus for ZaxxonBoard {
                 }
             }
             0xE000..=0xFFFF => match addr & 0x00FF {
-                0x3C..=0x3F => self.ppi.write(addr & 0x03, data),
+                0x3C..=0x3F => {
+                    self.ppi.write(addr & 0x03, data);
+                    self.sync_sound();
+                }
                 // Main latch 2 (U56) plus, on two of its offsets, the
                 // background scroll bytes.
                 0xF0..=0xF3 | 0xF8..=0xFB => self.write_control((addr & 0x0F) as usize, data),
@@ -799,13 +834,7 @@ impl Bus for ZaxxonBoard {
     }
 }
 
-crate::impl_board_delegation!(
-    ZaxxonSystem,
-    board,
-    crate::sega_zaxxon::TIMING,
-    no_audio,
-    orientation
-);
+crate::impl_board_delegation!(ZaxxonSystem, board, crate::sega_zaxxon::TIMING, orientation);
 
 impl MachineCore for ZaxxonSystem {
     crate::machine_core_metadata!(

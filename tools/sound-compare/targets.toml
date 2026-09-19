@@ -268,27 +268,34 @@ weeks."""
 [[target]]
 id = "zaxxon-discrete"
 machines = ["zaxxon"]
-status = "missing"
+device = "machines/src/zaxxon_sound.rs"
+status = "implemented-unvalidated"
 notes = """
-UNREAD, and nothing is implemented. Zaxxon has no sound chip at all: twelve
-voices (player ship A-D, homing missile, base missile, laser, battleship, small
-and medium explosion, cannon, shot, two alarms) are analog circuits on the sound
-board, each gated by one active-low bit of an i8255 PPI's port A, B or C. What
-`machines/src/zaxxon.rs` does today is wire the PPI to the bus and keep its three
-output latches, so the trigger edges exist and nothing downstream of them does.
-The machine declares `no_audio` and is silent.
+BUILT FROM THE DRAWING, AND THERE IS NOTHING TO COMPARE IT AGAINST. The board has
+no sound chip: twelve active-low bits of the i8255 at U23 gate eleven analog
+voices, two further bits set a level, and all eleven meet at one passive summing
+node the drawing calls SJ. Transcribed in docs/schematics/zaxxon-discrete-sound.md
+from IC Board A 834-0214 sheets 11 and 12 (PDF pp132-135, not pp131-135 as this
+row previously said: p131 is the cabinet wiring).
 
-`missing` rather than `blocked`: nothing is stopping the work, and the drawing is
-in hand. arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf carries IC Board A
-834-0214 sheets 11 and 12 at PDF pp131-135, which are the whole sound board:
-an MM5837 noise generator at U2, a 74123 one-shot per percussive voice, MB4391
-VCAs, 4016B switches, three 555s and an LA4460 into the speaker. Every voice is
-labeled on the 8255's pins there, so the port map is read rather than inherited.
-The sheet inventory is in docs/schematics/zaxxon-color-dac.md.
+`implemented-unvalidated` and NOT `implemented-needs-validation`, which is the
+honest end state rather than a waypoint. The reference driver plays recorded WAV
+samples, so a comparison would measure whoever made the recordings. Same as
+congo-percussion, and for the same reason there is no adapter and there are no
+scenarios: registering one would claim a comparison that cannot be run. It can
+only reach `validated` by someone reviewing the device against the drawing, which
+is a different piece of work from anything sndcmp does.
 
-The reference driver plays recorded WAVs, so as with congo-percussion there is no
-comparison to run: a recording of somebody's board is not a model of any board.
-The reference here is the drawing, and the next step is a read and a rebuild."""
+What IS derived, and is what a review would check: the seven 74123 one-shot
+widths at the plain part's 0.28 constant, the three Sallen-Key noise bands, the
+two Wien engine resonators, the 556-into-74393 alarm divider, the player ship's
+two-bit level solved as a resistive network, and the eleven-leg mix, whose
+balance is entirely the attenuator ahead of each leg because the summing
+resistors are all the same 51k.
+
+What is NOT: the MCD-725H opto-isolator's transfer curve, the MB4391's control
+law beyond its direction, Q6's collector-emitter resistance, and the battleship's
+and shot's oscillator pitches. Each is named INVENTED in place in the device."""
 
 [[target]]
 id = "atari-system1-audio"
