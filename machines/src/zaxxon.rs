@@ -616,10 +616,28 @@ impl ZaxxonBoard {
     ///
     /// Called after every PPI write rather than per cycle, because the latches
     /// only change there and the gates are what the writes are for.
+    /// A pin the PPI is not driving is not a zero: `RP1` 4.7K x 8 and `RP2`
+    /// 4.7K x 6 pull every gate line to +5 V, and the 8255 resets with all three
+    /// ports configured as inputs. Reading the output latches alone therefore
+    /// asserts all fourteen gates at power-on and fires every voice at once,
+    /// which is what this board's pull-ups exist to prevent.
     fn sync_sound(&mut self) {
-        let a = self.ppi.read_output_a();
-        let b = self.ppi.read_output_b();
-        let c = self.ppi.read_output_c();
+        let a = if self.ppi.port_a_is_input() {
+            0xFF
+        } else {
+            self.ppi.read_output_a()
+        };
+        let b = if self.ppi.port_b_is_input() {
+            0xFF
+        } else {
+            self.ppi.read_output_b()
+        };
+        // Every gate bit this board takes from port C is in the low nibble.
+        let c = if self.ppi.port_c_lower_is_input() {
+            0xFF
+        } else {
+            self.ppi.read_output_c()
+        };
         self.sound.set_ports(a, b, c);
     }
 

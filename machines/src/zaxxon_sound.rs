@@ -356,21 +356,40 @@ const C81: f64 = 0.01e-6; // the two band-pass feedback caps (C81 = C82)
 const R134: f64 = 100_000.0;
 const R135: f64 = 100_000.0;
 
+/// The reference `U12`'s cannon-VCA section sits at: `R139` 33 k and `R141`
+/// 22 k divide +6 V onto its non-inverting input, bypassed by `C85` 47 uF.
+///
+/// With `R136` 51 k in and `R137` 51 k of feedback the section is an inverting
+/// amp of gain -1 about this point, so its output is `2 * ref - envelope`. That
+/// the result rests at 4.8 V, a fifth of a volt above the `MB4391`'s 4.76 V mute
+/// threshold, is the third independent landing on that window.
+const U12_CANNON_REF: f64 = 6.0 * 22_000.0 / (33_000.0 + 22_000.0);
+
 // `R127` really does appear twice on sheet 11, once as the 100 k envelope shunt
 // and once as the 47 k band-pass feedback, both legible at 400 dpi. One of them
 // is presumably `R129`, which appears nowhere. The two names above distinguish
 // them by function because the drawing does not.
 
-/// **INVENTED.** `Q6`'s collector-emitter resistance at full envelope and at
-/// rest.
+/// `R133`, from `Q6`'s collector to ground, which is what **bounds** the
+/// cannon's sweep at the quiet end.
 ///
-/// The drawing gives `R130` 100 ohm in series with `Q6` from the band-pass's
-/// tuning node to ground, and `R131` 15 k / `R132` 3.3 k into its base, but
-/// nothing about the transistor's transfer. These two endpoints make the voice
-/// sweep from about 7.4 kHz at the onset down to 734 Hz as the envelope decays,
-/// which is the descending crack a cannon is; the shape between them is a power
-/// law of the same kind used for the LDR.
-const CANNON_R_Q6_ON: f64 = 10.0;
+/// The T's shunt is `R130` in series with `R133` in parallel with `Q6`, so it
+/// runs from 1.6 kOhm with `Q6` off to `R130` alone with it hard on. That makes
+/// the corner sweep 1835 Hz to 7.3 kHz and the Q 2.7 to 10.8. An earlier pass
+/// here had `Q6` opening to 10 MOhm, which `R133` flatly contradicts: the
+/// transistor cannot take the node anywhere near that, and the voice spent its
+/// life at the top of a range it should barely reach.
+const R133: f64 = 1_500.0;
+
+/// **INVENTED**, and now the only invented number left in this voice: how far
+/// `Q6` pulls `R133` down at full envelope.
+///
+/// The drawing gives `R131` 15 k / `R132` 3.3 k into the base, so the base sees
+/// only `4.4 * 3.3/18.3` = 0.79 V at the envelope's peak, which is barely a
+/// diode drop above cut-off. `Q6` is therefore a soft variable resistance rather
+/// than a switch, and this is a plausible floor rather than a saturation figure.
+/// [`R133`] bounds what it can do either way.
+const CANNON_R_Q6_ON: f64 = 120.0;
 const CANNON_R_Q6_OFF: f64 = 10_000_000.0;
 
 // ---------------------------------------------------------------------------
@@ -706,6 +725,110 @@ impl CustomComponent for TunedBandPass {
     }
 }
 
+/// Two resistances in parallel, for a network whose branches are both modeled
+/// nodes rather than constants.
+struct ParallelPair;
+
+impl CustomComponent for ParallelPair {
+    fn reset(&mut self) {}
+
+    fn step(&mut self, inputs: &[f64], _dt: f64) -> f64 {
+        let (a, b) = (inputs[0].max(1e-3), inputs[1].max(1e-3));
+        (a * b) / (a + b)
+    }
+
+    fn save_state(&self, _w: &mut StateWriter) {}
+
+    fn load_state(&mut self, _r: &mut StateReader) -> Result<(), SaveError> {
+        Ok(())
+    }
+}
+
+/// An inverting op-amp stage with a **bridged-T in its feedback**, which is what
+/// `U12`'s cannon section is, and which is *not* the multiple-feedback band-pass
+/// every other filter on this board uses.
+///
+/// The difference is one wire and it is the whole voice. In an MFB band-pass the
+/// input resistor lands on the capacitor junction; here `R128` lands on the
+/// **inverting input**, with `R127` bridging input to output and `C81`/`C82` in
+/// series between them, their junction tied to ground through `R130` and `Q6`.
+/// Assuming the MFB form because the neighboring voices use it made the cannon
+/// a thin 7 kHz whistle at a tenth of its real energy; the board makes a
+/// broadband crack that sweeps downward.
+///
+/// With the T's shunt resistance `r`, two equal capacitors `c`, feedback `r_f`
+/// and input `r_in`, the transfer is
+///
+/// ```text
+/// gain(s) = -(r_f/r_in) * (1 + 2*s*c*r) / (1 + 2*s*c*r + r_f*r*c^2*s^2)
+/// ```
+///
+/// a two-pole low-pass with a zero, so
+///
+/// ```text
+/// f0 = 1 / (2*pi*c*sqrt(r_f * r))      DC gain = r_f / r_in
+/// Q  = 0.5 * sqrt(r_f / r)             zero at 1 / (2*pi*2*c*r)
+/// ```
+///
+/// The numerator's `1 + s/(Q*w0)` is exactly a unity low-pass plus a unity
+/// band-pass, and a Chamberlin filter's band output peaks at `Q`, so the whole
+/// response is `low + band/Q` scaled by the DC gain. Nothing here is fitted.
+///
+/// Input `[0]`: the signal. Input `[1]`: the T's shunt resistance in ohms.
+struct BridgedTLowPass {
+    r_in: f64,
+    r_f: f64,
+    c: f64,
+    low: f64,
+    band: f64,
+}
+
+impl BridgedTLowPass {
+    fn new(r_in: f64, r_f: f64, c: f64) -> Self {
+        Self {
+            r_in,
+            r_f,
+            c,
+            low: 0.0,
+            band: 0.0,
+        }
+    }
+}
+
+impl CustomComponent for BridgedTLowPass {
+    fn reset(&mut self) {
+        self.low = 0.0;
+        self.band = 0.0;
+    }
+
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        let r = inputs[1].max(1.0);
+        let f0 = 1.0 / (std::f64::consts::TAU * self.c * (self.r_f * r).sqrt());
+        let fs = 1.0 / dt;
+        let f0 = f0.min(fs / 6.0);
+        let q = (0.5 * (self.r_f / r).sqrt()).max(0.5);
+        let f = 2.0 * (std::f64::consts::PI * f0 * dt).sin();
+        let q1 = (1.0 / q).min(2.0);
+
+        self.low += f * self.band;
+        let high = inputs[0] - self.low - q1 * self.band;
+        self.band += f * high;
+
+        (self.low + self.band / q) * (self.r_f / self.r_in)
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.low);
+        w.write_f64_le(self.band);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.low = r.read_f64_le()?;
+        self.band = r.read_f64_le()?;
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Circuit
 // ---------------------------------------------------------------------------
@@ -929,20 +1052,25 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
             exponent: PC1_EXPONENT,
         }),
     );
-    let cannon_tune = b.gain("CANNON_TUNE", q6, 1.0);
+    // The T's shunt: R130 in series with R133 paralleled by Q6, so it runs
+    // between R130 alone and R130 + R133.
+    let cannon_r133 = b.constant("R133", R133);
+    let cannon_shunt = b.custom("Q6_R133", vec![q6, cannon_r133], Box::new(ParallelPair));
     let cannon_r130 = b.constant("R130", R130);
-    let cannon_leg_r = b.add("CANNON_RTUNE", &[cannon_tune, cannon_r130]);
+    let cannon_leg_r = b.add("CANNON_RTUNE", &[cannon_shunt, cannon_r130]);
     let cannon_bp = b.custom(
-        "U12_CANNON_BP",
+        "U12_CANNON_LP",
         vec![noise2, cannon_leg_r],
-        Box::new(TunedBandPass::new(R128, R127_FB, C81)),
+        Box::new(BridgedTLowPass::new(R128, R127_FB, C81)),
     );
-    // The band-pass is always live, so something downstream has to stop it
-    // hissing between shots: `MB4391 U13` ch B, which `C84` feeds. Where its
-    // control pin comes from was NOT traced, and the same envelope inverted is
-    // the only source on the sheet that leaves the board silent at rest.
+    // The filter is always live, so something downstream has to stop it hissing
+    // between shots: `MB4391 U13` ch B, whose IN is fed by `C84`. Its CON pin is
+    // driven by `U12`'s other section, an inverting amp with `R136` 51 k in and
+    // `R137` 51 k of feedback around a `R139`/`R141` divider sitting at
+    // 6 * 22/(33+22) = 2.4 V. That makes CON = 4.8 - envelope: 4.8 V at rest,
+    // which is just above the 4.76 V mute point, and 0.4 V at full envelope.
     let cannon_ctrl_neg = b.gain("CANNON_VCA_NEG", cannon_env, -1.0);
-    let cannon_ctrl_rest = b.constant("CANNON_VCA_REST", mb4391_mute_v());
+    let cannon_ctrl_rest = b.constant("CANNON_VCA_REST", 2.0 * U12_CANNON_REF);
     let cannon_ctrl = b.add("CANNON_VCA_CTRL", &[cannon_ctrl_neg, cannon_ctrl_rest]);
     let cannon_g = mb4391_gain(&mut b, "CANNON_VCA", cannon_ctrl);
     let cannon_vca = b.multiply("CANNON_OUT", cannon_bp, cannon_g);
@@ -1011,7 +1139,9 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         vec![base_missile.into()],
         Box::new(OneShot74123::new(OS_BASE_MISSILE)),
     );
-    let bm_control = inverted_envelope(&mut b, "BASE_MISSILE_ENV", bm_pulse, V6, R59_R60, R58, C49);
+    // R59's upper end is +5 V, read at 400 dpi, so this shaper rests and bottoms
+    // exactly where the two explosions' do rather than sitting a volt high.
+    let bm_control = inverted_envelope(&mut b, "BASE_MISSILE_ENV", bm_pulse, V5, R59_R60, R58, C49);
     let bm_band = b.second_order(
         "BASE_MISSILE_BAND",
         noise2,

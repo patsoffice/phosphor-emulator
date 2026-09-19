@@ -65,16 +65,29 @@ impl I8255 {
         self.input = [0; 3];
     }
 
-    fn port_a_is_input(&self) -> bool {
+    /// Whether port A's pins are tri-stated rather than driven.
+    ///
+    /// Public because a board that hangs something off an output port has to
+    /// know: a pin the 8255 is not driving is not a zero, it is whatever the
+    /// board pulls it to, and the part resets with **every port an input**. On
+    /// Zaxxon's sound board all fourteen gate lines carry 4.7 kOhm pull-ups, so
+    /// reading the output latch alone fires every voice at once at power-on.
+    pub fn port_a_is_input(&self) -> bool {
         self.control & PORT_A_INPUT != 0
     }
-    fn port_b_is_input(&self) -> bool {
+    /// Whether port B's pins are tri-stated rather than driven. See
+    /// [`port_a_is_input`](Self::port_a_is_input).
+    pub fn port_b_is_input(&self) -> bool {
         self.control & PORT_B_INPUT != 0
     }
-    fn port_c_lower_is_input(&self) -> bool {
+    /// Whether port C's low nibble is tri-stated rather than driven. See
+    /// [`port_a_is_input`](Self::port_a_is_input).
+    pub fn port_c_lower_is_input(&self) -> bool {
         self.control & PORT_C_LOWER_INPUT != 0
     }
-    fn port_c_upper_is_input(&self) -> bool {
+    /// Whether port C's high nibble is tri-stated rather than driven. See
+    /// [`port_a_is_input`](Self::port_a_is_input).
+    pub fn port_c_upper_is_input(&self) -> bool {
         self.control & PORT_C_UPPER_INPUT != 0
     }
 

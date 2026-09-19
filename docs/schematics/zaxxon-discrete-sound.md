@@ -262,18 +262,43 @@ tuning leg of a band-pass, so the pitch falls as the envelope decays.
 | `R131`, `R132` | 15 kΩ, 3.3 kΩ | into `Q6`'s base |
 | `Q6` | C1684 | the variable tuning resistance |
 | `R130` | 100 Ω | in series with `Q6`, from the band-pass tuning node to ground |
+| `R133` | 1.5 kΩ | `Q6`'s collector to ground, which **bounds** the sweep |
 | `C80` | 2.2 uF | `NOISE 2` in |
-| `R128` | 10 kΩ | band-pass input resistor |
+| `R128` | 10 kΩ | input resistor, **to the inverting input** |
 | `R127` | 47 kΩ | `U12` feedback (see below: the designator is reused) |
-| `C81`, `C82` | 0.01 uF | the two feedback capacitors |
-| `C83`, `R134` | 10 uF, 100 kΩ | out to the `R135`/`R136`/`R137` gain stage |
+| `C81`, `C82` | 0.01 uF | the bridged-T's two capacitors |
+| `C83`, `R134`, `R135` | 10 uF, 100 kΩ, 100 kΩ | a 2:1 divider out to `C84` |
 
-Solving the multiple-feedback band-pass with `R130 + Q6` as the resistor to
-ground gives **about 7.4 kHz with `Q6` saturated, falling to 734 Hz as it turns
-off**. A descending crack over 0.68 s, which is what a cannon is.
+**This is not the multiple-feedback band-pass the rest of the board uses, and
+the difference is one wire.** In every other filter here the input resistor
+lands on the capacitor junction. `R128` does not: it lands on `U12`'s
+**inverting input**, with `R127` bridging input to output and `C81`/`C82` in
+series between them, their junction tied to ground through `R130` and `Q6`. The
+feedback network is a bridged-T, and the stage is an inverting **low-pass**:
 
-Its output reaches `MB4391 U13` ch B through `C84` 4.7 uF, and the leg is
-`R200` 47 kΩ / `R201` 3.9 kΩ, an attenuation of 0.0766.
+```text
+gain(s) = -(R127/R128) * (1 + 2*s*C*r) / (1 + 2*s*C*r + R127*r*C^2*s^2)
+
+DC gain = R127/R128 = 4.7
+f0      = 1 / (2*pi*C*sqrt(R127*r))
+Q       = 0.5 * sqrt(R127/r)
+```
+
+with `r` = `R130` in series with `R133` paralleled by `Q6`, so `r` runs between
+1.6 kΩ with `Q6` off and `R130`'s 100 Ω with it hard on. That sweeps the corner
+**1835 Hz to 7.3 kHz** at a Q of 2.7 to 10.8: a broadband crack that starts
+bright and falls over 0.68 s, which is what a cannon is.
+
+Reading it as the neighboring MFB pattern instead gives a Q-10.9 band-pass
+sitting *at* 7.4 kHz with a gain of 2.35, which is a thin whistle carrying a
+twentieth of the energy. The device made exactly that mistake and the voice was
+inaudible in play; see the note at the end of this file.
+
+Its output reaches `MB4391 U13` ch B through the `R134`/`R135` divider and
+`C84` 4.7 uF, and the leg is `R200` 47 kΩ / `R201` 3.9 kΩ, an attenuation of
+0.0766. That VCA's `CON` pin is driven by `U12`'s **other** section, an
+inverting amp with `R136` 51 kΩ in and `R137` 51 kΩ of feedback about the
+`R139` 33 kΩ / `R141` 22 kΩ divider's 2.4 V, so `CON` = 4.8 V − envelope.
 
 **`R127` appears twice on sheet 11**, once as the 100 kΩ envelope shunt and once
 as the 47 kΩ band-pass feedback, both legible and both unambiguously reading
@@ -487,10 +512,34 @@ sources.
 - **The battleship's and the shot's oscillators at component level.** Both are
   transcribed as part lists above and neither was solved. Their pitches in the
   model are not derived from the drawing.
-- **Whether `R59`'s upper end is +5 V or +6 V.** It is drawn near both rails and
-  the difference moves the base missile's control offset.
 - **Any measurement.** Nothing here was compared against a board or a recording,
   and nothing could be: the reference plays samples.
+
+## What a first pass got wrong, and how
+
+Three of the items that were on the list above are now read, and all three were
+found the same way: the device built from this file was driven by a recorded
+movie and each mix leg was watched, so a voice that was inaudible in play could
+be pointed at rather than guessed about.
+
+- **The cannon's filter is a bridged-T, not a multiple-feedback band-pass.** The
+  first reading assumed the pattern the neighboring voices use instead of
+  checking where `R128` lands, which cost the voice 24 dB and put it an octave
+  too high. This is the failure mode the format exists to catch and it still got
+  through: a topology taken from context rather than from the drawing reads
+  exactly like one that was traced.
+- **`Q6` cannot open the tuning node very far**, because `R133` 1.5 kΩ sits
+  across it. The first pass let it reach 10 MΩ, which `R133` flatly contradicts.
+- **`R59`'s upper end is +5 V**, so the base missile's shaper rests and bottoms
+  where the two explosions' do. It was previously recorded as unresolved between
+  +5 V and +6 V.
+
+The `MB4391`'s control window is what ties those last two together. Three
+independent shapers on this board (both explosions, the base missile, and the
+cannon through `U12`'s inverting section) rest between 4.8 and 5.0 V and bottom
+at 2.8 V, against a part that mutes at 4.76 V and reaches full gain at 2.84 V.
+Four circuits landing on the same window is the strongest evidence in this file
+that the window is right, and it is worth more than any one of them.
 
 ## Confidence
 
