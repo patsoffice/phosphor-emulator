@@ -305,7 +305,74 @@ as the 47 kΩ band-pass feedback, both legible and both unambiguously reading
 `R127` at 400 dpi. One of them is presumably `R129`, which appears nowhere; the
 drawing does not say which, and this note distinguishes them by function.
 
-## The shot, the battleship, and the three sheet-12 voices
+## The battleship: two relaxation oscillators, one of which reaches nothing
+
+`BATTLESHIP` (`PA7`) goes to `U30` 7406 (5 -> 6) with `R101` 10 kΩ to +12 V, and
+gates a `4016B` section. What that section passes is built from two copies of
+one circuit, an op-amp integrator driving an inverting Schmitt trigger with a
+transistor closing the loop:
+
+| | slow (`U9`) | fast (`U10`) |
+|---|---|---|
+| reference into the integrator | `R80` 2.2 MΩ / `R81` 220 kΩ off +12 V, buffered by `U9`(2,3,1): **1.091 V** | that, divided by `R90` 120 kΩ / `R91` 100 kΩ and buffered twice: **0.496 V** |
+| integrator | `U9`(5,6,7) | `U10`(5,6,7) |
+| virtual ground | `R83`/`R84` 51 kΩ halve it: **0.545 V** | `R94`/`R95` 51 kΩ halve it: **0.248 V** |
+| input resistor | `R82` 30 kΩ | `R93` 30 kΩ |
+| feedback cap | `C56` + `C57` 3.3 uF back to back: **1.65 uF** | `C58` **0.01 uF** |
+| Schmitt | `U9`(9,10,8), `R86` 51 kΩ from +6 V, `R88` 100 kΩ feedback | `U10`(9,10,8), `R98` 51 kΩ from +6 V, `R99` 100 kΩ feedback |
+| window at the integrator | `51/151` of the output swing | the same |
+| loop transistor | `Q4` C1684, base from `D5` and `R89` 10 kΩ, `R87` 2.2 kΩ to ground, emitter grounded | `Q5` C1684, `D6` and `R100` 10 kΩ, `R97` 2.2 kΩ, emitter grounded |
+| sink into the summing node | `R85` **2.2 kΩ** | `R96` **15 kΩ** |
+| duty cycle | `R85`/`R82` gives **7.3 %** | `R96`/`R93` gives **exactly 50 %** |
+| rate | **3.02 Hz** | **122 Hz** |
+
+**`R85` and `R96` land on their integrators' pin-6 summing nodes, not on the
+divider that feeds pin 5.** Both look like they could go either way at 150 dpi
+and both are unambiguous at 400: the divider's line crosses that vertical with
+no junction dot, twice, in the same shape. This file had the first one right and
+the second one wrong, and getting `R96` wrong is worth a factor of four in the
+audible rate.
+
+Everything above follows from read values except the op-amp's output swing,
+which sets the Schmitt window and which both rates are inversely proportional
+to. That term cancels exactly in the ratio, so **40.5 to 1** is a reading even
+though 122 Hz is only as good as the swing. Note that the capacitors alone would
+say 165 to 1: the fast stage works against a quarter of the reference where the
+slow one works against a half, and its sink is 15 kΩ where the slow one's is
+2.2 kΩ.
+
+What leaves is a **square**, and its harmonics are the voice. `U10`(12,13,14) is
+a unity follower and `C59` 2.2 uF takes its output to the `4016B` with no
+divider, but its pin 12 does not tap the Schmitt's *output*: it taps the
+`R98`/`R99` junction, one crossing lower on the sheet. So the voice arrives at
+**3.378 V peak to peak**, the width of the Schmitt's own window, symmetrically
+about the +6 V that `R98` holds that node toward, and that is also the bias
+`R189`/`R190` 51 kΩ put on the far side of `C59`. The leg is `R191` 47 kΩ /
+`R192` 4.7 kΩ, the second quietest on the board.
+
+### The slow stage reaches nothing, and that is a reading too
+
+`U9`'s integrator output leaves through `R92` 30 kΩ. `R92`'s other end lands on
+the node where `U10`(1,2,3)'s output, its own **inverting input**, `R93` and
+`R94` all meet: that section's pin 2 runs left and down onto the same horizontal
+that pin 1 runs down and left onto, joined by a plain wire with a junction dot
+where `R92` arrives. A section with its inverting input strapped to its output
+is a unity follower of whatever is on its pin 3, which here is the 0.496 V bias.
+`R92` can only load it.
+
+So the slow oscillator, which is a complete and solvable circuit, has no way to
+reach the audio. It has no other output on the sheet and `R92` has no other end.
+Either the drawing is missing a wire (or drawing one it should not), or the part
+is vestigial. Traced three times at 900 % zoom, including the one 200-pixel
+segment the whole question turns on.
+
+**The model therefore does not modulate the battleship**, and both constants an
+earlier pass invented for that modulation are gone. This is the uncomfortable
+kind of result and it is the point of reading the sheet: a 7 % duty pulse at
+3 Hz is exactly what somebody would *want* to shape this voice with, and
+modeling it anyway would have been modeling a wire that is not drawn.
+
+## The shot and the three sheet-12 voices
 
 These were read at block level: enough to name every part and the signal flow,
 not enough to state a center frequency or a sweep law from the values.
@@ -318,14 +385,6 @@ not enough to state a center frequency or a sweep law from the values.
   (`R156`-`R159` 33 kΩ/15 kΩ, `C92` 1000 pF, `R161` 33 kΩ, `R162` 100 kΩ, `Q7`,
   `D11`, `R163` 10 kΩ) produce the tone. It reaches `MB4391 U16` ch B through
   `R164` 1 MΩ and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
-- **`BATTLESHIP` (`PA7`)** goes to `U30` 7406 (5 -> 6) with `R101` 10 kΩ to
-  +12 V, into a chain of `U9` and `U10` sections with `R80` 2.2 MΩ / `R81`
-  220 kΩ setting a 1.09 V reference, `R82`/`R92` 30 kΩ, `R83`/`R84`/`R94`/`R95`
-  51 kΩ, `C56`/`C57` 3.3 uF, `R86` 51 kΩ with `R88` 100 kΩ as a Schmitt
-  relaxation pair, `R90` 120 kΩ, `R91` 100 kΩ, `R93` 30 kΩ, `R96` 15 kΩ, `Q4`
-  and `Q5` C1684, `D5`, `D6`, `R89`/`R100` 10 kΩ and `R97` 2.2 kΩ. Its output is
-  switched by `U17` 4016B (pins 1, 2, 13) and biased by `R189`/`R190` 51 kΩ; the
-  leg is `R191` 47 kΩ / `R192` 4.7 kΩ, the second quietest on the board.
 - **`HOMING MISSILE` (`PA4`)** goes to `U30` 7406 (1 -> 2) with `R55` 10 kΩ to
   +12 V, then `R42` 51 kΩ into `U5` with `R43` 100 kΩ, `R44` 6.8 kΩ and `C43`
   6.8 uF (**46 ms**), buffered by `U4`, summed through `R45` 68 kΩ with `NOISE 1`
@@ -362,13 +421,14 @@ Both alarms share one leg and one tone generator.
                                     74393 U49 pin 1 (1A), both CLRs grounded
                                         |
               1QC (pin 5) = 2535 Hz     1QD (pin 6) = 1268 Hz, and on to 2A (pin 13)
-                                        |
-   ALARM 2 one-shot (U46 half B) ---> 7426 U67 open-collector NANDs ---.
-   ALARM 3 one-shot (U44 half A) ---'                                   |
-                                         R171 1k pull-up to +12V -------+
+                    |                          |
+   ALARM 3 (U44 A) -+-> U67 pins 4,5      ALARM 2 (U46 B) -+-> U67 pins 1,2
+                             |                                      |
+                             `--- both open-collector, wired AND ----+
+                                         R171 1k pull-up to +12V ----+
                                                        |
                             R172 1.5k --> U12 (13, 12, 14), R173 330k with C99 0.01uF
-                                    gain 220, corner 48 Hz: the square becomes a triangle
+                                    gain 220 into a 12 V rail: a comparator, not an amp
                                                        |
                                        R206 68k / R207 1k --> C24 1uF --> R208 51k --> SJ
 ```
@@ -376,9 +436,26 @@ Both alarms share one leg and one tone generator.
 Both one-shots are `C` 10 uF with `R` 47 kΩ (`C95`/`R166` for alarm 2,
 `C96`/`R167` for alarm 3), so both are **132 ms** long.
 
+**Alarm 2 is the low tone and alarm 3 is the high one.** This was previously
+recorded as unresolved because the pairing crosses the sheet seam. It is
+resolved by following both `Q` outputs to the page edge and matching their
+heights: `U46`'s (alarm 2) is the upper of the two crossings and reaches `U67`
+pin 1, whose other input is `1QD`, and `U44`'s (alarm 3) is the lower and
+reaches pin 4 against `1QC`. The two lines jog by about 90 drawing units either
+side of the break, which is what made them look interchangeable.
+
 The 20.3 kHz figure looked wrong until the 74393 turned up: the 556 is a clock
 for the divider, not a voice. `R168` and `R169` are genuinely 470 Ω and 120 Ω,
 read at 400 dpi with the ohm symbol drawn.
+
+`U12`'s section here is **not a linear amplifier**, and the 48 Hz corner that
+`R173` and `C99` describe is not what it does. `R171` 1 kΩ holds the wired-AND
+node at +12 V and an open-collector section pulls it to a saturated low, so
+`R172` 1.5 kΩ delivers about 4 mA either side of the +6 V on pin 12. `R173` can
+return 36 uA at most, a hundredth of that, so the rest goes into `C99` and the
+output ramps at `I / C99` = **0.4 V per microsecond** until it reaches a rail
+and stays there. The voice is a square with 25 us edges, not a triangle: at
+`1QC`'s 2535 Hz those edges are an eighth of a half period.
 
 ## The mix: eleven legs into one node
 
@@ -401,10 +478,12 @@ is the series/shunt pair ahead of each one.
 | cannon | 11 | `R200` 47k | `R201` 3.9k | `C22` | `R202` 51k | 0.0766 | -20.9 |
 | alarms 2 and 3 | 11 | `R206` 68k | `R207` 1k | `C24` | `R208` 51k | 0.0145 | -35.4 |
 
-The alarms look absurdly quiet until you notice that the stage ahead of them has
-a gain of 220, and the battleship's and cannon's legs sit behind their own gain
-stages too. **The attenuation column is the leg, not the voice**, and it is only
-the whole answer where the source's amplitude is known.
+The alarms look absurdly quiet until you notice that the stage ahead of them
+saturates rail to rail, and the cannon's leg sits behind its own gain stage.
+The battleship's runs the other way: its leg is small *and* the square that
+reaches it is a third of an op-amp's swing, because of which pin its follower
+taps. **The attenuation column is the leg, not the voice**, and it is only the
+whole answer where the source's amplitude is known.
 
 `SJ` is a passive node, not a virtual ground: it is loaded by `R209` 10 kΩ to the
 inverting input of `U11`, which sits at +6 V with `R210` 82 kΩ of feedback
@@ -465,6 +544,12 @@ sources.
   across reset.
 - **There is exactly one noise generator**, an `MM5837` at `U2`, and `NOISE 2` is
   `NOISE 1` attenuated tenfold by one inverting stage.
+- **The battleship is a 50 % square at 122 Hz, 3.378 V peak to peak**, and
+  nothing sweeps it. Both of its oscillators are solved from read values, their
+  40.5:1 ratio holds whatever the op-amps' swing turns out to be, and the slow
+  one is a solved circuit that reaches no audio at all.
+- **The alarm stage is a comparator**, driven a hundred times past its rails,
+  whose output is slew-limited by `C99` to 0.4 V per microsecond.
 - **Seven 74123 one-shot widths**, from their own R and C:
 
   | Voice | Package | R | C | Width at 0.28 R C |
@@ -505,13 +590,17 @@ sources.
   traced by its crossing height at the sheet seam to `U15` ch A, the 321 Hz path.
   `M-EXP` to `U13` ch A is by elimination, corroborated by the medium explosion
   being the lower and louder of the two.
-- **The 7426's input assignment.** That `U49`'s `1QC` and `1QD` taps and the two
-  alarm one-shots reach `U67`'s four inputs is read; which alarm is NANDed with
-  which tap is not, so the model's choice of 2535 Hz for alarm 2 and 1268 Hz for
-  alarm 3 is arbitrary between the two.
-- **The battleship's and the shot's oscillators at component level.** Both are
-  transcribed as part lists above and neither was solved. Their pitches in the
-  model are not derived from the drawing.
+- **The shot's oscillator at component level.** It is transcribed as a part list
+  above and was not solved, so its pitch in the model is not derived from the
+  drawing. The battleship's two oscillators, which used to sit in this bullet
+  beside it, are now solved end to end.
+- **What `R92` 30 kΩ is for.** Everything either side of it is read: it runs from
+  the slow oscillator's integrator output to a node that is a unity follower's
+  output. As drawn it can do nothing, and no other path off that oscillator
+  exists on the sheet.
+- **The op-amps' output swing.** Nothing on the drawing dimensions it, and it is
+  the one term the battleship's absolute pitch rests on. The two stages' ratio
+  does not.
 - **Any measurement.** Nothing here was compared against a board or a recording,
   and nothing could be: the reference plays samples.
 
@@ -541,15 +630,46 @@ at 2.8 V, against a part that mutes at 4.76 V and reaches full gain at 2.84 V.
 Four circuits landing on the same window is the strongest evidence in this file
 that the window is right, and it is worth more than any one of them.
 
+## What a second pass got wrong, and how
+
+The battleship section above replaces a reading that was wrong in three separate
+ways, and the three failed differently enough to be worth separating.
+
+- **`R96` was read off the wrong node** by assuming it matched its neighbor,
+  which is the same mistake the cannon's `R128` was. `R85` and `R96` are the
+  same part of the same circuit drawn twice, and the pass that got `R85` right
+  guessed `R96` from the divider immediately above it. The crossing has no
+  junction dot at 400 dpi, in both stages, and the arithmetic that follows from
+  the wrong node is visibly sick: the integrator barely reverses at all, so the
+  rate depends on the transistor's saturation voltage, which nothing gives.
+  **Arithmetic that is hypersensitive to an unknown is usually a misread
+  topology, not a hard problem.**
+- **A modulation path was assumed because the circuit obviously wants one.** The
+  slow stage is a 7 %-duty pulse at 3 Hz, `R92` is its only way out, and the
+  natural reading is that it lands on the fast stage's input. It does not; it
+  lands on a follower's output. This one took three passes at 900 % zoom to
+  believe, because the answer is that a part on a shipped board does nothing.
+- **The voice's amplitude was taken from the wrong pin.** `U10`(12,13,14) is a
+  follower into the 4016B with no divider, so the file gave the battleship the
+  op-amp's whole swing. Its pin 12 taps the Schmitt's hysteresis node, not its
+  output, and the difference is 9.4 dB. **"There is no divider" is not the same
+  claim as "this is the full swing"**, and it reads like it.
+
+A fourth, on the alarms: `U49`'s `1QC` and `1QD` were correctly read in the
+first pass, replaced in the second by `1QB` because two files in MAME's sample
+set measure near 5 kHz, and restored here. `1QB` is not wired to anything. The
+sample set is a recording of one board and cannot settle which pin a wire is on.
+
 ## Confidence
 
 A good scan. The PPI map, the ladder network, the seven one-shot R/C pairs, the
 three Sallen-Key filters and the whole eleven-leg mix table were read at 400 dpi
 with every designator and value legible, and those are the parts to trust.
 
-The battleship and shot oscillators, the sheet-12 555 chains, and the routing of
-control voltages across the sheet seam are read at block level and are marked so
-above.
+The battleship's two oscillators are now read at component level and solved, and
+so are the two junctions their rates turn on. The shot oscillator, the sheet-12
+555 chains, and the routing of control voltages across the sheet seam are still
+read at block level and are marked so above.
 
 This is a hand transcription and can be wrong. Nothing in it is checked by a
 test; the section above it is what keeps that honest.

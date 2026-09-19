@@ -408,25 +408,214 @@ fn alarm_clock_hz() -> f64 {
 }
 
 const R172: f64 = 1_500.0; // into U12's inverting input
-const R173: f64 = 330_000.0; // U12 feedback: a gain of 220
-const C99: f64 = 0.01e-6; // across it: a 48 Hz corner, so the square integrates
+/// `U12`'s alarm feedback. Nothing computes with it, because the point of it is
+/// that it is far too big to matter: `R173`/`R172` is a DC gain of 220 into a
+/// twelve-volt supply, which is the argument that the stage is a comparator.
+/// `the_alarm_stage_cannot_run_linearly` is where that argument is checked.
+#[allow(dead_code)]
+const R173: f64 = 330_000.0;
+const C99: f64 = 0.01e-6; // across it, which is what limits the edges
+
+/// How fast `C99` lets `U12`'s alarm section move its output, in volts per
+/// second: **400 kV/s**, or 0.4 V per microsecond.
+///
+/// This stage is a comparator, not an amplifier, and the number that matters
+/// about it is a slew rate rather than a corner frequency. `R171` 1 k pulls the
+/// 7426's wired-AND node to +12 V and an open-collector section pulls it to
+/// [`V_SAT`], so `R172` 1.5 k delivers about 4 mA either side of the +6 V on the
+/// section's non-inverting input. `R173` 330 k can return 36 uA at most, a
+/// hundredth of that, so essentially all of it goes into `C99` and the output
+/// ramps at `I / C99` until it hits a rail and stays there.
+///
+/// The two directions differ by 3 % because [`V_SAT`] is not 0 V; this is the
+/// pull-up direction, and the asymmetry is below anything audible.
+fn alarm_slew_v_per_s() -> f64 {
+    ((V12 - V6) / R172) / C99
+}
+
+/// How far `U12`'s alarm section rises off its rest during a burst: the whole
+/// output swing, `2 * OPAMP_SWING`.
+///
+/// Expressed as a rise from rest rather than as two absolute voltages, which is
+/// this file's convention for every node that sits somewhere other than zero at
+/// power-on: `R171` holds the section's input at +12 V whenever neither alarm is
+/// gating and the section inverts, so it rests pinned at the bottom of its
+/// swing. A model referenced to the mid-rail instead would push that offset
+/// through `C24` as a step at power-on, which is the thump the board's mute
+/// circuit exists to cover and which nothing here needs to reproduce.
+fn alarm_burst_v() -> f64 {
+    2.0 * OPAMP_SWING
+}
 
 // ---------------------------------------------------------------------------
 // The battleship and the shot: read at block level only
 // ---------------------------------------------------------------------------
 
-/// The battleship's modulation rate, from the `U9` integrator/Schmitt pair:
-/// `R88 / (4 * R86 * R82 * C)` with `R82` 30 k, `R86` 51 k, `R88` 100 k and
-/// `C56` in series with `C57` (3.3 uF each, so 1.65 uF).
-const BATTLESHIP_MOD_HZ: f64 = 9.9;
+// The battleship is TWO relaxation oscillators of the same design, one slow and
+// one at audio rate. Each is an op-amp integrator driving an inverting Schmitt
+// trigger, with the Schmitt's output closing the loop through a diode, a
+// resistor and a transistor that sinks the integrator's summing node: `Q4` on
+// the slow stage, `Q5` on the fast one. Every part of both is read below, and
+// nothing in this voice is invented any more.
+//
+// Two junctions decide the whole thing, and this file had both wrong until they
+// were re-cropped at 400 dpi:
+//
+//   * `R85` lands on `U9`'s pin-6 SUMMING node, not on the `R83`/`R84` divider
+//     that feeds pin 5. The divider's line crosses that vertical with no
+//     junction dot.
+//   * `R96` lands on `U10`'s pin-6 summing node in exactly the same way. An
+//     earlier pass read it off the `R94`/`R95` divider, which made the fast
+//     stage barely able to reverse its own integrator and put its rate a
+//     factor of four out.
+//
+// The two stages are therefore one circuit built twice, and that is what lets
+// their ratio be stated exactly.
+const R80: f64 = 2_200_000.0; // reference divider, top
+const R81: f64 = 220_000.0; // reference divider, bottom
+// The slow stage's five parts reach no audio (see `battleship_hz`), so nothing
+// in the built circuit reads them and only a test does. They are kept because
+// `battleship_mod_hz` derives a rate from them that that test pins: the day
+// somebody finds the wire this drawing is missing, the stage is already here
+// and already solved. `allow` rather than `expect`, because `expect` reports
+// itself unfulfilled in the build where the test does use them.
+#[allow(dead_code)]
+const R82: f64 = 30_000.0; // slow integrator input
+#[allow(dead_code)]
+const R85: f64 = 2_200.0; // slow integrator sink, through Q4
+#[allow(dead_code)]
+const R86: f64 = 51_000.0; // slow Schmitt input
+#[allow(dead_code)]
+const R88: f64 = 100_000.0; // slow Schmitt feedback
+#[allow(dead_code)]
+const C56_C57: f64 = 1.65e-6; // 3.3 uF in series with 3.3 uF, back to back
+const R90: f64 = 120_000.0; // fast stage's reference divider, top
+const R91: f64 = 100_000.0; // fast stage's reference divider, bottom
+const R93: f64 = 30_000.0; // fast integrator input
+const R96: f64 = 15_000.0; // fast integrator sink, through Q5
+const R98: f64 = 51_000.0; // fast Schmitt input
+const R99: f64 = 100_000.0; // fast Schmitt feedback
+const C58: f64 = 0.01e-6;
 
-/// **INVENTED.** The battleship's audible pitch.
+/// The reference `U9(1,2,3)` buffers: `R80` 2.2 M and `R81` 220 k off +12 V.
+fn battleship_ref_v() -> f64 {
+    V12 * R81 / (R80 + R81)
+}
+
+/// A Schmitt trigger's window, as a voltage at the integrator's output.
 ///
-/// The `U9`/`U10`/`Q4`/`Q5` chain on sheet 11 was read as a part list and not
-/// solved, so the 9.9 Hz above is the only figure here that comes off the
-/// drawing. A low rumble is what the voice is for; this number is not evidence.
-const BATTLESHIP_HZ: f64 = 62.0;
-const BATTLESHIP_Q: f64 = 1.2;
+/// Both triggers are the same part twice: the integrator drives the inverting
+/// input and the output returns to the non-inverting one through `R_fb`, which
+/// is held toward the +6 V mid-rail by `R_in`. The threshold is therefore
+/// `6 * R_fb/(R_in + R_fb) + Vout * R_in/(R_in + R_fb)`, so the window the
+/// integrator has to cross is `R_in/(R_in + R_fb)` of the output's full swing.
+///
+/// With 51 k and 100 k that is 0.338 of 10 V, or **3.378 V**. This is the one
+/// term in the whole voice that rests on [`OPAMP_SWING`] rather than on a read
+/// value, and both stages' rates are inversely proportional to it: a wider
+/// output swing is a slower oscillator. It cancels exactly in their ratio.
+fn schmitt_window_v(schmitt_in: f64, schmitt_fb: f64) -> f64 {
+    schmitt_in / (schmitt_in + schmitt_fb) * 2.0 * OPAMP_SWING
+}
+
+/// One integrator-and-Schmitt stage's rate, from its four resistors and its cap.
+///
+/// The textbook `R_fb / (4 * R_in * R_integ * C)` is **not** right for this
+/// circuit and is not what this computes. That form assumes the Schmitt drives
+/// the integrator's input directly. Here it drives a transistor which, when on,
+/// pulls the summing node down through `sink` (`R85` or `R96`), so the two ramps
+/// run at different currents:
+///
+/// ```text
+/// v_g          the integrator's virtual ground, set by its own divider
+/// i_charge  =  v_g / integ_in          with the transistor off
+/// i_reverse =  v_g / sink - i_charge   with it on and saturated
+/// T         =  window * C * (1/i_charge + 1/i_reverse)
+/// ```
+///
+/// The transistor's own saturation voltage drops out of this to within a couple
+/// of percent, because it is tens of millivolts against a virtual ground of a
+/// quarter to half a volt and it appears only in `i_reverse`, which the slow
+/// stage runs thirteen times faster than its other ramp.
+///
+/// Note what `integ_in` and `sink` do together: the fast stage's 30 k against
+/// 15 k makes `i_reverse` equal `i_charge` **exactly**, which is a 50 % square
+/// and is plainly the point of that pair.
+fn relaxation_hz(v_g: f64, integ_in: f64, sink: f64, c: f64, window: f64) -> f64 {
+    let i_charge = v_g / integ_in;
+    let i_reverse = v_g / sink - i_charge;
+    1.0 / (window * c * (1.0 / i_charge + 1.0 / i_reverse))
+}
+
+/// The slow stage, `U9(5,6,7)` and `U9(9,10,8)` around `Q4`: **3.02 Hz** at a
+/// 7.3 % duty cycle, a thump rather than a tone.
+///
+/// Its virtual ground is `R83` 51 k and `R84` 51 k halving [`battleship_ref_v`],
+/// so exactly half of it.
+///
+/// **This stage reaches nothing.** See [`battleship_hz`].
+#[allow(dead_code)] // solved, and reachable only from a test; see above
+fn battleship_mod_hz() -> f64 {
+    relaxation_hz(
+        battleship_ref_v() / 2.0,
+        R82,
+        R85,
+        C56_C57,
+        schmitt_window_v(R86, R88),
+    )
+}
+
+/// The voltage `R93` works against: `R90` 120 k and `R91` 100 k divide
+/// [`battleship_ref_v`] down to 0.496 V, and `U9(12,13,11)` then `U10(1,2,3)`
+/// buffer it.
+fn battleship_fast_src_v() -> f64 {
+    battleship_ref_v() * R91 / (R90 + R91)
+}
+
+/// The fast stage, `U10(5,6,7)` and `U10(9,10,8)` around `Q5`: **122 Hz**, and
+/// the only half of this voice that is audible.
+///
+/// Its virtual ground is `R94` 51 k and `R95` 51 k halving
+/// [`battleship_fast_src_v`], so a quarter of the reference, which is why it
+/// runs 40 times the slow stage rather than the 165 the two capacitors alone
+/// would suggest.
+///
+/// **The slow stage does not modulate this one, because as drawn it cannot.**
+/// `U9`'s integrator output leaves through `R92` 30 k, and `R92`'s other end
+/// lands on the node where `U10(1,2,3)`'s output, its own inverting input,
+/// `R93` and `R94` all meet. That section's inverting input is strapped to its
+/// output by a plain wire, which makes it a unity follower of the 0.496 V bias
+/// on its pin 3: `R92` can only load it. The slow oscillator has no other
+/// output on the sheet and `R92` has no other end, so this is either a drawing
+/// error or a vestigial part, but either way the drawing gives no modulation
+/// path and inventing a depth for one would be inventing the circuit.
+///
+/// This file previously carried an invented 62 Hz, then an invented 750 Hz
+/// fitted to a MAME recording, then a derived rate resting on an invented drive
+/// voltage. This one rests on nothing but the drawing and [`OPAMP_SWING`].
+fn battleship_hz() -> f64 {
+    relaxation_hz(
+        battleship_fast_src_v() / 2.0,
+        R93,
+        R96,
+        C58,
+        schmitt_window_v(R98, R99),
+    )
+}
+
+/// What the 4016B actually receives, peak to peak: **3.378 V**, not the op-amp's
+/// full swing.
+///
+/// `U10(12,13,14)` is a unity follower and `C59` 2.2 uF takes its output
+/// straight to the switch with no divider, so the file previously gave this
+/// voice the whole 10 V. But the follower's pin 12 does not tap the Schmitt's
+/// *output*: it taps the `R98`/`R99` junction, the Schmitt's own hysteresis
+/// node, one crossing lower on the sheet. That node swings by exactly the window
+/// the integrator has to cross, symmetrically about the +6 V that `R98` holds it
+/// toward, which is also the bias `R189`/`R190` put on the far side of `C59`.
+fn battleship_swing_v() -> f64 {
+    schmitt_window_v(R98, R99)
+}
 
 /// The shot's pitch, from `R156`/`R157` 33 k with `C92` 1000 pF around `U19`:
 /// `1 / (2*pi*R*C)`.
@@ -477,11 +666,24 @@ const BASE_MISSILE_GAIN: f64 = 1.5;
 const R65: f64 = 5_100.0; // U7 555, the laser's repetition rate
 const R66: f64 = 22_000.0;
 const C53: f64 = 10e-6;
-/// `U7`'s repetition rate. `D3` shunts `R66` on the charge, so it is
-/// `1.44 / ((R65 + 2*R66) * C53)` in period terms with a 19 % duty cycle: about
-/// 5.3 Hz, a repetition rate rather than a tone.
+/// `U7`'s repetition rate, **5.31 Hz**, a rate rather than a tone.
+///
+/// `D3` sits across `R66`, so the charge path is `R65` alone and the discharge
+/// path is `R66` alone: `t_high = 0.693*R65*C53`, `t_low = 0.693*R66*C53`, and
+/// the rate is `1.44/((R65 + R66)*C53)` at an 18.8 % duty cycle. The file first
+/// used the undiode'd `R65 + 2*R66` form, which gave 2.93 Hz: the diode is on
+/// the drawing and halves the period.
+///
+/// This is also the one figure in this voice that the reference recording
+/// corroborates. MAME loops `01.wav` while the gate is low, and that sample is
+/// 0.20 s long, which is one period of 5.31 Hz to within a frame.
 fn laser_repeat_hz() -> f64 {
-    1.44 / ((R65 + 2.0 * R66) * C53)
+    1.44 / ((R65 + R66) * C53)
+}
+
+/// `U7`'s duty cycle, `R65 / (R65 + R66)`: the pulse is short and the gap long.
+fn laser_duty() -> f64 {
+    R65 / (R65 + R66)
 }
 /// **INVENTED.** The laser's audible pitch and decay. The `U8`/`Q3`/`D4` chain
 /// `U7` drives was read as a part list and not solved.
@@ -727,6 +929,56 @@ impl CustomComponent for TunedBandPass {
 
 /// Two resistances in parallel, for a network whose branches are both modeled
 /// nodes rather than constants.
+/// An output that can only move so many volts per second, which is what an
+/// op-amp does when the capacitor across its feedback is the only thing that can
+/// absorb its input current.
+///
+/// `U12`'s alarm section is the case on this board: `R172` 1.5 k drives about
+/// 4 mA at it, `R173` 330 k can return a hundredth of that, and the rest goes
+/// into `C99`. A square at the input comes out as a trapezoid whose edges take
+/// `swing / rate` to climb, and the harmonics that survive that are the voice.
+///
+/// Modeling the stage as the linear amplifier its resistors describe instead
+/// deleted the voice outright: `R173`/`R172` is a gain of 220 into an op-amp on
+/// a single +12 V supply that sees an eleven-volt step, so the linear model's
+/// 48 Hz pole cut the tone by a hundred while its DC term sat at a rail.
+struct SlewLimiter {
+    rate: f64,
+    rest: f64,
+    out: f64,
+}
+
+impl SlewLimiter {
+    fn new(rate: f64, rest: f64) -> Self {
+        Self {
+            rate,
+            rest,
+            out: rest,
+        }
+    }
+}
+
+impl CustomComponent for SlewLimiter {
+    fn reset(&mut self) {
+        self.out = self.rest;
+    }
+
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        let step = self.rate * dt;
+        self.out += (inputs[0] - self.out).clamp(-step, step);
+        self.out
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.out);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.out = r.read_f64_le()?;
+        Ok(())
+    }
+}
+
 struct ParallelPair;
 
 impl CustomComponent for ParallelPair {
@@ -1090,28 +1342,23 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let shot_leg = mix_leg(&mut b, "SHOT_LEG", shot_voice, LEG_SHOT);
 
     // --- The battleship ------------------------------------------------------
+    // What reaches `C59` is the fast Schmitt's hysteresis node through a unity
+    // follower: a 50 % **square**, whose harmonics are the voice. Low-passing
+    // them away left a bare tone that sounded nothing like the board.
+    //
+    // There is no modulation. `U9`'s slow stage is a complete second oscillator
+    // whose only way out is `R92`, and `R92` lands on a follower's output where
+    // it can do nothing; see [`battleship_hz`]. Modeling a sweep here would be
+    // modeling a wire the sheet does not draw.
+    //
     // The 4016B at U17 is a switch, not a VCA: it either passes the oscillator
     // or removes its leg from the network. Modeled as a gate on the source,
     // which is not the same thing -- see the note on `resistor_mixer_switched`
     // in the framework -- but the board's legs are all 51k into a 10k load, so
     // opening one changes the others by under half a decibel.
-    let bs_carrier = b.triangle("BATTLESHIP_OSC", BATTLESHIP_HZ);
-    let bs_mod = b.triangle("BATTLESHIP_MOD", BATTLESHIP_MOD_HZ);
-    let bs_depth = b.gain("BATTLESHIP_DEPTH", bs_mod, 0.4);
-    let bs_unity = b.constant("BATTLESHIP_UNITY", 0.6);
-    let bs_env = b.add("BATTLESHIP_ENV", &[bs_depth, bs_unity]);
-    let bs_shaped = b.multiply("BATTLESHIP_AM", bs_carrier, bs_env);
-    let bs_band = b.second_order(
-        "BATTLESHIP_BAND",
-        bs_shaped,
-        FilterMode::LowPass,
-        BATTLESHIP_HZ * 3.0,
-        BATTLESHIP_Q,
-    );
-    // U10's output reaches the 4016B through C59 with no divider, so this voice
-    // arrives at its leg at the full op-amp swing. Its leg is correspondingly
-    // one of the smallest on the board, at 0.0909.
-    let bs_level = b.gain("BATTLESHIP_LEVEL", bs_band, OPAMP_SWING);
+    let bs_square = b.fixed_square("U10_FAST_OSC", battleship_hz());
+    let half = battleship_swing_v() / 2.0;
+    let bs_level = b.logic_levels("U10_HYSTERESIS_NODE", bs_square, -half, half);
     let bs_gated = b.multiply("BATTLESHIP_SW", bs_level, battleship);
     let battleship_leg = mix_leg(&mut b, "BATTLESHIP_LEG", bs_gated, LEG_BATTLESHIP);
 
@@ -1155,7 +1402,12 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let base_missile_leg = mix_leg(&mut b, "BASE_MISSILE_LEG", bm_voice, LEG_BASE_MISSILE);
 
     // --- The laser: a 5.3 Hz repeat gating a decaying tone -------------------
-    let laser_repeat = b.fixed_square("LASER_REPEAT", laser_repeat_hz());
+    // `U7`'s square is 18.8 % high, not the 50 % a plain square node gives, and
+    // the duty is the difference between a short tick and a long one. A ramp
+    // thresholded at `1 - 2*duty` reproduces it exactly, since the framework's
+    // triangle runs -1 to +1.
+    let laser_ramp = b.triangle("U7_555_RAMP", laser_repeat_hz());
+    let laser_repeat = b.threshold("U7_555", laser_ramp, 1.0 - 2.0 * laser_duty());
     let laser_env = b.rc_envelope("LASER_ENV", laser_repeat, 1e-4, LASER_DECAY_S);
     let laser_carrier = b.triangle("LASER_TONE", LASER_HZ);
     let laser_voice = b.multiply("LASER_AM", laser_carrier, laser_env);
@@ -1167,8 +1419,8 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     // --- The alarms: one 556, one 74393, two 7426 sections -------------------
     let alarm_clk = b.constant("U50_556", alarm_clock_hz());
     let divider = b.ripple_counter("U49_74393", alarm_clk, 4);
-    let qc = b.bit_decode("U49_1QC", divider, 2); // clock / 8
-    let qd = b.bit_decode("U49_1QD", divider, 3); // clock / 16
+    let qc = b.bit_decode("U49_1QC", divider, 2); // clock / 8 = 2535 Hz
+    let qd = b.bit_decode("U49_1QD", divider, 3); // clock / 16 = 1268 Hz
     let a2_pulse = b.custom(
         "ALARM2_74123",
         vec![alarm2.into()],
@@ -1179,27 +1431,35 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         vec![alarm3.into()],
         Box::new(OneShot74123::new(OS_ALARM)),
     );
-    // Both 7426 sections are open-collector onto one node pulled up by R171, so
-    // the node is the AND of the two NANDs. Which alarm is paired with which
-    // divider tap is not established; see the transcription.
-    let a2_gate = b.logic_gate("U67_A", LogicOp::Nand, a2_pulse, qc);
-    let a3_gate = b.logic_gate("U67_B", LogicOp::Nand, a3_pulse, qd);
+    // Both 7426 sections are open-collector onto one node pulled up by `R171`,
+    // so the node is the AND of the two NANDs.
+    //
+    // `1QD` reaches `U67` pin 2 off the same junction that clocks `2A`, and
+    // `1QC` runs down past that gate's other input without a dot to reach pin 5.
+    //
+    // Which alarm sits on pin 1 and which on pin 4 was previously recorded as
+    // unresolved because it crosses the sheet seam. It is resolved now, by
+    // following both one-shot outputs to the page edge and matching their
+    // heights: `U46`'s `Q` (alarm 2) steps up to the upper of the two crossings
+    // and reaches pin 1, so **alarm 2 is the low tone**, and `U44`'s (alarm 3)
+    // stays on the lower one to pin 4, so alarm 3 is the high one.
+    //
+    // A pass before this one moved both to `1QB` on the strength of two MAME
+    // sample files measuring near 5 kHz. That was fitting the model to a
+    // recording of somebody else's board, and `1QB` is not wired to anything.
+    let a2_gate = b.logic_gate("U67_A", LogicOp::Nand, a2_pulse, qd);
+    let a3_gate = b.logic_gate("U67_B", LogicOp::Nand, a3_pulse, qc);
     let alarm_node = b.logic_gate("U67_WIRED_AND", LogicOp::And, a2_gate, a3_gate);
-    // Expressed as the fall from `R171`'s pull-up rather than as an absolute
-    // voltage, for the reason `inverted_envelope` gives: the node rests high, so
-    // a model referenced to zero would push a step through `C24` at power-on
-    // that the board's mute circuit exists to cover.
-    let alarm_swing = b.logic_levels("ALARM_SWING", alarm_node, -(V12 - V_SAT), 0.0);
-    let alarm_amp = b.gain("U12_ALARM_AMP", alarm_swing, -R173 / R172);
-    let alarm_int = b.low_pass_hz(
-        "U12_ALARM_INT",
-        alarm_amp,
-        1.0 / (std::f64::consts::TAU * R173 * C99),
+    // `U12`'s alarm section is **not a linear stage**: see [`SlewLimiter`]. The
+    // section inverts, so the node's rest at +12 V pins the output at the bottom
+    // of its swing and an alarm burst drives it rail to rail.
+    let alarm_out = b.logic_levels("U12_ALARM", alarm_node, alarm_burst_v(), 0.0);
+    let alarm_slewed = b.custom(
+        "U12_ALARM_SLEW",
+        vec![alarm_out],
+        Box::new(SlewLimiter::new(alarm_slew_v_per_s(), 0.0)),
     );
-    // U12 runs on the single +12 V supply against a +6 V reference, so it has
-    // six volts of headroom above its resting rail and no more.
-    let alarm_clipped = b.clamp("U12_ALARM_CLIP", alarm_int, 0.0, V6);
-    let alarm_leg = mix_leg(&mut b, "ALARM_LEG", alarm_clipped, LEG_ALARM);
+    let alarm_leg = mix_leg(&mut b, "ALARM_LEG", alarm_slewed, LEG_ALARM);
 
     // --- SJ, the passive mix node, and everything after it -------------------
     let taps: Vec<(NodeId, f64)> = ship_legs
@@ -1674,11 +1934,84 @@ mod tests {
         }
     }
 
+    /// The battleship's two stages are one circuit built twice, so everything
+    /// about them except the one op-amp swing follows from read values. This
+    /// pins each derivation separately, because each was wrong at some point.
+    #[test]
+    fn both_battleship_oscillators_follow_from_the_drawing() {
+        // R80 2.2M / R81 220k off +12 V, then R90 120k / R91 100k off that.
+        assert!((battleship_ref_v() - 1.0909).abs() < 1e-3);
+        assert!((battleship_fast_src_v() - 0.4959).abs() < 1e-3);
+
+        // The fast stage's 30 k against 15 k makes the two ramp currents equal,
+        // so it is a 50 % square. That is the point of the pair and it holds
+        // whatever the rate turns out to be.
+        let v_g = battleship_fast_src_v() / 2.0;
+        assert!(((v_g / R96 - v_g / R93) - v_g / R93).abs() < 1e-12);
+
+        let (slow, fast) = (battleship_mod_hz(), battleship_hz());
+        assert!((slow - 3.02).abs() < 0.05, "U9 slow stage: {slow} Hz");
+        assert!((fast - 122.3).abs() < 0.5, "U10 fast stage: {fast} Hz");
+
+        // The capacitors alone would say 165 to 1. They are not alone: the fast
+        // stage works against a quarter of the reference where the slow one
+        // works against a half, and its sink is 15 k where the slow one's is
+        // 2.2 k. A model that used the capacitor ratio would be four times out.
+        let ratio = fast / slow;
+        assert!(
+            (ratio - 40.5).abs() < 0.3,
+            "the two stages differ by {ratio}"
+        );
+        assert!(
+            ((C56_C57 * R82) / (C58 * R93) - 165.0).abs() < 0.5,
+            "the capacitor-only figure this replaced"
+        );
+
+        // The Schmitt window cancels in the ratio and sets the absolute pitch,
+        // so it is the one term OPAMP_SWING reaches.
+        assert!((battleship_swing_v() - 3.3775).abs() < 1e-3);
+        assert!((schmitt_window_v(R86, R88) - schmitt_window_v(R98, R99)).abs() < 1e-12);
+    }
+
+    /// `U12`'s alarm section is modeled as a comparator rather than an
+    /// amplifier. This is the arithmetic that justifies it, kept as a check so
+    /// that changing `R172`, `R173` or the rails has to confront the claim.
+    #[test]
+    fn the_alarm_stage_cannot_run_linearly() {
+        let dc_gain = R173 / R172;
+        assert!((dc_gain - 220.0).abs() < 1.0, "R173/R172 = {dc_gain}");
+        // The 7426 node swings from R171's pull-up to a saturated output.
+        let swing = V12 - V_SAT;
+        // An op-amp on a single +12 V supply has 12 V of output range at most.
+        assert!(
+            dc_gain * swing > 100.0 * V12,
+            "the stage is driven {}x past its rail, so it clips",
+            dc_gain * swing / V12
+        );
+        // C99's linear pole is far below either tone, which is why modeling the
+        // stage linearly deleted the voice.
+        let pole = 1.0 / (std::f64::consts::TAU * R173 * C99);
+        assert!(pole < 50.0, "C99 pole {pole} Hz");
+        assert!(alarm_clock_hz() / 16.0 > 20.0 * pole);
+
+        // What C99 does instead is limit the slew, and the edge it allows has to
+        // stay short against a half period of the higher tone or the trapezoid
+        // becomes a triangle and the harmonics go with it.
+        let edge_s = 2.0 * OPAMP_SWING / alarm_slew_v_per_s();
+        assert!((edge_s - 25e-6).abs() < 1e-6, "U12 edge {edge_s} s");
+        let half_period_s = 0.5 / (alarm_clock_hz() / 8.0);
+        assert!(
+            edge_s < half_period_s / 5.0,
+            "edge against 1QC's half period"
+        );
+    }
+
     #[test]
     fn the_alarm_clock_divides_to_two_audible_tones() {
         let clk = alarm_clock_hz();
         assert!((clk - 20_282.0).abs() < 5.0, "U50 556: {clk} Hz");
-        // 1QC is clock/8 and 1QD is clock/16.
+        // `1QC` is clock/8 and `1QD` is clock/16, both read off the 74393's
+        // pins 5 and 6 at 400 dpi. Which alarm gets which is not established.
         assert!((clk / 8.0 - 2535.0).abs() < 2.0);
         assert!((clk / 16.0 - 1268.0).abs() < 2.0);
     }
