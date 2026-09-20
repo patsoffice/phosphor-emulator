@@ -939,15 +939,12 @@ sources.
   second sets how far the homing missile's 15 Hz warble is turned into pitch,
   and the internal 5 k ladder is where 3.3 kOhm comes from.
 - **How loud `NOISE 1` is.** The `MM5837`'s output swing is the one amplitude on
-  this board that is a guess rather than a divider, and it is what sets how far
-  the noise jitters the homing missile's duty cycle. The audible core of that
-  voice, 500 Hz to 8 kHz, matches the reference recording within 1.7 dB; the
-  125 Hz and 250 Hz bands sit 8 to 20 dB hot, and duty-cycle modulation of `U6`
-  by that noise is the likeliest source. `03.wav` is 55 dB down at 125-250 Hz,
-  which is a strong statement that the board puts nothing there, but tuning the
-  swing to close the gap would move the three Sallen-Key voices that are already
-  right, so it has not been tuned. This sits with the low-band residual the
-  shot, the base missile and alarm 2 also show.
+  this board that is a guess rather than a divider. It is not, as this list used
+  to say, what puts the homing missile's 125-250 Hz band 19 dB above the
+  reference: removing `NOISE 1` from `U6`'s control pin entirely moves that band
+  by 0.9 dB. See the section on the low-band residual below, which tests that
+  and two other candidates. The swing remains unmeasured and untuned, and the
+  three Sallen-Key voices it also feeds are the reason to leave it alone.
 - **What `R92` 30 kΩ is for.** Everything either side of it is read: it runs from
   the slow oscillator's integrator output to a node that is a unity follower's
   output. As drawn it can do nothing, and no other path off that oscillator
@@ -1152,6 +1149,69 @@ the LDR makes this board as broad as either recording.** Whatever those files
 are a recording of, it is not this chain alone, and a curve fitted to make the
 peak land in the right band would be a curve fitted to a shape the circuit
 cannot produce. The invented law is unchanged.
+
+## The low-band residual: not one cause, and not those voices
+
+`phosphor-emulator-uy54` carried an open item saying that the shot, the homing
+missile, alarm 2 and the base missile were all 8 to 19 dB hot at 125-250 Hz and
+that this was probably one cause. It is neither. Every number below is measured
+against the matching reference excerpt over a window of the **same length**,
+because these voices are 50 ms to 1 s long and a mismatched window moves this
+band by 5 dB on its own.
+
+| Voice | 125-250 Hz, ours minus the reference | Worst band, and where |
+|---|---|---|
+| homing missile | **+18.8** | 18.8 at 125-250 |
+| alarm 2 | **+17.6** | 17.6 at 125-250 |
+| alarm 3 | **+8.3** | 8.3 at 125-250 |
+| base missile | +2.1 | 15.3, at **4-8 kHz** |
+| shot | **-11.5** | 11.5 at 125-250 |
+
+Two of the four named voices are not in the group. The base missile's 125-250 Hz
+is within 2 dB and its error is at the top of the spectrum, and **the shot's low
+band is 11 dB deficient rather than hot**, which is the opposite direction and
+cannot share a cause with the other two. The group is three voices: the homing
+missile and the two alarms.
+
+### The three candidates, tested
+
+- **Duty-cycle modulation of the 555s by `NOISE 1`.** Ruled out. Removing
+  `NOISE 1` from `U6`'s control pin entirely moves the homing missile's
+  125-250 Hz by **0.9 dB**. It also cannot apply to the alarms, which have no
+  noise anywhere in them: their chain is a 556, a 74393, two 7426 sections and a
+  comparator.
+- **The 48 kHz `MM5837` against the 96 kHz simulation rate.** Ruled out.
+  Running the whole circuit at **384 kHz** moves alarm 2's 125-250 Hz by 0.1 dB
+  and the homing missile's by 0.4 dB. Whatever this band is, it is not aliasing.
+- **The 132 ms alarm burst through `C24`.** **Confirmed**, for the alarms, and
+  it is the board rather than the model. `C24` 1 uF against `R208` 51 kΩ is a
+  51 ms time constant and the burst is 132 ms, so the coupling capacitor droops
+  across a burst instead of ignoring it. Measured 25 ms at a time, the alarm
+  leg's 125-250 Hz energy falls **monotonically from 14 dB below its own full
+  band at the start of a burst to 30 dB below at the end**, which is that droop
+  and nothing else. `21.wav` is a **78 ms loop body**: by construction it is cut
+  from the part of a sound that does not change, so it cannot contain a droop,
+  and the 17 dB is a comparison the sample cannot support.
+
+  This file's own note on the 1 uF blocks said the 3.1 Hz corner was "far below
+  anything the board generates". It is below every *tone*. It is not below the
+  alarms' envelope, and the two shortest one-shots, 10 ms and 11 ms, are well
+  inside it.
+
+### What the homing missile's is instead
+
+Not a candidate anybody had named. Remove the 15.4 Hz warble and leave the tone
+free-running at 787 Hz, and the 125-250 Hz floor **collapses by 28 dB**, to
+7.7 dB *below* the reference. Removing the noise as well changes almost nothing.
+So the whole of that voice's low band is the frequency modulation itself.
+
+A narrow sweep says what it is: our homing missile carries a **flat broadband
+floor** from 40 Hz to 350 Hz, where the reference carries one about 21 dB lower.
+A frequency-swept square is genuinely broadband, and it is also the one thing on
+this board whose edges our synthesis places on a sample grid rather than
+continuously. Which of those two the floor is has **not** been established, and
+nothing was changed on the strength of it. It is the open question that replaces
+the one this section started with.
 
 ## Confidence
 

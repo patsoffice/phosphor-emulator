@@ -1011,9 +1011,25 @@ const LEG_CANNON: (f64, f64) = (47_000.0, 3_900.0); // R200 / R201
 const LEG_SHOT: (f64, f64) = (39_000.0, 8_200.0); // R203 / R204
 const LEG_ALARM: (f64, f64) = (68_000.0, 1_000.0); // R206 / R207
 
-/// The 1 uF block against the 51 kOhm common: a 3.1 Hz corner, far below
-/// anything the board generates, so it is here for the DC offsets the VCAs and
-/// switches leave behind rather than for tone.
+/// The 1 uF block against the 51 kOhm common: a 3.1 Hz corner, which is below
+/// every *tone* on the board, so it is here for the DC offsets the VCAs and
+/// switches leave behind.
+///
+/// **It is not below every envelope, and this comment used to say it was.** A
+/// 3.1 Hz corner is a 51 ms time constant, and the alarms' one-shot is 132 ms:
+/// less than three time constants, so `C24` droops visibly across a burst and
+/// hands back an equal and opposite tail after it. That is measurable and it is
+/// measured. Windowed 25 ms at a time, the alarm leg's 125-250 Hz energy falls
+/// from 14 dB below its own full band at the start of a burst to 30 dB below at
+/// the end, monotonically, which is the droop and nothing else.
+///
+/// It is also the reason the reference recording looks 17 dB apart from this
+/// voice in that band and is not evidence of anything: `21.wav` is a 78 ms loop
+/// body, which is by construction cut from the part of a sound that does *not*
+/// change, so it cannot contain a droop. The two shortest one-shots, the small
+/// explosion's 10 ms and the shot's 11 ms, are far enough inside 51 ms that the
+/// block is a differentiator for them rather than a block; the two explosions'
+/// and the base missile's envelopes are seconds long and see it as a block.
 const C_BLOCK: f64 = 1e-6;
 
 /// Final scaling into the resampler.
@@ -2926,6 +2942,28 @@ mod tests {
         // pins 5 and 6 at 400 dpi. Which alarm gets which is not established.
         assert!((clk / 8.0 - 2535.0).abs() < 2.0);
         assert!((clk / 16.0 - 1268.0).abs() < 2.0);
+    }
+
+    /// Every leg's 1 uF block is a 51 ms time constant, and three of the seven
+    /// one-shot widths are comparable to it rather than far inside it.
+    ///
+    /// [`C_BLOCK`]'s comment used to say the corner was below anything the board
+    /// generates. It is below every tone; it is not below the alarms' 132 ms
+    /// burst, and that is where their measured 125-250 Hz content comes from. A
+    /// change to `R_COMMON` or `C_BLOCK` has to confront that.
+    #[test]
+    fn the_mix_block_is_not_below_every_envelope() {
+        let tau = R_COMMON * C_BLOCK;
+        assert!((tau - 0.051).abs() < 1e-3, "the block is {tau} s");
+        let alarm = K74123 * OS_ALARM.0 * OS_ALARM.1;
+        assert!(
+            alarm < 3.0 * tau,
+            "a {alarm} s burst against a {tau} s block is a droop, not a block"
+        );
+        // The two long envelopes are the other way round by orders of magnitude,
+        // which is why only the alarms show it.
+        assert!(R109_R110 * C63 > 30.0 * tau, "the medium explosion");
+        assert!(R59_R60 * C49 > 100.0 * tau, "the base missile");
     }
 
     #[test]
