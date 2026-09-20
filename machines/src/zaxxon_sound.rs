@@ -18,16 +18,26 @@
 //! the three noise filters, the two engine resonators, the alarm divider chain
 //! and the whole eleven-leg mix are arithmetic on values read off the drawing.
 //!
-//! Four things are **not**, and each says `INVENTED` in its own doc comment
+//! Two things are **not**, and each says `INVENTED` in its own doc comment
 //! rather than hiding among the read values:
 //!
 //! - the `MCD-725H` opto-isolator's resistance against LED current, which sets
 //!   the player ship's engine pitch;
-//! - the `MB4391` VCA's control law beyond its direction;
 //! - `Q6`'s collector-emitter resistance against its base drive, which sweeps
-//!   the cannon;
-//! - the battleship's and the shot's oscillator pitches, whose chains were read
-//!   at block level only.
+//!   the cannon.
+//!
+//! Three more rest on properties of parts rather than on the drawing, and are
+//! named where they are used rather than marked `INVENTED`, because each is a
+//! datasheet figure rather than a choice: [`OPAMP_SWING`], the 555s' output
+//! levels and control-pin impedance, and [`MM5837_SWING`].
+//!
+//! The battleship's and the shot's oscillator pitches used to head this list.
+//! Both are solved now, along with the laser's and the homing missile's, and
+//! all four turned out to be **the same circuit**: an op-amp integrator, an
+//! inverting Schmitt on a 51 k / 100 k or 33 k / 100 k pair, and a transistor
+//! sinking the summing node through the resistor that sets the duty. See
+//! [`relaxation_hz`], which all of them share. What differs between them is the
+//! capacitor, the sink ratio, and where the reference comes from.
 //!
 //! # There is no reference to compare against
 //!
