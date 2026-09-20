@@ -2508,10 +2508,17 @@ mod tests {
         peak
     }
 
-    /// The same as [`leg_peak`], as an RMS over the second half of the hold, so
-    /// the leg's 1 uF block has settled and a square's edges are not what is
-    /// being compared.
-    fn leg_rms(node: &str, ports: (u8, u8, u8), ms: u64) -> f64 {
+    /// A leg's RMS over `from_ms..to_ms` after its gate is asked for.
+    ///
+    /// The window is a real choice and it is the same for every voice, which is
+    /// the point. A peak cannot compare a noise band with a square, because a
+    /// square's crest factor is 1 and a 226 Hz slice of noise is nearer 4, so
+    /// the two classes are 12 dB apart before anything about the board is
+    /// measured. An RMS puts them on one scale, and an RMS needs a window that
+    /// contains the voice: every voice on this board either sustains or runs for
+    /// at least the alarms' 132 ms, so one window serves all eleven and no voice
+    /// gets a window picked to suit it.
+    fn leg_rms_window(node: &str, ports: (u8, u8, u8), from_ms: u64, to_ms: u64) -> f64 {
         let mut snd = ZaxxonSound::new(CPU_HZ);
         snd.set_ports(IDLE.0, IDLE.1, IDLE.2);
         snd.tick(CPU_HZ / 50);
@@ -2521,17 +2528,24 @@ mod tests {
             .node_by_name(node)
             .unwrap_or_else(|| panic!("no node {node}"));
         let slice = CPU_HZ / 2000; // half a millisecond
-        let steps = ms * 2;
-        let mut sum = 0.0;
-        let mut n = 0usize;
-        for i in 0..steps {
+        let (mut sum, mut n) = (0.0, 0usize);
+        for i in 0..(to_ms * 2) {
             snd.circuit.tick(slice);
-            if i >= steps / 2 {
+            if i >= from_ms * 2 {
                 sum += snd.circuit().value(id).powi(2);
                 n += 1;
             }
         }
         (sum / n.max(1) as f64).sqrt()
+    }
+
+    /// The window the mix comparison uses: past the leg's 1 uF block, which is a
+    /// 51 ms time constant, and inside the shortest voice on the board.
+    const MIX_WINDOW_MS: (u64, u64) = (60, 250);
+
+    /// The same as [`leg_peak`], as an RMS over the second half of the hold.
+    fn leg_rms(node: &str, ports: (u8, u8, u8), ms: u64) -> f64 {
+        leg_rms_window(node, ports, ms / 2, ms)
     }
 
     /// No voice may dominate the mix by more than the leg table allows.
@@ -2548,47 +2562,72 @@ mod tests {
     /// genuinely unknown. What it pins is the thing the drawing *does* settle,
     /// that no voice is orders of magnitude out of line with the rest, which is
     /// the failure that actually happened.
+    ///
+    /// **It used to measure peaks, and a peak cannot put this board's two
+    /// classes of voice on one scale.** A square's crest factor is 1 and a
+    /// 226 Hz slice of noise is nearer 4, so the two are 12 dB apart before
+    /// anything about the mix is measured, and the bound had to be 100:1 to
+    /// accommodate that. On an RMS over one window that is the same for all
+    /// eleven, the board's legs land within **12:1**, which is a measurement
+    /// worth having rather than a bound wide enough to hide the failure it is
+    /// looking for.
     #[test]
     fn voice_levels_follow_the_leg_table() {
-        /// A voice, its leg node, the latches that drive it, and how long to
-        /// hold them for.
-        type Case = (&'static str, &'static str, (u8, u8, u8), u64);
-        let cases: [Case; 11] = [
-            ("ship tone A", "SHIP_A_LEG", (0xF3, 0xFF, 0xFF), 600),
-            ("ship tone B", "SHIP_B_LEG", (0xF7, 0xFF, 0xFF), 600),
-            ("homing missile", "HOMING_LEG", (0xEF, 0xFF, 0xFF), 400),
-            ("base missile", "BASE_MISSILE_LEG", (0xDF, 0xFF, 0xFF), 400),
-            ("laser", "LASER_LEG", (0xBF, 0xFF, 0xFF), 700),
-            ("battleship", "BATTLESHIP_LEG", (0x7F, 0xFF, 0xFF), 600),
-            ("small explosion", "S_EXP_LEG", (0xFF, 0xEF, 0xFF), 400),
-            ("medium explosion", "M_EXP_LEG", (0xFF, 0xDF, 0xFF), 400),
-            ("cannon", "CANNON_LEG", (0xFF, 0x7F, 0xFF), 400),
-            ("shot", "SHOT_LEG", (0xFF, 0xFF, 0xFE), 200),
-            ("alarms", "ALARM_LEG", (0xFF, 0xFF, 0xFB), 400),
+        /// A voice, its leg node, and the latches that drive it.
+        type Case = (&'static str, &'static str, (u8, u8, u8));
+        let cases: [Case; LEG_COUNT] = [
+            ("ship tone A", "SHIP_A_LEG", (0xF3, 0xFF, 0xFF)),
+            ("ship tone B", "SHIP_B_LEG", (0xF7, 0xFF, 0xFF)),
+            ("homing missile", "HOMING_LEG", (0xEF, 0xFF, 0xFF)),
+            ("base missile", "BASE_MISSILE_LEG", (0xDF, 0xFF, 0xFF)),
+            ("laser", "LASER_LEG", (0xBF, 0xFF, 0xFF)),
+            ("battleship", "BATTLESHIP_LEG", (0x7F, 0xFF, 0xFF)),
+            ("small explosion", "S_EXP_LEG", (0xFF, 0xEF, 0xFF)),
+            ("medium explosion", "M_EXP_LEG", (0xFF, 0xDF, 0xFF)),
+            ("cannon", "CANNON_LEG", (0xFF, 0x7F, 0xFF)),
+            ("shot", "SHOT_LEG", (0xFF, 0xFF, 0xFE)),
+            ("alarms", "ALARM_LEG", (0xFF, 0xFF, 0xFB)),
         ];
 
-        let peaks: Vec<(&str, f64)> = cases
+        let (from, to) = MIX_WINDOW_MS;
+        let levels: Vec<(&str, f64)> = cases
             .iter()
-            .map(|(label, node, ports, ms)| (*label, leg_peak(node, *ports, *ms)))
+            .map(|(label, node, ports)| (*label, leg_rms_window(node, *ports, from, to)))
             .collect();
-        let summary: Vec<String> = peaks
+        let summary: Vec<String> = levels
             .iter()
-            .map(|(l, p)| format!("{l} {:.0} mV", p * 1000.0))
+            .map(|(l, v)| format!("{l} {:.1} mV", v * 1000.0))
             .collect();
         let summary = summary.join(", ");
 
-        let loudest = peaks.iter().map(|(_, p)| *p).fold(0.0f64, f64::max);
-        let quietest = peaks.iter().map(|(_, p)| *p).fold(f64::MAX, f64::min);
+        let loudest = levels.iter().map(|(_, v)| *v).fold(0.0f64, f64::max);
+        let quietest = levels.iter().map(|(_, v)| *v).fold(f64::MAX, f64::min);
         assert!(quietest > 0.0, "every voice must reach SJ. {summary}");
-        // The leg table itself spans 59:1 from the medium explosion to the
-        // alarms, and the alarms sit behind a gain of 220, so some spread is the
-        // board. A hundredfold is not.
+        let spread = loudest / quietest;
+
+        // The bound that carries the meaning: the leg table's own span, 59:1
+        // from the medium explosion to the alarms. If the legs governed the
+        // balance and every source were the same size, the mix would spread
+        // exactly that far. The sources are not the same size and the designer
+        // compensated in the narrowing direction, giving the largest leg to the
+        // smallest source, so the mix must come out NARROWER than the legs. A
+        // mix wider than its own leg table is a source amplitude doing the work
+        // the series/shunt pairs should be doing.
+        let ratio = |(rs, rp): (f64, f64)| rp / (rs + rp);
+        let leg_span = ratio(LEG_M_EXP) / ratio(LEG_ALARM);
         assert!(
-            loudest / quietest < 100.0,
-            "the mix spans {:.0}:1, which is wider than the leg table can \
-             account for; a voice's source amplitude is doing the work the \
-             series/shunt pairs should be doing. {summary}",
-            loudest / quietest
+            spread < leg_span,
+            "the mix spans {spread:.0}:1 where its own leg table spans \
+             {leg_span:.0}:1. {summary}"
+        );
+
+        // And the tighter empirical guard, which is what catches a regression:
+        // it measures 12:1 today, so 20 is room to move without being room to
+        // put a voice an order of magnitude out.
+        assert!(
+            spread < 20.0,
+            "the mix spans {spread:.0}:1, against the 12:1 it measured when this \
+             bound was set. {summary}"
         );
     }
 

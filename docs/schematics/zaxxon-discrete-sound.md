@@ -1600,9 +1600,24 @@ this already, in one sentence that is easy to read past and was:
 
 So a voice sitting far from its leg's apparent rank is evidence of nothing on
 its own, and `voice_levels_follow_the_leg_table` is right to be as loose as it
-is. What it does not currently do is compare like with like: it measures peaks,
-and a noise band's crest factor is 12 dB where a square's is 0, so the two
-classes of voice are not on one scale in it.
+is.
+
+**What it did not do was compare like with like.** It measured peaks, and a
+noise band's crest factor is 12 dB where a square's is 0, so the two classes of
+voice were not on one scale in it and the bound had to be 100:1 to accommodate
+that: wide enough to hide the failure it exists to catch. It measures an RMS
+now, over one window that is the same for all eleven voices, which is possible
+because every voice on this board either sustains or runs for at least the
+alarms' 132 ms and so no voice needs a window picked to suit it.
+
+On that scale the eleven legs land within **12:1**, and the bound that carries
+the meaning is derived rather than chosen: the mix must come out **narrower
+than the leg table's own 59:1 span**. If the legs governed the balance and every
+source were the same size, the mix would spread exactly that far; the sources
+are not the same size and the designer compensated in the narrowing direction,
+giving the largest leg to the smallest source. A mix wider than its own leg
+table is a source amplitude doing the work the series/shunt pairs should be
+doing, which is the failure that actually happened.
 
 **What was actually wrong was the output scaling.** `OUTPUT_GAIN` is an explicit
 headroom choice rather than a reading, its comment claimed it put a single loud
