@@ -1128,6 +1128,42 @@ const C_BLOCK: f64 = 1e-6;
 /// `voice_levels_follow_the_leg_table` is the test that speaks to that.
 const OUTPUT_GAIN: f64 = 4.4;
 
+/// How many legs meet at `SJ`. Eleven, because alarms 2 and 3 share one.
+const LEG_COUNT: usize = 11;
+
+/// What one volt at a mixer leg is worth at the output sample, as a fraction of
+/// full scale. **0.509** on the constants above.
+///
+/// `SJ` is passive, so a leg arrives through its own [`R_COMMON`] against all
+/// eleven of them and [`R209`]; after that it is `U11`'s gain, `VR1` at full
+/// volume, and [`OUTPUT_GAIN`].
+///
+/// This is here so that a **per-voice probe can be captured at the level that
+/// voice actually contributes to the mix**, which is the only scale on which a
+/// leg capture and a mix capture mean the same thing.
+/// `tools/sound-compare`'s Zaxxon probes used a flat 50x instead, on the
+/// reasoning that the legs are millivolt-scale and need lifting to be audible.
+/// They are not: the loudest leg peaks near 0.2 V, so 50x put it at ten times
+/// full scale and **every per-voice capture on this board clipped**, which is a
+/// capture defect of exactly the kind `disasm audiodiff` exists to name.
+///
+/// `every_mix_leg_uses_the_same_common_resistor` checks the leg count this
+/// rests on, and `a_leg_probe_is_the_voices_share_of_the_mix` checks the number
+/// against the device rather than against this arithmetic.
+pub fn leg_to_output() -> f64 {
+    let legs_g = LEG_COUNT as f64 / R_COMMON;
+    (1.0 / R_COMMON) / (legs_g + 1.0 / R209) * sj_to_output()
+}
+
+/// What one volt at `SJ` is worth at the output sample, as a fraction of full
+/// scale: `U11`'s gain, `VR1` at full volume, and [`OUTPUT_GAIN`].
+///
+/// `SJ` is already past the legs' division by eleven commons, so a probe of the
+/// node itself takes this and not [`leg_to_output`].
+pub fn sj_to_output() -> f64 {
+    U11_GAIN.abs() * VOLUME * OUTPUT_GAIN
+}
+
 // ---------------------------------------------------------------------------
 // Custom components
 // ---------------------------------------------------------------------------
@@ -2472,6 +2508,32 @@ mod tests {
         peak
     }
 
+    /// The same as [`leg_peak`], as an RMS over the second half of the hold, so
+    /// the leg's 1 uF block has settled and a square's edges are not what is
+    /// being compared.
+    fn leg_rms(node: &str, ports: (u8, u8, u8), ms: u64) -> f64 {
+        let mut snd = ZaxxonSound::new(CPU_HZ);
+        snd.set_ports(IDLE.0, IDLE.1, IDLE.2);
+        snd.tick(CPU_HZ / 50);
+        snd.set_ports(ports.0, ports.1, ports.2);
+        let id = snd
+            .circuit()
+            .node_by_name(node)
+            .unwrap_or_else(|| panic!("no node {node}"));
+        let slice = CPU_HZ / 2000; // half a millisecond
+        let steps = ms * 2;
+        let mut sum = 0.0;
+        let mut n = 0usize;
+        for i in 0..steps {
+            snd.circuit.tick(slice);
+            if i >= steps / 2 {
+                sum += snd.circuit().value(id).powi(2);
+                n += 1;
+            }
+        }
+        (sum / n.max(1) as f64).sqrt()
+    }
+
     /// No voice may dominate the mix by more than the leg table allows.
     ///
     /// **This is the test the device shipped without, and the defect it would
@@ -3417,7 +3479,7 @@ mod tests {
             LEG_SHOT,
             LEG_ALARM,
         ];
-        assert_eq!(legs.len(), 11, "eleven legs reach SJ");
+        assert_eq!(legs.len(), LEG_COUNT, "eleven legs reach SJ");
         // The medium explosion is the loudest leg and the alarms the quietest,
         // by the ratios in the transcription's table.
         let ratio = |(rs, rp): (f64, f64)| rp / (rs + rp);
@@ -3425,6 +3487,65 @@ mod tests {
         assert!((ratio(LEG_ALARM) - 0.0145).abs() < 0.001);
         let loudest = legs.iter().copied().map(ratio).fold(0.0f64, f64::max);
         assert!((loudest - ratio(LEG_M_EXP)).abs() < 1e-9);
+    }
+
+    /// A leg times [`leg_to_output`] is what that voice puts into the mix, and
+    /// this checks the number against the device rather than against the
+    /// arithmetic that produced it.
+    ///
+    /// Sound one voice on its own, and the output sample must be its leg scaled
+    /// by that factor, to within the resampler's own interpolation. Getting it
+    /// wrong is not a cosmetic error in a debug view: `sndcmp`'s per-voice probe
+    /// captures are the only way to hear one voice of eleven, they are what a
+    /// before-and-after comparison of a topology correction is made from, and
+    /// with a flat 50x every one of them clipped.
+    #[test]
+    fn a_leg_probe_is_the_voices_share_of_the_mix() {
+        assert!(
+            (leg_to_output() - 0.5093).abs() < 1e-3,
+            "one leg volt reaches the output at {}",
+            leg_to_output()
+        );
+
+        // The battleship, because it is the one voice whose source amplitude is
+        // derived end to end. Compared as RMS rather than as a peak: the output
+        // is band-limited by the resampler, so a square's edges overshoot there
+        // and not at the leg, which is worth 16 % on a peak and nothing on an
+        // RMS.
+        let mut snd = ZaxxonSound::new(CPU_HZ);
+        let _ = render(&mut snd, 20, IDLE);
+        let out = render(&mut snd, 600, (0x7F, 0xFF, 0xFF));
+        // Second half only: the leg's 1 uF block settles over the first.
+        let steady = &out[out.len() / 2..];
+        let sample_rms = rms(steady) / f64::from(i16::MAX);
+
+        let leg = leg_rms("BATTLESHIP_LEG", (0x7F, 0xFF, 0xFF), 600);
+        let predicted = leg * leg_to_output();
+        assert!(
+            (sample_rms - predicted).abs() / predicted < 0.05,
+            "the battleship reaches {sample_rms} of full scale where its leg of \
+             {leg} V predicts {predicted}"
+        );
+
+        // And the scale keeps every voice inside full scale, which is the whole
+        // point: a probe capture that clips cannot be compared with anything.
+        for (label, node, ports, ms) in [
+            (
+                "ship tone A",
+                "SHIP_A_LEG",
+                (0xF3u8, 0xFFu8, 0xFFu8),
+                600u64,
+            ),
+            ("medium explosion", "M_EXP_LEG", (0xFF, 0xDF, 0xFF), 400),
+            ("homing missile", "HOMING_LEG", (0xEF, 0xFF, 0xFF), 400),
+            ("alarms", "ALARM_LEG", (0xFF, 0xFF, 0xFB), 400),
+        ] {
+            let scaled = leg_peak(node, ports, ms) * leg_to_output();
+            assert!(
+                scaled < 1.0,
+                "{label}'s probe would clip at {scaled} of full scale"
+            );
+        }
     }
 
     #[test]

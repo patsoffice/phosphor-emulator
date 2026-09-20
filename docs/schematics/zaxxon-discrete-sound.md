@@ -1536,6 +1536,29 @@ and the centroid at 201.5 Hz against 198.0, which is the medium explosion's
 envelope and center both landing within 2 % of a recording this file had
 concluded was simply an outlier.
 
+### And the per-voice probes were clipping, so none of them could be compared
+
+`sndcmp`'s Zaxxon target can capture one leg instead of the mix, which is the
+only way to hear one voice of eleven and is what a before-and-after comparison
+of a topology correction is made from. It scaled every leg by a flat **50x**, on
+the reasoning that the legs are millivolt-scale and had to be lifted to be
+audible.
+
+They are not millivolt-scale. The loudest peaks near 0.2 V, so 50x put it at ten
+times full scale and **every per-voice capture on this board clipped**, which is
+the same capture defect this section spends four paragraphs on in somebody
+else's recordings.
+
+The scale a leg probe wants is not a number at all, it is the mix path: a leg
+reaches `SJ` through its own 51 kΩ common against all eleven of them and
+`R209` 10 kΩ, and after that it is `U11`'s -8.2, `VR1`'s 0.227 at full volume
+and the device's output scaling. That is **0.509** of full scale per leg volt,
+and with it a probe capture of the only voice sounding is the mix capture of it,
+sample for sample. `zaxxon_sound::leg_to_output` is the chain,
+`a_leg_probe_is_the_voices_share_of_the_mix` checks it against the device rather
+than against its own arithmetic, and
+`a_probe_of_the_only_voice_sounding_matches_the_mix` checks the adapter.
+
 ### Two entries that moved the wrong way
 
 **Read that column with care, because it moved the wrong way twice and both

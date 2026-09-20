@@ -13,7 +13,11 @@
 //! a topology read off the sheet, and the way to tell a correction from a
 //! regression is to capture the same voice before and after and listen to both.
 //!
-//! Two things here differ from the other targets.
+//! Three things here differ from the other targets.
+//!
+//! The **probes are scaled by the mix path** rather than by a number chosen to
+//! make them audible, so a per-voice capture and a mix capture of the same
+//! voice come out at the same amplitude. See [`probe_value`].
 //!
 //! The gate bits are **active low**, and the board's pull-ups hold every one of
 //! them high at power-on. A scenario therefore writes `true` to *ask for* a
@@ -28,7 +32,7 @@
 
 use phosphor_core::device::DiscreteCircuit;
 use phosphor_machines::sega_zaxxon::TIMING;
-use phosphor_machines::zaxxon_sound::ZaxxonSound;
+use phosphor_machines::zaxxon_sound::{self, ZaxxonSound};
 
 use crate::scenario::Value;
 use crate::target::{ControlSpec, ProbeSpec, SoundTarget, TargetSpec};
@@ -285,34 +289,49 @@ impl SoundTarget for ZaxxonTarget {
     }
 }
 
-/// Read a named node out of the built circuit.
+/// Read a named node out of the built circuit, at the level it contributes to
+/// the mix.
 ///
-/// The legs are millivolt-scale at `SJ`'s side of a 51 kOhm common, three orders
-/// below the mix that `U11`'s gain of -8.2 and the power amplifier make of them,
-/// so they are scaled up to be audible rather than left at their circuit value.
-/// The scale is the same for all eleven, which is the part that matters: the
-/// board's whole balance is the eleven legs' relative size, and a per-probe
-/// scale would destroy exactly that.
+/// A leg sits on `SJ`'s side of a 51 kOhm common, and everything between there
+/// and the output sample is a known chain: the passive node's own division by
+/// eleven commons against `R209`, `U11`'s gain of -8.2, `VR1` at full volume,
+/// and the device's output scaling.
+/// [`zaxxon_sound::leg_to_output`](phosphor_machines::zaxxon_sound::leg_to_output)
+/// is that chain, so a probe capture and a mix capture of the same voice come
+/// out at the same amplitude, and a probe of a voice that is one of several
+/// sounding shows what that voice is putting into the mix rather than a number
+/// of its own.
+///
+/// **It used to be a flat 50x**, on the reasoning that the legs are
+/// millivolt-scale and had to be lifted to be audible. They are not
+/// millivolt-scale: the loudest peaks near 0.2 V, so 50x put it at ten times
+/// full scale and every per-voice capture on this board clipped. A capture that
+/// clips cannot be compared with anything, which is the first thing
+/// `disasm audiodiff` says about a file.
+///
+/// `SJ` itself is already past the legs' division, so it takes only what
+/// follows the node.
 fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
-    const LEG: f64 = 0.02;
+    let leg = zaxxon_sound::leg_to_output();
+    let sj = zaxxon_sound::sj_to_output();
     let (node, scale) = match probe {
-        "ship-a" => ("SHIP_A_LEG", LEG),
-        "ship-b" => ("SHIP_B_LEG", LEG),
-        "homing-missile" => ("HOMING_LEG", LEG),
-        "base-missile" => ("BASE_MISSILE_LEG", LEG),
-        "laser" => ("LASER_LEG", LEG),
-        "battleship" => ("BATTLESHIP_LEG", LEG),
-        "s-exp" => ("S_EXP_LEG", LEG),
-        "m-exp" => ("M_EXP_LEG", LEG),
-        "cannon" => ("CANNON_LEG", LEG),
-        "shot" => ("SHOT_LEG", LEG),
-        "alarms" => ("ALARM_LEG", LEG),
-        "sj" => ("SJ", LEG),
+        "ship-a" => ("SHIP_A_LEG", leg),
+        "ship-b" => ("SHIP_B_LEG", leg),
+        "homing-missile" => ("HOMING_LEG", leg),
+        "base-missile" => ("BASE_MISSILE_LEG", leg),
+        "laser" => ("LASER_LEG", leg),
+        "battleship" => ("BATTLESHIP_LEG", leg),
+        "s-exp" => ("S_EXP_LEG", leg),
+        "m-exp" => ("M_EXP_LEG", leg),
+        "cannon" => ("CANNON_LEG", leg),
+        "shot" => ("SHOT_LEG", leg),
+        "alarms" => ("ALARM_LEG", leg),
+        "sj" => ("SJ", sj),
         _ => return None,
     };
     circuit
         .node_by_name(node)
-        .map(|id| circuit.value(id) / scale)
+        .map(|id| circuit.value(id) * scale)
 }
 
 #[cfg(test)]
@@ -414,6 +433,44 @@ mod tests {
         assert_eq!(t.ports.0 & 0x03, 0b00);
         // And the level never disturbs the four gate bits above it.
         assert_eq!(t.ports.0 & !0x03, RESTING_PORTS.0 & !0x03);
+    }
+
+    /// A probe capture of the only voice sounding is the mix capture.
+    ///
+    /// That is what a leg probe is for, and the scale is the whole of it. This
+    /// adapter used to lift every leg by a flat 50x on the grounds that they
+    /// were millivolt-scale, which put the loudest at ten times full scale:
+    /// **every per-voice capture on this board clipped**, and a clipped capture
+    /// is the first thing `disasm audiodiff` refuses to compare. Driving the
+    /// same scenario twice, once through the mix and once through one probe, is
+    /// the check that survives someone deciding the probes are too quiet again.
+    #[test]
+    fn a_probe_of_the_only_voice_sounding_matches_the_mix() {
+        let mut mix = create(None).expect("create");
+        let mut probe = create(Some("battleship")).expect("create");
+        for t in [&mut mix, &mut probe] {
+            t.set_control("battleship", Value::Bool(true)).expect("set");
+        }
+        // Past the leg's 1 uF block, which is a 51 ms time constant.
+        let rate = mix.sample_rate() as usize;
+        for _ in 0..(rate / 2) {
+            mix.step();
+            probe.step();
+        }
+        let (mut a, mut b, mut peak) = (0.0f64, 0.0f64, 0i32);
+        for _ in 0..(rate / 4) {
+            let (m, p) = (f64::from(mix.step()), f64::from(probe.step()));
+            a += m * m;
+            b += p * p;
+            peak = peak.max(p.abs() as i32);
+        }
+        assert!(peak < i32::from(i16::MAX), "the probe clipped at {peak}");
+        let (a, b) = (a.sqrt(), b.sqrt());
+        assert!(
+            (a - b).abs() / a < 0.02,
+            "the battleship's probe reaches {b} where the mix of it alone \
+             reaches {a}"
+        );
     }
 
     /// The resting state is not an arbitrary starting point: `RP1` and `RP2`
