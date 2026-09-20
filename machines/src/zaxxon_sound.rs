@@ -1077,7 +1077,26 @@ const C_BLOCK: f64 = 1e-6;
 /// is no voltage on this board that corresponds to full scale. This puts a
 /// single loud voice at roughly a third of full scale and leaves room for the
 /// several that overlap in play.
-const OUTPUT_GAIN: f64 = 3.2;
+///
+/// It was 3.2 and did not do that: the loudest single voice peaked at 0.20 of
+/// full scale, and the whole board came out 8 to 13 dB below the level the
+/// reference emulator plays its samples at. That is audible as the board simply
+/// being quiet, and the medium explosion is where it gets noticed because the
+/// board's loudest leg is on it.
+///
+/// 4.4 puts the loudest single voice at **0.27** rather than the third this
+/// comment used to claim outright, and the difference is not slack: the binding
+/// constraint is `nothing_saturates`, every voice sounding at once, which clips
+/// at 4.8. The game never does that, so the bound is conservative, but a model
+/// that clips is worse than one that is quiet and the conservative bound is the
+/// one to keep.
+///
+/// **Nothing about the board's internal balance moves with this.** It is one
+/// scalar on the output, after `SJ`, so every voice keeps the level its own
+/// source amplitude and its own leg give it. If a voice sounds wrong relative to
+/// its neighbors, this is not the constant that is wrong, and
+/// `voice_levels_follow_the_leg_table` is the test that speaks to that.
+const OUTPUT_GAIN: f64 = 4.4;
 
 // ---------------------------------------------------------------------------
 // Custom components

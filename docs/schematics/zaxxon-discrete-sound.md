@@ -1327,6 +1327,50 @@ length. "Before" is the figure on `phosphor-emulator-uy54` before this pass.
 | alarm 2 | 19.4 | 17.6 | the `C24` droop |
 | homing missile | 17.4 | 18.8 | the warble's own bandwidth |
 
+### The board was quiet, and the leg table does not say what it looks like
+
+The medium explosion sounded far too quiet against the reference, and chasing
+that produced two results worth keeping, one of which is a correction to how
+this file reads its own mix table.
+
+**The noise chain is not at fault.** Calibrating the mix path against the
+battleship, whose source amplitude is derived end to end (a 3.378 Vpp square
+into a 0.0909 leg), gives a path gain of 0.328 from leg volts to full scale. The
+medium explosion measures **0.206 V** at its leg with its VCA wide open, against
+**0.183 V** predicted from `NOISE 2` at 0.5 V RMS spread over 24 kHz through a
+226 Hz Q-2 Sallen-Key of gain 2.5 into a 0.851 leg. Those agree to within the
+error of the noise-bandwidth estimate, so the chain is producing exactly what
+its own constants say and neither `MM5837_SWING` nor `MM5837_HZ` was touched.
+
+**The leg table is not a loudness ranking, and reading it as one is a trap this
+file sets for itself.** Held against the battleship, the legs appear to say the
+medium explosion should be 19.4 dB louder, and it measures 3.1 dB quieter: a
+22 dB "error" that is not an error at all. A 226 Hz slice of noise is inherently
+some 20 dB smaller than a full-swing square, and **the designer gave that voice
+the largest leg precisely because its source is the smallest**. The legs
+compensate for source size; they do not set output level. The mix section says
+this already, in one sentence that is easy to read past and was:
+
+> The attenuation column is the leg, not the voice, and it is only the whole
+> answer where the source's amplitude is known.
+
+So a voice sitting far from its leg's apparent rank is evidence of nothing on
+its own, and `voice_levels_follow_the_leg_table` is right to be as loose as it
+is. What it does not currently do is compare like with like: it measures peaks,
+and a noise band's crest factor is 12 dB where a square's is 0, so the two
+classes of voice are not on one scale in it.
+
+**What was actually wrong was the output scaling.** `OUTPUT_GAIN` is an explicit
+headroom choice rather than a reading, its comment claimed it put a single loud
+voice at about a third of full scale, and at 3.2 it put the loudest at 0.20 and
+the whole board 8 to 13 dB under the level the reference emulator plays its
+samples at. At 4.4 the loudest single voice reaches 0.27 and the medium
+explosion peaks at **0.249 against the reference's 0.25 as played**, which is
+the same peak. The remaining 10 dB of RMS between them is the clipping below:
+5.1 % of that recording sits at the rail, where ours has a noise band's natural
+14 dB crest factor. 4.8 clips the all-voices-at-once case, so 4.4 is the ceiling
+the conservative bound allows.
+
 ### Four of these scores are measuring a clipped recording
 
 Run `disasm audiodiff` over each pair, which is the project's own tool for this
