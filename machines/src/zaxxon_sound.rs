@@ -449,14 +449,41 @@ const U12_CANNON_REF: f64 = 6.0 * 22_000.0 / (33_000.0 + 22_000.0);
 /// life at the top of a range it should barely reach.
 const R133: f64 = 1_500.0;
 
-/// **INVENTED**, and now the only invented number left in this voice: how far
-/// `Q6` pulls `R133` down at full envelope.
+/// `Q6`'s base divider, read: `R131` 15 k from `U12` pin 7 and `R132` 3.3 k to
+/// ground, so the base sees **0.180** of the envelope.
 ///
-/// The drawing gives `R131` 15 k / `R132` 3.3 k into the base, so the base sees
-/// only `4.4 * 3.3/18.3` = 0.79 V at the envelope's peak, which is barely a
-/// diode drop above cut-off. `Q6` is therefore a soft variable resistance rather
-/// than a switch, and this is a plausible floor rather than a saturation figure.
-/// [`R133`] bounds what it can do either way.
+/// Traced at 260 %, with the transistor drawn rotated as they all are on this
+/// sheet: the horizontal lead is the base, the top lead is the collector (to
+/// `R130` and `R133`) and the bottom one is the emitter, to ground.
+const R131: f64 = 15_000.0;
+const R132: f64 = 3_300.0;
+
+/// The envelope at which `Q6` starts conducting at all: **3.33 V**.
+///
+/// A bipolar transistor's base-emitter junction is a silicon diode, so nothing
+/// happens until the base reaches [`V_DIODE`], and the base is `R132/(R131 +
+/// R132)` of the envelope. That is `0.6 * 18.3/3.3` = 3.33 V, which the
+/// envelope leaves **0.19 s** into its 0.68 s decay.
+///
+/// This is derived rather than invented, and it is not the same claim as
+/// [`CANNON_R_Q6_ON`], which is still a guess. What it fixes is a model that had
+/// `Q6` conducting for the whole of the decay because its threshold was zero:
+/// the board's cannon spends a fifth of its length sweeping down and the rest
+/// parked at `R130 + R133`'s 1835 Hz, and the old one swept all the way.
+///
+/// The peak base voltage is 0.79 V, a fifth of a volt above this, so `Q6` is a
+/// soft variable resistance over a narrow range rather than a switch. `R133`
+/// bounds what it can do either way.
+fn cannon_q6_threshold_v() -> f64 {
+    V_DIODE * (R131 + R132) / R132
+}
+
+/// **INVENTED**, and the only invented number left in this voice: how far `Q6`
+/// pulls `R133` down at full envelope.
+///
+/// [`cannon_q6_threshold_v`] now fixes where the sweep *stops*, and [`R133`]
+/// fixes how little `Q6` can do at the quiet end, so this sets only how bright
+/// the first 0.19 s is. It has not been fitted to anything.
 const CANNON_R_Q6_ON: f64 = 120.0;
 const CANNON_R_Q6_OFF: f64 = 10_000_000.0;
 
@@ -1784,7 +1811,11 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         "Q6_RCE",
         vec![cannon_env],
         Box::new(VariableResistor {
-            threshold_v: 0.0,
+            // Q6's base-emitter junction is a silicon diode and its base is
+            // R132/(R131 + R132) of the envelope, so nothing happens below
+            // 3.33 V. This used to be 0, which had the transistor conducting
+            // through the whole 0.68 s decay instead of the first 0.19 s of it.
+            threshold_v: cannon_q6_threshold_v(),
             full_v: V5 - V_DIODE,
             r_dark: CANNON_R_Q6_OFF,
             r_min: CANNON_R_Q6_ON,
@@ -2951,6 +2982,46 @@ mod tests {
     /// generates. It is below every tone; it is not below the alarms' 132 ms
     /// burst, and that is where their measured 125-250 Hz content comes from. A
     /// change to `R_COMMON` or `C_BLOCK` has to confront that.
+    /// `Q6` conducts for the first fifth of the cannon's decay, not all of it.
+    ///
+    /// The threshold is derived: a bipolar transistor's base-emitter junction is
+    /// a silicon diode, and `R131`/`R132` put the base at 0.180 of the envelope.
+    /// It used to be zero, which swept the voice for the whole 0.68 s and left
+    /// it 7 dB light at 1-2 kHz against the reference.
+    #[test]
+    fn the_cannon_sweeps_for_a_fifth_of_its_decay() {
+        let div = R132 / (R131 + R132);
+        assert!((div - 0.1803).abs() < 1e-3, "Q6's base sees {div}");
+        let threshold = cannon_q6_threshold_v();
+        assert!((threshold - 3.327).abs() < 0.01, "{threshold} V");
+
+        // The envelope starts at V5 - V_DIODE and decays through R127_ENV.
+        let peak = V5 - V_DIODE;
+        assert!(threshold < peak, "Q6 must conduct at all");
+        // Peak base drive is a fifth of a volt above turn-on, so Q6 is a soft
+        // resistance over a narrow range rather than a switch.
+        assert!(
+            (peak * div - 0.793).abs() < 0.005,
+            "peak base {}",
+            peak * div
+        );
+
+        let tau = R127_ENV * C79;
+        let sweeping = tau * (peak / threshold).ln();
+        assert!(
+            (sweeping - 0.190).abs() < 0.005,
+            "sweeping for {sweeping} s"
+        );
+        assert!(
+            sweeping < tau / 3.0,
+            "the sweep is a fifth of the decay, not all of it"
+        );
+
+        // And where it parks once Q6 is off: R130 in series with R133.
+        let parked = 1.0 / (std::f64::consts::TAU * C81 * (R127_FB * (R130 + R133)).sqrt());
+        assert!((parked - 1835.0).abs() < 10.0, "parked at {parked} Hz");
+    }
+
     #[test]
     fn the_mix_block_is_not_below_every_envelope() {
         let tau = R_COMMON * C_BLOCK;

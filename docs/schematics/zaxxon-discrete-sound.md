@@ -337,7 +337,21 @@ Q       = 0.5 * sqrt(R127/r)
 with `r` = `R130` in series with `R133` paralleled by `Q6`, so `r` runs between
 1.6 kΩ with `Q6` off and `R130`'s 100 Ω with it hard on. That sweeps the corner
 **1835 Hz to 7.3 kHz** at a Q of 2.7 to 10.8: a broadband crack that starts
-bright and falls over 0.68 s, which is what a cannon is.
+bright and falls, which is what a cannon is.
+
+**It does not fall for the whole 0.68 s, and the reason is read.** `Q6` is drawn
+rotated, like every transistor on these sheets: the horizontal lead is the base,
+the top one the collector (to `R130` and `R133`) and the bottom one the emitter,
+to ground. `R131` 15 kΩ and `R132` 3.3 kΩ put the base at **0.180** of the
+envelope, and a bipolar transistor's base-emitter junction is a silicon diode,
+so nothing happens until the envelope passes `0.6 * 18.3/3.3` = **3.33 V**. The
+envelope starts at 4.4 V and decays with a 0.68 s time constant, so it crosses
+that **0.19 s** in. The cannon sweeps for the first fifth of its length and then
+sits at `R130 + R133`'s 1835 Hz while the VCA closes.
+
+The peak base drive is 0.79 V, a fifth of a volt above turn-on, so `Q6` is a
+soft resistance over a narrow range rather than a switch, and how far down it
+goes there is still [invented](#what-this-does-not-establish).
 
 Reading it as the neighboring MFB pattern instead gives a Q-10.9 band-pass
 sitting *at* 7.4 kHz with a gain of 2.35, which is a thin whistle carrying a
@@ -921,6 +935,11 @@ sources.
 - **The `MB4391`'s control law beyond its direction.** The argument above fixes
   the sign. How many volts of control correspond to how much attenuation is not
   established at all, and the device carries a named, invented mapping for it.
+- **How far `Q6` pulls the cannon's tuning node down at full envelope.** Where
+  its sweep *stops* is now read (`R131`/`R132` and a silicon base-emitter drop
+  put it 0.19 s in) and `R133` bounds what it can do at the quiet end, so what
+  is left is only how bright the first fifth of the voice is. Still invented,
+  still labeled so at the call site, and not fitted to anything.
 - **Which 4016B section each of the three sheet-12 gate bits controls.** `U17`'s
   three used sections take their control on pins 13, 6 and 12; the battleship's
   is pin 13, read on sheet 11. The homing-missile and laser assignments to pins
@@ -1212,6 +1231,47 @@ this board whose edges our synthesis places on a sample grid rather than
 continuously. Which of those two the floor is has **not** been established, and
 nothing was changed on the strength of it. It is the open question that replaces
 the one this section started with.
+
+## The cannon and the two explosions, measured
+
+The last two entries on the issue's error list, and they came out opposite ways.
+
+**The cannon was 7.2 dB out at 1-2 kHz and is now 3.8 dB out at its worst band**,
+on the derived `Q6` threshold above and nothing else. Ours minus `08.wav`, per
+octave, before and after:
+
+| Band | before | after |
+|---|---|---|
+| 125-250 | -0.3 | +3.8 |
+| 250-500 | -2.8 | +1.5 |
+| 500-1000 | -3.4 | +1.7 |
+| 1000-2000 | **-7.2** | +2.0 |
+| 2000-4000 | -1.6 | -1.5 |
+| 4000-8000 | +2.3 | -0.1 |
+
+The voice was light at 1 kHz because it never stopped sweeping: with `Q6`'s
+threshold at zero it kept the corner moving for the whole 0.68 s instead of
+parking at 1835 Hz after 0.19 s. Nothing was tuned; the base divider is read and
+the turn-on voltage is the same silicon drop this file uses for every diode.
+
+**The medium explosion is 7.8 dB out and is not going to be fixed by changing
+it, because it is already exactly the drawing.** Both explosion filters were
+checked against white noise through the two-pole low-pass their own parts give,
+generated and measured the same way:
+
+| | vs its own ideal | vs the reference |
+|---|---|---|
+| small explosion, 321 Hz Q 2 | **0.5 dB** | 2.6 dB |
+| medium explosion, 226 Hz Q 2 | **0.5 dB** | **7.8 dB** |
+
+These are the same circuit one octave apart. One of them agrees with its
+reference and the other does not, and both agree with the drawing to half a
+decibel, so the disagreement is in `10.wav` rather than in the model. `10.wav`
+is also the odd file in the set: 3.83 s where the next longest is 1.75 s, and
+the only one at 22 kHz. Our shortfall against it is spread evenly over four
+octaves above 500 Hz rather than sitting in one band, which is what a second
+voice still sounding under a ship explosion would look like and is not what a
+wrong filter looks like. Nothing changed.
 
 ## Confidence
 
