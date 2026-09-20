@@ -549,6 +549,88 @@ warbling with the 555. Its duty is 45.5 % rather than the battleship's exact
 to 1. It reaches `MB4391 U16` ch A (1, 2, 14, 15) through `R164` 1 MΩ against `R165` 220 kΩ, a
 divider of **0.18**, and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
 
+### The board sweeps this voice down over its whole length and the device does not
+
+The open item on the shot was "11.5 dB deficient at 125-250 Hz and bright at
+4-8 kHz", which is a shape read off one window. Split the comparison into three
+windows instead, which `disasm audiodiff --range` and `--range-b` exist for, and
+it is not a shape at all. It is a sweep.
+
+| | first 200 ms | 200-500 ms | 500-990 ms |
+|---|---|---|---|
+| `23.wav` centroid | 1930 Hz | 1212 Hz | **836 Hz** |
+| ours | 2097 Hz | 1906 Hz | **1918 Hz** |
+| `23.wav` fundamental | 1181 Hz | 301 Hz | **276 Hz** |
+| ours | the 39 Hz warble, throughout | | |
+| `23.wav` at 150-400 Hz | 3.4 % | 19.6 % | **28.3 %** |
+| ours | 0.7 % | 0.2 % | 0.1 % |
+
+**The reference's pitch falls by two octaves across the voice. Ours does not
+move.** The whole of the "deficient at 125-250 Hz" is the second half of that
+fall, and the "bright at 4-8 kHz" is our tone sitting where the board's began.
+
+The first number is the one that says the model is close rather than lost:
+`23.wav` starts at 1181 Hz and this file's own arithmetic for node A with the
+amplifier at its low rail gives about 1.1 kHz. The board starts where we sit and
+then goes down.
+
+**The mechanism is a wire this device does not have.** `R147` 1 MΩ runs from
+node X to node Y, which is on the node table above and in
+[`zaxxon-shot-oscillator.json`](zaxxon-shot-oscillator.json). Node Y is the
+VCA's envelope, 4.1 V below its rest at the bottom of a trigger and back over
+hundreds of milliseconds; node X is the oscillator's reference through `U19`'s
+buffer and inverting amplifier. So X sits on a divider between +12 V through
+`R145`/`R146` and *whatever Y currently is*: **8.42 V at rest and 6.12 V at the
+bottom of a trigger**, sliding between them as the envelope recovers. The device
+holds X's DC at the value Y has at rest and gives it only `C88`'s step, so after
+40 ms its pitch is constant.
+
+It also makes this file's own sentence about that stage wrong. `U19`(1,2,3) does
+**not** "spend the whole voice pinned at one rail or the other": it comes off its
+low rail whenever X is within `OPAMP_SWING/5.89` of the mid-rail, which is
+whenever Y is below 2.79 V.
+
+### What was tried, and why none of it shipped
+
+Three changes, each one arithmetic on the node list above rather than a reading,
+and **every one made the voice measurably worse**. They are written down so the
+next pass does not spend the afternoon rediscovering them.
+
+- **Coupling Y into X** at `R145`/`R146` against `R147`, a weight of 0.560. The
+  direction is right (X falls on a trigger, so the amplifier rises, so the
+  voice starts high and falls) and the size is wrong: the early window's
+  centroid went from 2097 Hz to 3067 Hz against the reference's 1930, because
+  the amplifier now rails high for longer. Adding the lag `C88` gives that node
+  did not help.
+- **`C88`'s corner is 26 ms, not the 43 ms this file states.** `shot_pitch_r`
+  puts `R147 + R148` in the path, on the reading that those two are how X
+  reaches ground. They are, at DC. At the 4 Hz this corner describes, `C89`
+  680 nF holds Y to ground with 59 kΩ against `R148`'s 2.2 MΩ, so `R147` lands
+  on an AC ground and `R148` is not in it: `R145`/`R146` ∥ `R147` = 0.56 MΩ.
+- **`C89`'s recovery is 760 ms, not the 468 ms this file states.** The same
+  argument the other way: `R147` does not land on a held node, it lands on X,
+  which reaches +12 V through `R145`/`R146` 1.27 MΩ and the shaper through a
+  `C88` that is 15 MΩ at 0.2 Hz and therefore open. `R148` ∥ (`R147` +
+  `R145`/`R146`) = 1.12 MΩ. That one is attractive because it predicts the
+  voice's length at about 1.0 s against the recording's 990 ms, where 468 ms
+  gives the 630 ms this file has carried as a curiosity. It still measures
+  worse: our decay T20 goes from 0.444 s to 0.748 s against the reference's
+  0.519 s.
+
+The two time-constant arguments are almost certainly right as arithmetic, and
+the pair of poles they give is 26 ms and 760 ms, twenty-nine to one, which is
+exactly the separation that lets a two-capacitor network be written as two
+independent RCs at all. What that means is that **the error in this voice is not
+in these numbers**, because correcting both of them and coupling the two nodes
+still leaves the pitch an octave high and not falling.
+
+So this is where the file's own rule applies and the afternoon's work does not
+substitute for it: **go back to sheet 11.** What needs reading at 400 dpi is
+`U19`(1,2,3)'s supply and output range, node A between `R153`, `R154` and
+`R155`, and whether anything else lands on net 21 between the amplifier, `R154`
+and `U18` pin 5. A pass that re-derives from the node list above cannot find a
+wrong node in it, and three tries just demonstrated that again.
+
 ## The base missile, and the last block-level reading on the board
 
 This was the last voice named only at block level. It is read at component level
@@ -1008,7 +1090,11 @@ sources.
 - **The shot is a swept tone, not filtered noise**, on a third copy of that same
   integrator-and-Schmitt oscillator. Its rate is 3331 Hz per volt at node A, its
   `Qbar`-driven shaper rests the VCA muted and decays over 468 ms, and its 555
-  is modulated through its control pin rather than its timing resistors.
+  is modulated through its control pin rather than its timing resistors. **What
+  the device does not do is sweep it**: the board's pitch falls from 1181 Hz to
+  276 Hz across the voice and ours holds still, and the mechanism is `R147`
+  carrying the envelope into the oscillator's reference. Three attempts at it
+  all measured worse and none shipped; see that voice's section.
 - **The laser is a fourth copy of it**, swept 300 Hz to 600 Hz by `U7`'s timing
   capacitor. `U7`'s output pin is not drawn: the board reads pins 2 and 6.
 - **The homing missile has no envelope**, and its gate is a switch like the
