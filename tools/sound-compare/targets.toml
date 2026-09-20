@@ -323,16 +323,34 @@ front end is 68 Hz wide at every LDR position, which is arithmetic on R21 and
 C26. Two constants have been fitted to these recordings in the past and both
 were reverted.
 
-reference/zaxxon-ab.sh builds both comparisons as wavs you can actually listen
-to: every voice beside its sample, and every voice beside a previous revision's
-capture. It carries the voice-to-sample mapping from MAME's zaxxon_a.cpp and,
-per voice, the window that makes our capture the same LENGTH as the sample it is
-held against, which matters more than it sounds like: these voices run from
-47 ms to 3.8 s and a mismatched window moves the 125-250 Hz band by 5 dB on its
-own. Its before/after half also prints how far each voice moved, so a change
-meant to touch four voices can be shown to have touched four: the other eight
-null out 66 to 84 dB down, which is this board's equivalent of a byte-identical
-golden frame.
+USE `disasm audiodiff` FOR THE COMPARISON ITSELF, which is what this crate's own
+module doc has said since it was written: sndcmp produces captures and audiodiff
+owns the metrics and the WAV I/O. A pass over this board went and did the
+comparing in a shell with sox and awk instead, got a unit wrong (sox prints a
+crest factor as a linear ratio and it was read as decibels), and started
+building a second implementation in here before noticing. Two of the things it
+had been missing for four rounds of hand-rolled octave tables are the first
+things audiodiff prints:
+
+  disasm audiodiff <mame>/10.wav /tmp/ours.wav
+
+  clipped (%)  5.122  0.000   -> named in the verdict as a CAPTURE DEFECT
+  attack (s)   0.9927 0.2654  -> the ship explosion is sustained, not a decay
+  decay tau    0.902  0.921   -> and our recovery matches to 2 %
+
+The hand-rolled tables were normalized per file to compare spectrum, which makes
+them blind to the envelope, so a two-second roar and a thump scored 0.4 dB apart
+and four rounds of them never noticed. audiodiff reports attack, decay T20/T40,
+decay tau, event count and event spacing beside the bands, which is the half
+that was missing.
+
+Clipping is the other half. Four of this set's noise-voice recordings are driven
+into the rails: 05.wav clips on 14.5 % of its samples, 04.wav on 6.8, 02.wav on
+6.8, 10.wav on 5.1. Our captures clip on none. Clipping raises RMS and generates
+harmonics, which broadens a spectrum in exactly the way a wider filter would, so
+those four bands tables are measuring the recording as much as the model. The
+one noise recording that is nearly clean, 11.wav at 0.8 %, is the one whose
+shape agrees with this model.
 
 What IS derived, and is what a review would check: the seven 74123 one-shot
 widths at the plain part's 0.28 constant, the three Sallen-Key noise bands, the

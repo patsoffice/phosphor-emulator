@@ -2669,10 +2669,12 @@ mod tests {
     /// flat for two seconds and then falls off a cliff, which is that and not
     /// an exponential.
     ///
-    /// Nothing else on this board had covered the retrigger path, and the
-    /// octave-band comparison cannot see it: retriggering changes the envelope
-    /// and not the spectrum, so the shape metric moves 0.4 dB while the voice
-    /// goes from one second to four.
+    /// Nothing else on this board had covered the retrigger path, and a
+    /// per-file-normalized octave table cannot see it: retriggering changes the
+    /// envelope and not the spectrum, so that metric moves 0.4 dB while the
+    /// voice goes from one second to four. `disasm audiodiff` reports the
+    /// envelope directly and would have shown it at once; with the retrigger it
+    /// puts the recording's decay T20 at 2.350 s against this device's 2.360.
     #[test]
     fn the_one_shots_retrigger_and_that_is_what_sustains_the_ship_explosion() {
         let mut os = OneShot74123::new(OS_M_EXP);

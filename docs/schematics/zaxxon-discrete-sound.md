@@ -1327,6 +1327,34 @@ length. "Before" is the figure on `phosphor-emulator-uy54` before this pass.
 | alarm 2 | 19.4 | 17.6 | the `C24` droop |
 | homing missile | 17.4 | 18.8 | the warble's own bandwidth |
 
+### Four of these scores are measuring a clipped recording
+
+Run `disasm audiodiff` over each pair, which is the project's own tool for this
+and reports what a hand-rolled octave table does not:
+
+| Voice | Reference clips on | Reference crest | Ours | Centroid, reference vs ours |
+|---|---|---|---|---|
+| ship engine A | **14.5 %** | 1.41 | 4.26 | 759 vs 556 Hz |
+| ship engine B | **6.8 %** | 1.61 | 6.33 | 399 vs 645 Hz |
+| base missile | **6.8 %** | 1.61 | 9.06 | 398 vs 343 Hz |
+| medium explosion | **5.1 %** | 1.61 | 7.64 | 201.5 vs 198.8 Hz |
+| small explosion | 0.8 % | 2.91 | 8.72 | 275.9 vs 279.9 Hz |
+
+`audiodiff` names it in its verdict, as a **capture defect** rather than a
+difference: "10 clips on 5.1% of samples".
+
+The five noise voices are the ones this matters for, because a square is
+supposed to have a crest factor near 1 and does. Four of the five references are
+driven into the rails; the fifth, the small explosion, is nearly clean, and it
+is the one whose octave bands agree with this model. Clipping raises RMS and
+generates harmonics, which broadens a spectrum in exactly the way a wider filter
+would, and **broadened-by-clipping cannot be told from a wider filter by looking
+at octave bands**. That is most of what the 17.0, 15.3, 11.8 and 7.4 dB scores
+on those four voices are, and it is why none of them was chased with a constant.
+
+The centroid column is the part of the comparison that survives clipping better,
+and on it the two explosions land within 1.5 %.
+
 ### What this column cannot see at all
 
 It is blind to the envelope, and that is not a small blind spot. Every figure
@@ -1355,6 +1383,17 @@ listening, after four rounds of these tables had been written and none of them
 had noticed. `zaxxon/m-exp-sustained` is the scenario, and
 `the_one_shots_retrigger_and_that_is_what_sustains_the_ship_explosion` is what
 keeps the path covered.
+
+**And it was visible the whole time in `disasm audiodiff`**, which reports
+attack, decay T20, decay T40, decay tau, event count and event spacing beside
+the bands. That tool is where the comparison for this project lives, as
+`sndcmp`'s own module doc says in its first paragraph; the octave tables above
+were done by hand in a shell instead, and hand-rolling them is what left this
+file blind to an envelope for four rounds. Against the retriggered capture
+audiodiff puts the decay T20 at 2.350 s for the recording and 2.360 for ours,
+and the centroid at 201.5 Hz against 198.0, which is the medium explosion's
+envelope and center both landing within 2 % of a recording this file had
+concluded was simply an outlier.
 
 ### Two entries that moved the wrong way
 
