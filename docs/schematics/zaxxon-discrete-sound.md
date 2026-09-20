@@ -671,7 +671,9 @@ battleship's 40.5:1 ratio is, even though the warble's *depth* is not: that is
 `beta` times the swing, 1.69 V at `C43` and 0.248 V after `R45` and `R47`.
 
 Against `U6`'s thresholds, 0.248 V either side of pin 5's own 3.33 V sweeps the
-tone about **710 Hz to 872 Hz**, thirty times in two seconds.
+tone about **710 Hz to 872 Hz**, thirty times in two seconds. **That is the
+warble's own contribution and it is not where the voice sits**: `NOISE 1` is on
+the same pin and moves the whole thing up by a quarter of an octave. See below.
 
 **`C46` is 33 uF, not 2.2 uF.** That correction is what turns the voice from a
 transient into a sustained sound. 2.2 uF against pin 5's 3.3 kΩ is a 22 Hz
@@ -684,6 +686,54 @@ A 555's control pin is also not a frequency control. It is the upper threshold,
 with the lower at half of it, so raising it stretches the charge leg against
 `V_cc` much more than the discharge leg against ground: the duty cycle moves
 with the pitch. That is why the model simulates the part rather than solving it.
+
+### `NOISE 1` sets this voice's pitch, and 787 Hz is a rate the board never runs at
+
+The row above says `U6` free-runs at 787 Hz, and every pass of this file has
+then quoted that as the voice's pitch. It is not. `U4` puts **two** things on
+pin 5, and the second one is not a modulation of the first: `NOISE 1` arrives
+through `R46` 200 kΩ at `-R47/R46` = -0.05, which is about **+/-0.25 V** of
+[`MM5837_SWING`], re-randomized every `1/MM5837_HZ`, on a pin that *is* the
+comparator's threshold.
+
+A threshold that moves faster than the capacitor approaches it is not averaged,
+it is a **first-passage** problem. `C45` climbs about 15 mV per simulation step
+near the trip point while the threshold jumps sixteen times that, so the
+crossing happens at the first dip of the noise rather than at its middle: the
+effective threshold sits near the bottom of the excursion, and a 555 charging to
+a lower threshold is a faster 555. The same argument holds for the lower
+threshold on the way down, where it shortens the discharge leg.
+
+Measured, on the board's own chain with one input at a time removed:
+
+| | rate |
+|---|---|
+| pin 5 parked at the part's own 2/3 of +5 V | **787 Hz**, which is `1.44/((R48+2*R49)*C45)` |
+| the 15.4 Hz warble alone | **785 Hz**: 15 Hz is slow against a 1 ms period, so the part just follows it |
+| the warble and `NOISE 1`, as the board wires them | **977 Hz** |
+| the same, stepped eight times finer | **985 Hz** |
+
+The fourth row is the one that makes this a property of the part rather than of
+the simulation. A rate set by our quantizing the crossing would move with the
+step, and would move the *other way*: the framework trips on the first step at
+or past the threshold, so its error is a late bias worth 0.8 % at 96 kHz.
+Eight times the resolution moves the answer by 0.8 %, in the direction of a
+limit.
+
+Two consequences, and the second is uncomfortable.
+
+**The reference corroborates it.** `disasm audiodiff`'s autocorrelation puts
+`03.wav`'s fundamental at **1025.6 Hz**. No reading of `R48`, `R49` and `C45`
+produces that, and neither does any position of the warble; the board is doing
+the same thing our model is. Nothing here was tuned to it.
+
+**This voice's pitch now rests on an invented constant.** `MM5837_SWING` is a
+guess, and across the `MM5837`'s published 24 to 56 kHz clock spread the rate
+runs 947 to 997 Hz. The file's list of what the noise generator's amplitude does
+said "it sets the absolute level and nothing else"; that is true of the three
+Sallen-Key voices and the cannon and false here. It was not changed, because
+changing it to close the remaining 4.8 % would be fitting a constant to a
+recording, which this file has done twice and reverted twice.
 
 ### Three readings of one stage
 
@@ -910,8 +960,20 @@ sources.
 - **The homing missile has no envelope**, and its gate is a switch like the
   laser's and the battleship's. `R42`'s far end is +6 V, so `U5`(5,6,7) is a
   free-running op-amp astable at **15.4 Hz**, and `C46` 33 uF passes it to
-  `U6`'s control pin whole. The rate follows from `R42`, `R43`, `R44` and `C43`
-  alone: the op-amp's swing cancels in `ln((1+beta)/(1-beta))`.
+  `U6`'s control pin whole. The warble's rate follows from `R42`, `R43`, `R44`
+  and `C43` alone: the op-amp's swing cancels in `ln((1+beta)/(1-beta))`.
+- **The homing missile's *tone* is the one rate on this board that is not
+  arithmetic.** `NOISE 1` shares `U6`'s control pin with the warble, and a 555's
+  control pin is its comparator threshold, so a threshold jumping faster than
+  the capacitor approaches it is crossed at the bottom of the noise rather than
+  its middle. Measured on the chain with one input at a time removed: 787 Hz
+  parked, 785 Hz with the warble alone, **977 Hz** as the board wires it, and
+  985 Hz at eight times the simulation resolution. `03.wav` sits at 1025.6 Hz.
+- **That voice's sub-audio energy is its duty cycle, not a broadband floor and
+  not our sample grid.** The same moving control pin moves the duty 0.590 to
+  0.666, so the square's mean swings at 15.4 Hz. The duty swing predicts
+  0.202 % of the square's energy below 100 Hz and the chain measures 0.203 %,
+  and eight times the resolution moves that by 0.6 %.
 - **One circuit accounts for four of the eleven voices.** An op-amp integrator,
   an inverting Schmitt on a 51 k / 100 k or 33 k / 100 k pair, and a transistor
   sinking the summing node through a resistor that decides the duty. What
@@ -979,13 +1041,16 @@ sources.
   gives; the bipolar part's usual 1.7 V of headroom is what the model uses. The
   second sets how far the homing missile's 15 Hz warble is turned into pitch,
   and the internal 5 k ladder is where 3.3 kOhm comes from.
-- **How loud `NOISE 1` is.** The `MM5837`'s output swing is the one amplitude on
-  this board that is a guess rather than a divider. It is not, as this list used
-  to say, what puts the homing missile's 125-250 Hz band 19 dB above the
-  reference: removing `NOISE 1` from `U6`'s control pin entirely moves that band
-  by 0.9 dB. See the section on the low-band residual below, which tests that
-  and two other candidates. The swing remains unmeasured and untuned, and the
-  three Sallen-Key voices it also feeds are the reason to leave it alone.
+- **How loud `NOISE 1` is, which is also the homing missile's pitch.** The
+  `MM5837`'s output swing is the one amplitude on this board that is a guess
+  rather than a divider. Everywhere else that is only a level, because every
+  stage after it is a read divider. On the homing missile it is not: `NOISE 1`
+  lands on `U6`'s **control pin**, which is the part's own comparator threshold,
+  and the size of that noise is what puts the voice at 977 Hz rather than at the
+  787 Hz its timing parts give. Across the part's published 24 to 56 kHz clock
+  spread the rate runs 947 to 997 Hz. The swing remains unmeasured and untuned,
+  and the three Sallen-Key voices it also feeds are the second reason to leave
+  it alone.
 - **What `R92` 30 kΩ is for.** Everything either side of it is read: it runs from
   the slow oscillator's integrator output to a node that is a unity follower's
   output. As drawn it can do nothing, and no other path off that oscillator
@@ -1239,20 +1304,52 @@ missile and the two alarms.
   alarms' envelope, and the two shortest one-shots, 10 ms and 11 ms, are well
   inside it.
 
-### What the homing missile's is instead
+### What the homing missile's is instead: the duty cycle the warble moves
 
 Not a candidate anybody had named. Remove the 15.4 Hz warble and leave the tone
-free-running at 787 Hz, and the 125-250 Hz floor **collapses by 28 dB**, to
-7.7 dB *below* the reference. Removing the noise as well changes almost nothing.
-So the whole of that voice's low band is the frequency modulation itself.
+free-running, and the low-frequency floor collapses; removing the noise as well
+changes almost nothing. So the whole of that voice's low band comes from the
+warble.
 
-A narrow sweep says what it is: our homing missile carries a **flat broadband
-floor** from 40 Hz to 350 Hz, where the reference carries one about 21 dB lower.
-A frequency-swept square is genuinely broadband, and it is also the one thing on
-this board whose edges our synthesis places on a sample grid rather than
-continuously. Which of those two the floor is has **not** been established, and
-nothing was changed on the strength of it. It is the open question that replaces
-the one this section started with.
+**It is the duty cycle, and it is arithmetic.** A 555's control pin raises the
+charge leg's target while leaving the discharge leg at `ln 2` of its own time
+constant whatever the control does, so a moving pin moves the duty as well as
+the pitch. Over the warble's +/-0.248 V the duty runs
+
+```text
+d(v) = t_high / (t_high + t_low)
+t_high = (R48 + R49) * C45 * ln((5 - v/2) / (5 - v))
+t_low  = R49 * C45 * ln 2
+```
+
+from **0.590** at 3.085 V to **0.666** at 3.581 V. A square's mean is `2d - 1`,
+so the mean swings 0.181 to 0.331 of the square's own amplitude, at 15.4 Hz, and
+the leg's 1 uF block passes that whole because its corner is 3.1 Hz. Treating
+the warble as a triangle, that modulation carries
+
+```text
+((d_hi - d_lo) / sqrt(3))^2 / (2 * sqrt(d*(1-d)))^2 = 0.202 %
+```
+
+of the square's energy, 27 dB under the tone, at a frequency nothing else on
+this board reaches.
+
+Measured through the chain, below 100 Hz and with the measuring filter's own
+leakage of the square subtracted, it is **0.203 %**. Predicted and measured
+agree to under one percent, and **stepping the chain eight times finer moves the
+measurement by 0.6 %** where a floor made by quantizing the edges would fall
+18 dB, since that power goes as the step squared.
+
+So the open question this section used to end with is closed, and both of its
+alternatives were wrong: the floor is not broadband and it is not the sample
+grid. It is a 15.4 Hz comb, and it is on the board.
+
+What the reference says about it is nothing. `03.wav` carries 0.00 % of its
+energy below 400 Hz, and this modulation's fundamental is 15.4 Hz with its first
+harmonics at 31 and 46 Hz, which is exactly where a cabinet speaker and a
+sample-maker's high-pass both live. The drawing says the board makes it; whether
+anything downstream of `SJ` passes it is not a question the drawing or the
+sample set can answer.
 
 ## The cannon and the two explosions, measured
 

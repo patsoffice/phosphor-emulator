@@ -29,7 +29,15 @@
 //! Three more rest on properties of parts rather than on the drawing, and are
 //! named where they are used rather than marked `INVENTED`, because each is a
 //! datasheet figure rather than a choice: [`OPAMP_SWING`], the 555s' output
-//! levels and control-pin impedance, and [`MM5837_SWING`].
+//! levels and control-pin impedance, and [`MM5837_HZ`].
+//!
+//! [`MM5837_SWING`] used to be the third of those, on the grounds that it sets
+//! a level and levels are what a read divider decides afterwards. **It is not
+//! only a level**: `NOISE 1` lands on `U6`'s control pin, which is a 555's own
+//! comparator threshold, so this constant sets the homing missile's *pitch*.
+//! Its own comment says so, and
+//! `the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin` measures
+//! it.
 //!
 //! The battleship's and the shot's oscillator pitches used to head this list.
 //! Both are solved now, along with the laser's and the homing missile's, and
@@ -38,6 +46,10 @@
 //! sinking the summing node through the resistor that sets the duty. See
 //! [`relaxation_hz`], which all of them share. What differs between them is the
 //! capacitor, the sink ratio, and where the reference comes from.
+//!
+//! The homing missile's 555 is the exception to that list and the one voice
+//! whose rate is not arithmetic at all. Its parts give 787 Hz, and with the
+//! noise its control pin actually carries it runs near 977 Hz.
 //!
 //! # There is no reference to compare against
 //!
@@ -104,8 +116,18 @@ const MM5837_HZ: f64 = 48_000.0;
 ///
 /// The part is a MOS output on a 12 V supply; this is half of that, which makes
 /// `NOISE 1` a +/-5 V square sequence. It is the one amplitude on the board that
-/// is a guess rather than a divider, and everything downstream of it is scaled
-/// by read resistors, so it sets the absolute level and nothing else.
+/// is a guess rather than a divider.
+///
+/// **It does not only set a level.** This comment used to end "so it sets the
+/// absolute level and nothing else", which is true of the three Sallen-Key
+/// voices and the cannon, where the noise is the signal and every stage after
+/// it is a read divider. It is not true of the homing missile, where `NOISE 1`
+/// lands on `U6`'s **control pin**: a 555's control pin is its comparator's
+/// threshold, so noise on it biases every crossing early and moves the voice's
+/// *pitch*. See
+/// `the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin`, which
+/// measures 787 Hz without it and 977 Hz with it. Changing this constant
+/// retunes that voice, which is the opposite of what a level control does.
 const MM5837_SWING: f64 = 5.0;
 
 /// The MM5837's 17-bit register, tapped at bits 13 and 16.
@@ -836,6 +858,14 @@ const C45: f64 = 0.01e-6;
 /// the closed form that the component has to agree with when the control pin is
 /// parked, and `the_homing_missiles_555_free_runs_where_its_parts_say` is what
 /// makes it.
+///
+/// **It is not the pitch the voice is heard at, and this file used to say it
+/// was.** The control pin is not left alone: `U4` puts the 15.4 Hz warble
+/// *and* `NOISE 1` on it, and the noise is what sets the rate. See
+/// `the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin`. The
+/// warble alone leaves the part here; the noise moves it to about 977 Hz, and
+/// the "710 Hz to 872 Hz" this file and the transcription both carried is the
+/// sweep the warble would make around a rate the board does not run at.
 #[allow(dead_code)] // checked against Timer555 by a test; see above
 fn homing_missile_hz() -> f64 {
     1.44 / ((R48 + 2.0 * R49) * C45)
@@ -3001,6 +3031,256 @@ mod tests {
             corner < homing_warble_hz() / 5.0,
             "C46 must be a block, not a differentiator"
         );
+    }
+
+    /// `U6`'s duty cycle at a given control voltage, from the part's own two
+    /// thresholds.
+    ///
+    /// The charge leg climbs from `cv/2` to `cv` against `V5` through
+    /// `R48 + R49`, so it stretches as `cv` rises; the discharge leg falls from
+    /// `cv` to `cv/2` through `R49`, which is `ln 2` of its time constant
+    /// whatever `cv` is. That asymmetry is why a 555's control pin moves the
+    /// duty as well as the pitch, and it is what puts this voice's energy below
+    /// the audio band.
+    fn homing_duty_at(cv: f64) -> f64 {
+        let t_high = (R48 + R49) * C45 * ((V5 - cv * 0.5) / (V5 - cv)).ln();
+        let t_low = R49 * C45 * std::f64::consts::LN_2;
+        t_high / (t_high + t_low)
+    }
+
+    /// The homing missile's chain on its own, with `U5`'s warble and `NOISE 1`
+    /// switchable and the simulation step chosen: returns `U6`'s rate in Hz and
+    /// the share of the square's energy that lands below 100 Hz.
+    ///
+    /// Standalone rather than through [`ZaxxonSound`], because both questions
+    /// this answers are of the form "what does this voice do without one of its
+    /// two inputs", and the built device has no way to take one away. Every part
+    /// is the circuit's own and is wired the same way: the same
+    /// [`OpAmpRelaxation`], the same `lfsr_noise` at [`MM5837_HZ`], the same
+    /// `-R47/R45` and `-R47/R46` summing gains, the same [`C46`] block against
+    /// [`CV_PIN_R`], the same [`Timer555`], and the same 1 uF leg block against
+    /// [`R_COMMON`]. With both inputs on at [`MIN_SIM_RATE`] it lands within a
+    /// hertz of what the built device measures, which is what says the rig is
+    /// this voice rather than a sketch of it.
+    ///
+    /// The 100 Hz measuring filter is two poles, so a 785 Hz square leaks
+    /// `(100/785)^4` into it. That floor is the `(false, false)` case and is
+    /// what the two tests below subtract.
+    fn homing_chain(sim_hz: u64, warble_on: bool, noise_on: bool) -> (f64, f64) {
+        let mut b = DiscreteCircuitBuilder::new(CPU_HZ, 44_100).with_sim_rate(sim_hz);
+        let bit = b.lfsr_noise("U2", MM5837_HZ, mm5837_lfsr());
+        let noise1 = b.logic_levels("NOISE1", bit, -MM5837_SWING, MM5837_SWING);
+        let warble = b.custom(
+            "U5_C43",
+            vec![],
+            Box::new(OpAmpRelaxation {
+                beta: homing_beta(),
+                tau: R44 * C43,
+                swing: OPAMP_SWING,
+                cap: 0.0,
+                high: true,
+            }),
+        );
+        let w = b.gain("U4_SUM_ENV", warble, f64::from(warble_on) * -R47 / R45);
+        let n = b.gain("U4_SUM_NOISE", noise1, f64::from(noise_on) * -R47 / R46);
+        let sum = b.add("U4_SUM", &[w, n]);
+        let ac = b.rc_high_pass("C46", sum, CV_PIN_R, C46);
+        let rest = b.constant("U6_CV_REST", V5 * 2.0 / 3.0);
+        let cv = b.add("U6_CV", &[ac, rest]);
+        let tone = b.custom(
+            "U6_555",
+            vec![cv],
+            Box::new(Timer555::on_supply(R48 + R49, R49, C45, V5)),
+        );
+        let raw = b.logic_levels("HOMING_LEVEL", tone, -1.0, 1.0);
+        // The leg's own 1 uF block: it removes the duty cycle's DC, as the board
+        // does, and passes a 15 Hz modulation of it whole.
+        let level = b.rc_high_pass("HOMING_LEG", raw, R_COMMON, C_BLOCK);
+        b.second_order("BELOW_100", level, FilterMode::LowPass, 100.0, 0.707);
+        b.output(level, OutputGain::linear(1.0));
+        let mut c = b.build();
+        let (tone, level, low) = (
+            c.node_by_name("U6_555").expect("U6_555"),
+            c.node_by_name("HOMING_LEG").expect("HOMING_LEG"),
+            c.node_by_name("BELOW_100").expect("BELOW_100"),
+        );
+
+        // Settle the 1 uF block, which is a 51 ms time constant, before
+        // measuring anything through it.
+        c.tick(CPU_HZ / 2);
+        let slice = 16u64;
+        let seconds = 2u64;
+        let iters = (CPU_HZ * seconds / slice) as usize;
+        let (mut rises, mut last) = (0usize, false);
+        let (mut e_all, mut e_low) = (0.0f64, 0.0f64);
+        for _ in 0..iters {
+            c.tick(slice);
+            let high = c.value(tone) > 1.0;
+            if high && !last {
+                rises += 1;
+            }
+            last = high;
+            e_all += c.value(level).powi(2);
+            e_low += c.value(low).powi(2);
+        }
+        (rises as f64 / seconds as f64, e_low / e_all)
+    }
+
+    /// **`U6` does not run at the 787 Hz its timing parts give**, and neither
+    /// does the board: `NOISE 1` on its control pin biases every threshold
+    /// crossing early, and the voice comes out a quarter of an octave high.
+    ///
+    /// The control pin is the comparator's own threshold, and `U4` puts about
+    /// +/-0.25 V of [`MM5837_SWING`] on it through `-R47/R46` at a rate faster
+    /// than the capacitor's approach. The capacitor therefore does not cross a
+    /// threshold of 3.33 V, it crosses the first dip of a threshold that is
+    /// re-randomized every `1/MM5837_HZ`, which is a first-passage problem and
+    /// not an averaging one: the effective threshold sits near the bottom of the
+    /// noise rather than in its middle, and a 555 charging to a lower threshold
+    /// is a faster 555.
+    ///
+    /// Three measurements say so, and the third is what makes it a property of
+    /// the part rather than of this simulation:
+    ///
+    /// - the warble alone leaves `U6` on [`homing_missile_hz`], because 15 Hz is
+    ///   slow against a 1 ms period and the part simply follows it;
+    /// - adding `NOISE 1` moves it to about 977 Hz, a **24 % rise**;
+    /// - stepping the same chain **eight times finer** moves it by about 1 %.
+    ///   A rate set by our quantizing the crossing would not survive that: the
+    ///   framework triggers on the first step at or past the threshold, so the
+    ///   grid's error is a *late* bias of up to one step, worth 0.8 % at
+    ///   [`MIN_SIM_RATE`] and in the opposite direction.
+    ///
+    /// What this costs is that the voice's pitch now rests on [`MM5837_SWING`],
+    /// which is invented, and on [`MM5837_HZ`], which is a convention: across
+    /// the part's published 24 to 56 kHz spread the rate moves 947 to 997 Hz.
+    /// Nothing here is tuned to the reference recording, which sits at
+    /// 1025.6 Hz by `disasm audiodiff`'s autocorrelation; that number is
+    /// corroboration that the mechanism is on the board too, since no reading of
+    /// `R48`, `R49` and `C45` produces it either.
+    #[test]
+    fn the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin() {
+        let (warble_only, _) = homing_chain(MIN_SIM_RATE, true, false);
+        assert!(
+            (warble_only - homing_missile_hz()).abs() < 5.0,
+            "the warble alone should leave U6 on its parts' rate: {warble_only} Hz \
+             against {}",
+            homing_missile_hz()
+        );
+
+        let (with_noise, _) = homing_chain(MIN_SIM_RATE, true, true);
+        assert!(
+            with_noise > warble_only * 1.15,
+            "NOISE 1 on the control pin must raise the rate well clear of the \
+             free-run one: {with_noise} Hz against {warble_only} Hz"
+        );
+        assert!(
+            (with_noise - 977.0).abs() < 15.0,
+            "the rate this chain settles on: {with_noise} Hz"
+        );
+
+        // And it is the part, not the grid. Eight times the resolution.
+        let (finer, _) = homing_chain(MIN_SIM_RATE * 8, true, true);
+        assert!(
+            (finer - with_noise).abs() / with_noise < 0.03,
+            "the rate moved with the simulation step, so it is ours rather than \
+             the board's: {with_noise} Hz at {MIN_SIM_RATE}, {finer} Hz at {}",
+            MIN_SIM_RATE * 8
+        );
+
+        // The rig is this voice and not a sketch of it: the built device, gated
+        // and measured at its own `U6_555` node, lands on the same rate.
+        let mut snd = ZaxxonSound::new(CPU_HZ);
+        snd.set_ports(IDLE.0, IDLE.1, IDLE.2);
+        snd.tick(CPU_HZ / 20);
+        snd.set_ports(0xEF, 0xFF, 0xFF);
+        let node = snd.circuit().node_by_name("U6_555").expect("U6_555");
+        let (slice, mut rises, mut last) = (16u64, 0usize, false);
+        for _ in 0..(CPU_HZ / slice) {
+            snd.circuit.tick(slice);
+            let high = snd.circuit().value(node) > 1.0;
+            if high && !last {
+                rises += 1;
+            }
+            last = high;
+        }
+        let device = rises as f64;
+        assert!(
+            (device - with_noise).abs() / with_noise < 0.02,
+            "the device runs at {device} Hz where the chain on its own runs at \
+             {with_noise} Hz"
+        );
+    }
+
+    /// The homing missile's energy below 100 Hz is the **duty cycle the warble
+    /// moves**, and it is arithmetic on the 555's own two thresholds.
+    ///
+    /// This was carried as an open question worded the other way round: whether
+    /// a swept square's broadband floor is real or is our placing its edges on a
+    /// sample grid. It is neither a broadband floor nor the grid.
+    ///
+    /// A 555's control pin raises the charge leg's target while leaving the
+    /// discharge leg at `ln 2` of its own time constant, so a moving control pin
+    /// moves the duty as well as the pitch. Over the warble's +/-0.248 V the
+    /// duty runs [`homing_duty_at`]'s 0.590 to 0.666, so the square's mean value
+    /// swings 0.181 to 0.331 of its own amplitude at 15.4 Hz, and the leg's 1 uF
+    /// block passes that whole (its corner is 3.1 Hz). That is a modulation
+    /// sitting 27 dB under the tone, at a frequency no tone on this board
+    /// reaches.
+    ///
+    /// Predicted from the duty swing alone and measured through the chain, the
+    /// two agree to a few percent, and stepping the chain eight times finer
+    /// moves the measurement by under 3 %. A floor made by quantizing the edges
+    /// would fall 18 dB across that, since its power goes as the step squared.
+    ///
+    /// What the reference recording says about it is nothing: `03.wav` carries
+    /// 0.00 % of its energy below 400 Hz, and the modulation's fundamental is
+    /// 15.4 Hz with its first harmonics at 31 and 46 Hz, which is where a
+    /// cabinet speaker and a sample-maker's high-pass both live. The board makes
+    /// this; whether anything downstream of the board passes it is not a
+    /// question the drawing or the sample set can answer.
+    #[test]
+    fn the_homing_missiles_low_band_is_the_duty_the_warble_moves() {
+        // The warble reaches U6's control pin at beta of the op-amp's swing
+        // through -R47/R45, either side of the part's own two thirds of +5 V.
+        let depth = homing_beta() * OPAMP_SWING * R47 / R45;
+        let rest = V5 * 2.0 / 3.0;
+        let (d_lo, d_hi) = (homing_duty_at(rest - depth), homing_duty_at(rest + depth));
+        assert!((d_lo - 0.5905).abs() < 5e-3, "duty at the bottom {d_lo}");
+        assert!((d_hi - 0.6657).abs() < 5e-3, "duty at the top {d_hi}");
+
+        // A square of duty `d` about its own mean has an AC RMS of
+        // `2*sqrt(d*(1-d))`, and its mean is `2d - 1`. The warble is two
+        // exponential segments, close enough to a triangle that its RMS is its
+        // half-amplitude over sqrt(3).
+        let mean_swing = 2.0 * (d_hi - d_lo);
+        let mod_rms = mean_swing / 2.0 / 3.0f64.sqrt();
+        let d_mid = 0.5 * (d_lo + d_hi);
+        let square_rms = 2.0 * (d_mid * (1.0 - d_mid)).sqrt();
+        let predicted = (mod_rms / square_rms).powi(2);
+        assert!(
+            (predicted - 0.00202).abs() < 3e-4,
+            "the duty swing predicts {predicted} of the square's energy"
+        );
+
+        // Measured through the chain, with the 100 Hz filter's own leakage of
+        // the square taken off: that leakage is the whole of the static case,
+        // since a square with a fixed duty has nothing below its fundamental.
+        for sim in [MIN_SIM_RATE, MIN_SIM_RATE * 8] {
+            let (_, with) = homing_chain(sim, true, false);
+            let (_, without) = homing_chain(sim, false, false);
+            let measured = with - without;
+            assert!(
+                without < predicted / 3.0,
+                "a fixed duty should leave almost nothing below 100 Hz, and left \
+                 {without} at {sim} Hz"
+            );
+            assert!(
+                (measured - predicted).abs() / predicted < 0.2,
+                "measured {measured} against the duty swing's {predicted}, at a \
+                 simulation step of {sim} Hz"
+            );
+        }
     }
 
     /// The base missile, now read at component level, is the last voice on this
