@@ -4,9 +4,12 @@ target = "zaxxon-discrete"
 duration_s = 3.0
 description = "The homing missile: U6's 555 swept through its control-voltage pin"
 
-# Held. The 46 ms envelope on C43 and the noise summed with it both arrive at
-# the 555's pin 5, so the sweep happens at the start of the hold and the rest is
-# the free-running 787 Hz with noise on it.
+# Held for two seconds, which is thirty periods of the warble, because the
+# warble is the voice. U5 free-runs at 15.4 Hz whether or not the gate is open
+# and the gate is only the 4016B's switch, so what a capture has to show is a
+# repeating sweep across the whole hold rather than a transient at its start.
+# Two seconds is also what makes a capture that ends one way round comparable
+# with one that ends the other.
 [[action]]
 at_s = 0.5
 control = "homing-missile"

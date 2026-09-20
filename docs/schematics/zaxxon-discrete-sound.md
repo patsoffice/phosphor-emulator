@@ -526,48 +526,85 @@ are now solved, in their own sections below.
   `1 + R63/R64` with `R63` 50 kΩ and `R64` 100 kΩ = 1.5, Q 0.67) through `C51`
   22 uF; the leg is `R183` 39 kΩ / `R184` 8.2 kΩ.
 
-## The homing missile: a 555 whose control pin is driven
+## The homing missile: a 555 warbled at 15 Hz, and the gate is only a switch
 
-`HOMING MISSILE` (`PA4`) goes to `U30` 7406 (1 -> 2) with `R55` 10 kΩ to +12 V.
-What that reaches is not an oscillator being multiplied by an envelope, which is
-how this file first read it, but a **555 with a live control pin** and two
-things arriving at it on different time scales.
+`HOMING MISSILE` (`PA4`) goes to `U30` 7406 (1 -> 2) with `R55` 10 kΩ to +12 V,
+and **that is the only thing the gate does on this voice**. The 7406's output
+crosses the whole sheet at one height with no junction on it and turns up at the
+page edge to `U17`'s 4016B pin 12. Traced end to end along the strip. There is
+no envelope anywhere in this voice, exactly as there is none in the laser's or
+the battleship's, and for the same reason: the gate is a switch.
+
+What is behind that switch is a 555 whose control pin is warbled, continuously,
+by a free-running oscillator and by noise.
 
 | Stage | Parts | What it does |
 |---|---|---|
-| gate | `U30` 7406 (1, 2), `R55` 10 kΩ to +12 V | 0.2 V shut, 12 V open |
-| latch | `U5`(5,6,7), `R42` 51 kΩ in, `R43` 100 kΩ **positive** feedback | not an amplifier: neither threshold is reachable from the state it sets, so it latches |
-| envelope | `R44` 6.8 kΩ, `C43` 6.8 uF | the latch's output slewed, **46 ms**, rail to rail |
-| buffer | `U4`(12,13,14) | unity |
-| summer | `U4`(5,6,7) about +6 V, `R45` 68 kΩ and `R46` 200 kΩ in, `R47` 10 kΩ back | envelope at -0.147, `NOISE 1` at -0.05 |
-| coupling | `C46` 2.2 uF into pin 5's own ~3.3 kΩ | a **7 ms** high-pass |
+| gate | `U30` 7406 (1, 2), `R55` 10 kΩ to +12 V | drives `U17` 4016B pin 12, and nothing else |
+| warble | `U5`(5,6,7), `R42` 51 kΩ from **+6 V**, `R43` 100 kΩ from pin 7, `R44` 6.8 kΩ and `C43` 6.8 uF on pin 6 | a free-running relaxation oscillator: **15.4 Hz**, 50 % |
+| buffer | `U4`(12,13,14) on the `C43` node | unity |
+| summer | `U4`(5,6,7) about +6 V, `R45` 68 kΩ and `R46` 200 kΩ in, `R47` 10 kΩ back | warble at -0.147, `NOISE 1` (through `C44` 1 uF) at -0.05 |
+| coupling | `C46` **33 uF** into pin 5's own ~3.3 kΩ | a **1.4 Hz** block: both pass whole |
 | oscillator | `U6` 555 on **+5 V**, `R48` 47 kΩ, `R49` 68 kΩ, `C45` 0.01 uF | free-runs at `1.44/((R48+2*R49)*C45)` = **787 Hz** |
-| out | `R50` 3.3 kΩ, `R51` 12 kΩ, `R52` 3.3 kΩ, `C47` 10 uF | to `U17` 4016B (10, 11, 12), biased by `R53`/`R54` 51 kΩ |
+| out | `R50` 3.3 kΩ pull-up, `R51` 12 kΩ / `R52` 3.3 kΩ, `C47` 10 uF | to `U17` 4016B (10, 11, 12), biased by `R53`/`R54` 51 kΩ |
 | leg | `R180` 22 kΩ / `R181` 27 kΩ | |
 
-`R43` is the fact that changes the voice. It runs from `U5`'s output back to its
-**non-inverting** input, which is positive feedback, so the stage is a
-comparator with hysteresis rather than the amplifier a 51 k / 100 k pair usually
-means here. With the gate shut its thresholds sit below where the capacitor
-settles and with it open they sit above, so it cannot oscillate: it latches, and
-`R44` with `C43` is a clean 46 ms slew on the edge.
+`R42`'s far end is labeled `+6` at the sheet's left margin, beside `U5` and one
+resistor away from it. Read at 700 %.
 
-**`C46` is six times faster than that envelope.** Against pin 5's own impedance
-it is a 7 ms high-pass, so the envelope reaches the control pin *differentiated*
-and the noise, which is broadband, passes whole and stays. The voice is a
-noise-warbled tone with a chirp on its front, not a tone that sweeps up and
-holds there.
+`U5`(5,6,7) is therefore the textbook op-amp astable: `R43` returns the output
+to its own **non-inverting** input against `R42` to the mid-rail, so the trip
+points are `+/- beta` of the output's swing about +6 V with
+`beta = R42/(R42+R43)` = 0.338, and `R44` charges `C43` toward whichever rail
+the output is on. Each half period is
 
-That distinction is what the old model got wrong, and it got it wrong in a way
-worth naming: it multiplied the pitch by an `rc_envelope` driven from the gate
-*level*, so while the gate was held the envelope stayed at full and the pitch
-sat an octave high for the whole note. An envelope with a 46 ms attack and a
-46 ms release never decays if nothing releases it.
+```text
+R44 * C43 * ln((1 + beta)/(1 - beta)) = 46.2 ms * ln(2.02) = 32.5 ms
+```
+
+so **15.4 Hz at exactly 50 %**. The op-amp's swing appears above and below in
+that log and cancels, so this rate is a reading in the same sense the
+battleship's 40.5:1 ratio is, even though the warble's *depth* is not: that is
+`beta` times the swing, 1.69 V at `C43` and 0.248 V after `R45` and `R47`.
+
+Against `U6`'s thresholds, 0.248 V either side of pin 5's own 3.33 V sweeps the
+tone about **710 Hz to 872 Hz**, thirty times in two seconds.
+
+**`C46` is 33 uF, not 2.2 uF.** That correction is what turns the voice from a
+transient into a sustained sound. 2.2 uF against pin 5's 3.3 kΩ is a 22 Hz
+high-pass, which sits *above* a 15 Hz modulation and differentiates it; 33 uF is
+a 1.4 Hz block that passes it whole and removes only the DC. 2.2 uF 50 V is
+what `C28`, `C29`, `C38`, `C55` and `C93` all are on these two sheets, which is
+where the wrong value came from.
 
 A 555's control pin is also not a frequency control. It is the upper threshold,
 with the lower at half of it, so raising it stretches the charge leg against
 `V_cc` much more than the discharge leg against ground: the duty cycle moves
 with the pitch. That is why the model simulates the part rather than solving it.
+
+### Three readings of one stage
+
+This file has now read `U5`(5,6,7) three ways, and it is worth listing them
+because the progression is the file's whole failure mode in miniature.
+
+1. **An envelope**, multiplying the tone, driven by the gate level. Wrong twice:
+   an `rc_envelope` driven by a level never decays while the level is held, so
+   the pitch sat high for the whole note.
+2. **A latch**, thrown by the gate. This corrected the arithmetic while keeping
+   the premise, and the premise was the error: it still had `R42` on the 7406.
+3. **A free-running oscillator**, because `R42` is on +6 V. Nothing the gate
+   does reaches this stage.
+
+Readings 1 and 2 disagree about what the stage is and agree about what is
+connected to it, which is the signature of a topology that was never traced. The
+second pass re-derived from the first pass's node list instead of the drawing,
+and a correct derivation from a wrong premise looks exactly like progress.
+
+The reference set corroborates the third reading in the one way a sample set
+legitimately can, which is qualitative. MAME loops `03.wav` for as long as the
+gate is held, as it loops the laser, the battleship and the two engine tones,
+and one-shots the explosions, the cannon, the shot, the base missile and the
+alarms. A voice somebody chose to loop is a voice with no envelope in it.
 
 ## The laser: the oscillator a fourth time, swept by a capacitor
 
@@ -767,10 +804,11 @@ sources.
   is modulated through its control pin rather than its timing resistors.
 - **The laser is a fourth copy of it**, swept 300 Hz to 600 Hz by `U7`'s timing
   capacitor. `U7`'s output pin is not drawn: the board reads pins 2 and 6.
-- **The homing missile's `U5` latches rather than oscillating**, because `R43` is
-  positive feedback, and `C46` is six times faster than the envelope behind it,
-  so what reaches `U6`'s control pin is a chirp plus the noise rather than a
-  held sweep.
+- **The homing missile has no envelope**, and its gate is a switch like the
+  laser's and the battleship's. `R42`'s far end is +6 V, so `U5`(5,6,7) is a
+  free-running op-amp astable at **15.4 Hz**, and `C46` 33 uF passes it to
+  `U6`'s control pin whole. The rate follows from `R42`, `R43`, `R44` and `C43`
+  alone: the op-amp's swing cancels in `ln((1+beta)/(1-beta))`.
 - **One circuit accounts for four of the eleven voices.** An op-amp integrator,
   an inverting Schmitt on a 51 k / 100 k or 33 k / 100 k pair, and a transistor
   sinking the summing node through a resistor that decides the duty. What
@@ -831,15 +869,18 @@ sources.
   properties of the part rather than of the drawing. The shot's node A is
   directly proportional to the first, so its pitch scales with a number no sheet
   gives; the bipolar part's usual 1.7 V of headroom is what the model uses. The
-  second decides how much of the homing missile's envelope survives `C46`, and
-  the internal 5 k ladder is where 3.3 kOhm comes from.
+  second sets how far the homing missile's 15 Hz warble is turned into pitch,
+  and the internal 5 k ladder is where 3.3 kOhm comes from.
 - **How loud `NOISE 1` is.** The `MM5837`'s output swing is the one amplitude on
   this board that is a guess rather than a divider, and it is what sets how far
-  the noise warbles the homing missile's pitch. The audible core of that voice,
-  500 Hz to 8 kHz, matches the reference recording within 1.6 dB; the 125 Hz and
-  250 Hz bands sit 8 to 13 dB hot, and duty-cycle modulation of `U6` by that
-  noise is where they come from. Tuning the swing to close them would move the
-  three Sallen-Key voices that are already right.
+  the noise jitters the homing missile's duty cycle. The audible core of that
+  voice, 500 Hz to 8 kHz, matches the reference recording within 1.7 dB; the
+  125 Hz and 250 Hz bands sit 8 to 20 dB hot, and duty-cycle modulation of `U6`
+  by that noise is the likeliest source. `03.wav` is 55 dB down at 125-250 Hz,
+  which is a strong statement that the board puts nothing there, but tuning the
+  swing to close the gap would move the three Sallen-Key voices that are already
+  right, so it has not been tuned. This sits with the low-band residual the
+  shot, the base missile and alarm 2 also show.
 - **What `R92` 30 kΩ is for.** Everything either side of it is read: it runs from
   the slow oscillator's integrator output to a node that is a unity follower's
   output. As drawn it can do nothing, and no other path off that oscillator
@@ -970,6 +1011,24 @@ neither expression contains the resistor the LDR parallels. The ladder slides a
 fixed 68 Hz window of fixed height. That matters beyond the engine, because it
 is what says the reference recordings cannot place the LDR curve.
 
+### And the homing missile, found while aiming at something else
+
+A mis-aimed crop while looking for the base missile landed on `U5`(5,6,7), and
+it is the fourth instance of the same failure in this section alone. `R42`'s far
+end is **+6 V**, not the 7406, so the stage free-runs at 15.4 Hz and the voice
+has no envelope. `C46` is **33 uF**, not the 2.2 uF that five other capacitors
+on these sheets are, so the warble reaches `U6`'s control pin whole rather than
+differentiated. Both are written up in that voice's section above, along with
+the three successive readings of the stage, which is the part worth reading.
+
+The lesson is not the same as the others, and it is the more uncomfortable one.
+The cannon, the shot, the battleship's `R96` and the engine's `C30` were all
+read once, wrongly, and corrected once. This stage was read twice, and the
+second reading corrected the first one's arithmetic while inheriting its
+premise. **A pass that re-derives from the previous pass's node list rather than
+from the drawing cannot find a wrong node, however carefully it works**, and its
+output is indistinguishable from progress.
+
 ### The engine, measured against the reference for the first time
 
 MAME's `04.wav` and `05.wav` are this voice family and nobody had ever put them
@@ -1020,7 +1079,7 @@ with every designator and value legible, and those are the parts to trust.
 
 The battleship's, the shot's and the laser's oscillators are now read at
 component level and solved, and so are the junctions their rates turn on, and so
-is the homing missile's chain from its gate to `U6`'s control pin. The engine's
+is the homing missile's chain from `U5` to `U6`'s control pin. The engine's
 two resonators and the divider after them are read too, at 500 %, in both
 copies. The base missile, and the routing of control voltages across the sheet
 seam other than the shot's and the alarms', are still read at block level and

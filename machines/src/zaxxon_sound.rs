@@ -795,8 +795,8 @@ fn shot_out_v() -> f64 {
 // The three sheet-12 voices
 // ---------------------------------------------------------------------------
 
-const R44: f64 = 6_800.0; // homing missile envelope
-const C43: f64 = 6.8e-6; // -> 46 ms
+const R44: f64 = 6_800.0; // U5's timing resistor, output back to pin 6
+const C43: f64 = 6.8e-6; // on pin 6, to ground: R44 * C43 = 46.2 ms
 
 const R48: f64 = 47_000.0; // U6 555, the homing missile's swept tone
 const R49: f64 = 68_000.0;
@@ -813,39 +813,70 @@ const C45: f64 = 0.01e-6;
 fn homing_missile_hz() -> f64 {
     1.44 / ((R48 + 2.0 * R49) * C45)
 }
-// R42 and R43 set U5's two thresholds. Nothing computes with them because the
-// conclusion they support is that the thresholds are never both reachable, so
-// the stage latches: see `homing_envelope_tau`. A test holds them to it.
-#[allow(dead_code)] // the claim it supports is checked by a test
-const R42: f64 = 51_000.0; // U5's comparator input, from the 7406
-#[allow(dead_code)] // the claim it supports is checked by a test
-const R43: f64 = 100_000.0; // its POSITIVE feedback: U5 is a latch, not an amp
-const R45: f64 = 68_000.0; // the envelope into U4's summing node
-const R46: f64 = 200_000.0; // NOISE 1 into the same node
+/// `R42`'s far end is **+6 V**, not the gate, and that is the whole voice.
+///
+/// This file read it as the 7406's output twice: once as an envelope driven by
+/// the gate level, and once as a latch thrown by it. It is neither. `R42` 51 k
+/// runs from the +6 V mid-rail to `U5` pin 5, `R43` 100 k runs from `U5` pin 7
+/// back to the same pin, and `U5` pin 6 sits on the junction of `R44` and
+/// `C43`. Nothing the gate does reaches this stage at all: `U30`'s 7406 output
+/// crosses the whole sheet with no junction on it and turns up at the page edge
+/// to `U17`'s 4016B control pin, exactly as the laser's and the battleship's
+/// gates do.
+///
+/// So `U5`(5,6,7) is a **free-running op-amp relaxation oscillator**, running
+/// whether or not the voice is gated, and the gate is a switch. See
+/// [`homing_warble_hz`].
+const R42: f64 = 51_000.0; // +6 V into U5 pin 5
+const R43: f64 = 100_000.0; // U5 pin 7 back to pin 5: hysteresis
+const R45: f64 = 68_000.0; // the warble into U4's summing node
+const R46: f64 = 200_000.0; // NOISE 1 into the same node, through C44 1 uF
 const R47: f64 = 10_000.0; // U4's feedback: gains of 0.147 and 0.05
-const C46: f64 = 2.2e-6; // U4's output into U6's control pin
+/// `U4` pin 7 into `U6`'s control pin, read as **33 uF 16 V** at 700 %.
+///
+/// This file had 2.2 uF, which is what `C28`, `C29`, `C38`, `C55` and `C93` all
+/// are on these sheets, and the mistake changed what the part *does*: 2.2 uF
+/// against [`CV_PIN_R`] is a 22 Hz high-pass, which differentiates a 15 Hz
+/// modulation into a transient, and 33 uF is a **1.4 Hz DC block**, which passes
+/// it whole. The voice is a continuous warble, not a chirp.
+const C46: f64 = 33e-6;
 
 /// The impedance a bipolar 555's control pin presents, about **3.3 kOhm**.
 ///
 /// **Not a reading**: it is the part's internal 5 k / 5 k / 5 k ladder seen from
-/// the tap between the upper two, so 5 k in parallel with 10 k. It matters
-/// because `C46` 2.2 uF against it is a 7 ms high-pass, which is six times
-/// faster than the 46 ms envelope `R44` and `C43` make. The envelope therefore
-/// reaches pin 5 **differentiated**: a chirp at the gate's edge rather than a
-/// held sweep, and the noise, which is broadband, passes whole.
+/// the tap between the upper two, so 5 k in parallel with 10 k. With [`C46`]'s
+/// 33 uF it is a 1.4 Hz corner, so everything `U4` sums reaches pin 5 with its
+/// shape intact and only its DC removed.
 const CV_PIN_R: f64 = 5_000.0 * 10_000.0 / 15_000.0;
 
-/// `U5`(5,6,7) is a comparator with `R43` as **positive** feedback, so it
-/// latches rather than amplifying, and `R44` with `C43` slews its output.
+/// `U5`'s hysteresis fraction, `R42/(R42+R43)` = **0.338**.
 ///
-/// With the gate shut the 7406 holds `R42` near ground and the latch sits at the
-/// bottom of its swing; with the gate open `R55` pulls `R42` to +12 V, the
-/// thresholds move above anything the capacitor can reach, and it sits at the
-/// top. So the node `C43` holds is a clean exponential between the op-amp's two
-/// rails with a 46 ms time constant, and the hysteresis is there to keep the
-/// edge clean rather than to oscillate.
-fn homing_envelope_tau() -> f64 {
-    R44 * C43
+/// The output returns to its own non-inverting input through `R43` against
+/// `R42` to the mid-rail, so the comparator trips when `C43` reaches this
+/// fraction of the output's swing either side of +6 V. It is the same 51 k /
+/// 100 k pair the battleship's and the laser's Schmitt triggers use, doing the
+/// same job, which is worth noticing: five stages on this board are built from
+/// it.
+fn homing_beta() -> f64 {
+    R42 / (R42 + R43)
+}
+
+/// The warble `U5` free-runs at, **15.4 Hz**, and it rests on nothing but four
+/// read parts.
+///
+/// `C43` charges toward whichever rail the output is on through `R44`, and
+/// trips at `+/- beta` of that rail, so each half period is
+/// `R44*C43 * ln((1 + beta)/(1 - beta))`. [`OPAMP_SWING`] appears in the
+/// numerator and the denominator of that log and **cancels exactly**, which is
+/// the same shape of argument as the battleship's 40.5:1 ratio: the rate is a
+/// reading even though the amplitude is not.
+///
+/// The duty is exactly 50 % for the same reason, because the two thresholds sit
+/// symmetrically about +6 V and the two rails do too.
+fn homing_warble_hz() -> f64 {
+    let beta = homing_beta();
+    let half = R44 * C43 * ((1.0 + beta) / (1.0 - beta)).ln();
+    1.0 / (2.0 * half)
 }
 
 /// `U6` runs on +5 V (pins 4 and 8), so its square output swings to about
@@ -1260,6 +1291,61 @@ impl CustomComponent for Timer555 {
         } else {
             self.v_low
         }
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.cap);
+        w.write_u8(u8::from(self.high));
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.cap = r.read_f64_le()?;
+        self.high = r.read_u8()? != 0;
+        Ok(())
+    }
+}
+
+/// A free-running op-amp relaxation oscillator: the output returns to its own
+/// **non-inverting** input through a divider, and charges a capacitor on the
+/// inverting input through a resistor.
+///
+/// `U5`(5,6,7) on the homing missile is the one on this board, and it needs a
+/// component rather than a frequency because what the rest of the voice uses is
+/// the **waveform on the capacitor**, not the square at the output. That
+/// waveform is two exponential segments between the trip points, which is
+/// neither a triangle nor a square, and it is what warbles `U6`'s control pin.
+///
+/// Reports the capacitor's **deviation from the mid-rail**, which is this
+/// file's convention for every node that rests somewhere other than zero, and
+/// starts at zero as a discharged capacitor does. Takes no inputs: nothing on
+/// the board reaches this stage, which is the finding that put it here.
+struct OpAmpRelaxation {
+    /// `R_ref / (R_ref + R_fb)`: the trip points, as a fraction of the swing.
+    beta: f64,
+    /// `R_t * C_t`.
+    tau: f64,
+    /// Half the output's peak-to-peak, each side of the mid-rail.
+    swing: f64,
+    cap: f64,
+    high: bool,
+}
+
+impl CustomComponent for OpAmpRelaxation {
+    fn reset(&mut self) {
+        self.cap = 0.0;
+        self.high = true;
+    }
+
+    fn step(&mut self, _inputs: &[f64], dt: f64) -> f64 {
+        let target = if self.high { self.swing } else { -self.swing };
+        self.cap += (target - self.cap) * dt / self.tau;
+        let trip = self.beta * self.swing;
+        if self.high && self.cap >= trip {
+            self.high = false;
+        } else if !self.high && self.cap <= -trip {
+            self.high = true;
+        }
+        self.cap
     }
 
     fn save_state(&self, w: &mut StateWriter) {
@@ -1802,34 +1888,39 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let bs_gated = b.multiply("BATTLESHIP_SW", bs_level, battleship);
     let battleship_leg = mix_leg(&mut b, "BATTLESHIP_LEG", bs_gated, LEG_BATTLESHIP);
 
-    // --- The homing missile: a 555 whose control pin is driven ---------------
-    // Not a frequency multiplied by an envelope. `U4`(5,6,7) sums the envelope
-    // and `NOISE 1` and hands the result to `U6`'s pin 5, and what comes out of
-    // a 555 with a live control pin is not a shifted square but a different
-    // duty cycle as well, so the part is simulated rather than solved.
+    // --- The homing missile: a 555 warbled at 15 Hz, through a switch --------
+    // **This voice has no envelope.** `R42`'s far end is +6 V, not the gate, so
+    // `U5`(5,6,7) with `R43`, `R44` and `C43` is a free-running relaxation
+    // oscillator at 15.4 Hz that runs whether or not the voice is sounding, and
+    // `U30`'s 7406 reaches only `U17`'s 4016B control pin, exactly as the laser's
+    // and the battleship's gates do. Two earlier readings of this stage had the
+    // gate driving `R42`: first as an envelope, then as a latch. Both were
+    // reading a wire that goes somewhere else.
     //
-    // `C46` is the reason the two inputs arrive differently. Against the pin's
-    // own 3.3 kOhm it is a 7 ms high-pass, six times faster than the envelope
-    // behind it, so the envelope reaches the pin as a chirp at the gate's edge
-    // while the noise passes whole and stays. The voice is a noise-warbled tone
-    // with a chirp on the front, not a tone that sweeps and holds: the previous
-    // model multiplied the pitch by an envelope that never decayed while the
-    // gate was held, so it sat an octave high for the whole note.
-    let hm_latch = b.logic_levels(
-        "U5_LATCH",
-        homing_missile,
-        V6 - OPAMP_SWING,
-        V6 + OPAMP_SWING,
-    );
-    let hm_c43 = b.rc_envelope(
+    // What `U4`(5,6,7) sums is therefore a continuous 15 Hz warble against
+    // `NOISE 1`, at -0.147 and -0.05, and `C46` 33 uF against the control pin's
+    // own 3.3 kOhm is a 1.4 Hz DC block that passes both whole. The old model
+    // had `C46` at 2.2 uF, which is a 22 Hz high-pass: it differentiated a
+    // modulation slower than itself into a transient, which is how a continuous
+    // voice came to be modeled as a chirp.
+    //
+    // A 555 with a moving control pin is not a moving frequency, because the pin
+    // is the upper threshold and half of it is the lower, so the duty cycle
+    // moves with the pitch. The part is simulated rather than solved.
+    let hm_warble = b.custom(
         "U5_C43",
-        hm_latch,
-        homing_envelope_tau(),
-        homing_envelope_tau(),
+        vec![],
+        Box::new(OpAmpRelaxation {
+            beta: homing_beta(),
+            tau: R44 * C43,
+            swing: OPAMP_SWING,
+            cap: 0.0,
+            high: true,
+        }),
     );
-    let hm_midrail = b.constant("U4_SUM_MIDRAIL", -V6);
-    let hm_env_dev = b.add("U4_SUM_ENV_DEV", &[hm_c43, hm_midrail]);
-    let hm_env_leg = b.gain("U4_SUM_ENV", hm_env_dev, -R47 / R45);
+    // `NOISE 1` reaches `R46` through `C44` 1 uF, which against 200 k is a 0.8 Hz
+    // corner on a source that is already zero-mean, so it is not modeled.
+    let hm_env_leg = b.gain("U4_SUM_ENV", hm_warble, -R47 / R45);
     let hm_noise_leg = b.gain("U4_SUM_NOISE", noise1, -R47 / R46);
     let hm_sum = b.add("U4_SUM", &[hm_env_leg, hm_noise_leg]);
     // C46 into the control pin's own impedance: what survives is the AC.
@@ -2659,7 +2750,7 @@ mod tests {
 
     /// `U6`'s control pin is driven, so its rate is simulated rather than
     /// solved. Park the pin where the part's own divider would and the component
-    /// has to land on the closed form; and check the claim that `U5` latches.
+    /// has to land on the closed form.
     #[test]
     fn the_homing_missiles_555_free_runs_where_its_parts_say() {
         let mut t = Timer555::on_supply(R48 + R49, R49, C45, V5);
@@ -2687,24 +2778,72 @@ mod tests {
             "{hz} Hz against the parts' {}",
             homing_missile_hz()
         );
+    }
 
-        // U5 latches rather than oscillating: with the gate shut its threshold
-        // band sits BELOW what the capacitor settles to, and with the gate open
-        // it sits ABOVE, so neither state can cross back. Thresholds are
-        // `V_gate * R43/(R42+R43) + Vout * R42/(R42+R43)`.
-        let threshold =
-            |v_gate: f64, v_out: f64| (v_gate / R42 + v_out / R43) / (1.0 / R42 + 1.0 / R43);
-        let (lo_rail, hi_rail) = (V6 - OPAMP_SWING, V6 + OPAMP_SWING);
-        // Shut: the 7406 holds the input near ground, the output is at the low
-        // rail, and the capacitor settles there too, which is BELOW the
-        // threshold that would flip it back up.
+    /// `U5`(5,6,7) free-runs at 15.4 Hz, whether or not the voice is gated, and
+    /// the rate does not depend on [`OPAMP_SWING`].
+    ///
+    /// Both halves of that are worth pinning, because this file has now read
+    /// this one stage three ways. It was an envelope driven by the gate level,
+    /// then a latch thrown by the gate, and it is neither: `R42`'s far end is
+    /// +6 V. Run the component and measure, rather than trusting the closed
+    /// form, since what the rest of the voice uses is the capacitor's waveform.
+    #[test]
+    fn the_homing_missiles_warble_free_runs_and_does_not_rest_on_the_swing() {
+        // The swing cancels in ln((1+beta)/(1-beta)), so a rate derived at one
+        // swing has to equal the rate derived at a wildly different one.
+        let beta = homing_beta();
+        assert!((beta - 0.3377).abs() < 1e-3, "R42/(R42+R43) = {beta}");
+        let rate_at = |swing: f64| {
+            let mut c = OpAmpRelaxation {
+                beta,
+                tau: R44 * C43,
+                swing,
+                cap: 0.0,
+                high: true,
+            };
+            let dt = 1.0 / 96_000.0;
+            for _ in 0..19_200 {
+                c.step(&[], dt);
+            }
+            // Count trips over two seconds by the sign of the square the
+            // component is riding, which is `high`.
+            let (mut edges, mut last) = (0usize, c.high);
+            for _ in 0..192_000 {
+                c.step(&[], dt);
+                if c.high != last {
+                    edges += 1;
+                }
+                last = c.high;
+            }
+            edges as f64 / 2.0 / 2.0
+        };
+        let at_5 = rate_at(OPAMP_SWING);
+        let at_2 = rate_at(2.0);
         assert!(
-            threshold(V_SAT, lo_rail) < lo_rail,
-            "shut: it would restart"
+            (at_5 - homing_warble_hz()).abs() < 0.2,
+            "{at_5} Hz against the parts' {}",
+            homing_warble_hz()
         );
-        // Open: R55 pulls the input to +12 V and the capacitor cannot reach the
-        // threshold that would flip it down.
-        assert!(threshold(V12, hi_rail) > hi_rail, "open: it would restart");
+        assert!((at_5 - 15.38).abs() < 0.2, "{at_5} Hz");
+        assert!(
+            (at_5 - at_2).abs() < 0.2,
+            "the rate moved with the swing: {at_5} against {at_2}"
+        );
+
+        // The capacitor trips at beta of the swing either side of the mid-rail,
+        // which is what sets how far the warble moves U6's control pin: 0.338 of
+        // 5 V, then U4's -R47/R45.
+        let depth = beta * OPAMP_SWING * R47 / R45;
+        assert!((depth - 0.248).abs() < 0.005, "warble depth {depth} V");
+        // And C46 passes it whole rather than differentiating it. At 2.2 uF,
+        // which this file used to carry, the corner sat above the warble.
+        let corner = 1.0 / (std::f64::consts::TAU * CV_PIN_R * C46);
+        assert!((corner - 1.45).abs() < 0.05, "C46 corner {corner} Hz");
+        assert!(
+            corner < homing_warble_hz() / 5.0,
+            "C46 must be a block, not a differentiator"
+        );
     }
 
     #[test]
