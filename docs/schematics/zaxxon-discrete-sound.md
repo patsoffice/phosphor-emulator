@@ -1273,6 +1273,44 @@ octaves above 500 Hz rather than sitting in one band, which is what a second
 voice still sounding under a ship explosion would look like and is not what a
 wrong filter looks like. Nothing changed.
 
+## Where every voice stands, and what the number is worth
+
+All twelve, measured the same way: worst octave-band error between 125 Hz and
+8 kHz, each file normalized to its own full-band RMS, over windows of the same
+length. "Before" is the figure on `phosphor-emulator-uy54` before this pass.
+
+| Voice | Before | Now | |
+|---|---|---|---|
+| battleship | 0.8 | 0.8 | solved end to end |
+| laser | 2.1 | 2.0 | solved end to end |
+| small explosion | 2.6 | 2.6 | matches its own ideal filter to 0.5 dB |
+| cannon | 7.1 | **3.8** | `Q6`'s threshold derived |
+| medium explosion | 7.8 | 7.8 | matches its own ideal filter to 0.5 dB; `10.wav` is the outlier |
+| alarm 3 | 8.8 | 8.3 | the `C24` droop, which the sample cannot contain |
+| shot | 11.5 | 11.5 | 11.5 dB **deficient** at 125-250, not hot |
+| engine tone B | never measured | 11.8 | |
+| base missile | 15.6 | 15.3 | matches its own ideal filter to 0.6 dB; `02.wav` is an engine sample |
+| engine tone A | never measured | 17.0 | |
+| alarm 2 | 19.4 | 17.6 | the `C24` droop |
+| homing missile | 17.4 | 18.8 | the warble's own bandwidth |
+
+**Read that column with care, because it moved the wrong way twice and both
+times the change was right.** The engine tones are now low-passes rather than
+band-passes, which is what sheet 12 draws, and the correct rolloff takes 17 dB
+out of the 2-4 kHz band where `05.wav` has energy the circuit cannot produce:
+the front end's bandwidth is 68 Hz by arithmetic on `R21` and `C26`, and the
+sample is an octave wide. The homing missile now warbles continuously instead of
+chirping once, which is what `R42`'s far end being on +6 V requires, and the
+warble carries its own low-frequency bandwidth.
+
+The single number is a screen for "something is wrong", not a score. Five of
+these twelve are now **known** to be exactly the drawing, three of them checked
+against an independently generated ideal response, and in four cases the
+remaining gap has been traced to a property of the recording rather than of the
+model. What the number is good for is what it was good for at the start of this
+work: a voice sitting at 17 dB is worth going back to the sheet about, and every
+time anybody has, the sheet has had something to say.
+
 ## Confidence
 
 A good scan. The PPI map, the ladder network, the seven one-shot R/C pairs, the
