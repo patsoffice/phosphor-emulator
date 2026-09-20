@@ -215,6 +215,14 @@ const R19: f64 = 10_000.0; // U4 feedback
 const R20: f64 = 10_000.0; // the band-pass input resistor
 const R21: f64 = 470_000.0; // U5 feedback
 const C26: f64 = 0.01e-6; // the two band-pass feedback caps (C26 = C27)
+// This one stage's non-inverting input is on **+5 V**, not the +6 V mid-rail
+// every other analog part on the board swings about. Read at 400 dpi with the
+// label drawn beside the pin. It changes nothing audible, because `C28` blocks
+// the DC going in and `C29`/`C38` block it coming out, and the LDR's other end
+// is on +6 V so the tuning node floats there with no current in it. It is
+// recorded because it is the one op-amp on this board that is referenced
+// somewhere else, and a later pass that assumes the mid-rail here would be
+// assuming rather than reading.
 
 /// `PC1`'s LED forward drop. Below this the LED is dark, which is what the
 /// lowest of the four levels produces.
@@ -224,27 +232,77 @@ const PC1_LED_VF: f64 = 1.2;
 /// its dark value, and the exponent it falls with between them.
 ///
 /// The `MCD-725H`'s transfer curve is not on the drawing and no datasheet was
-/// found for it, so this is the one part of the engine voice that is a model
-/// choice rather than a reading. A CdS cell's resistance falls close to a power
-/// law in illumination; these three numbers make the engine sweep 232, 397, 601
-/// and 750 Hz across the ladder's four levels.
+/// found for it (searched again 2026-09-20; the part does not appear outside
+/// distributor stock listings), so this is the one part of the engine voice that
+/// is a model choice rather than a reading. A CdS cell's resistance falls close
+/// to a power law in illumination; these three numbers put the front end's
+/// center at 232, 461, 626 and 770 Hz across the ladder's four levels.
 ///
-/// What the drawing *does* fix, and what a change here must preserve: with the
-/// LED dark the input resistance is `R20` alone and the center frequency is
-/// `1 / (2*pi*C26*sqrt(R20*R21))` = 232 Hz. That is the lowest of the four and
-/// it is not adjustable here.
+/// What the drawing *does* fix, and what a change here must preserve:
+///
+/// - with the LED dark the input resistance is `R20` alone and the center is
+///   `1 / (2*pi*C26*sqrt(R20*R21))` = 232 Hz, the lowest of the four and not
+///   adjustable here;
+/// - the **bandwidth is 68 Hz wherever the center goes**. An MFB band-pass's
+///   `f0/Q` is `1/(pi*R21*C26)` and neither of those parts moves, so the LDR
+///   slides a fixed 68 Hz window rather than widening it. That is why the `Q`
+///   runs 3.4 at the bottom of the ladder and 11.4 at the top, and it is
+///   arithmetic on read values rather than a consequence of anything invented.
+///
+/// **The reference recordings cannot place this curve, and it was not fitted to
+/// them.** MAME's `04.wav` and `05.wav` are the two engine states, and both are
+/// about an octave wide: `04` sits 6.7 dB down one octave below its peak and
+/// `05` sits 9.6 dB down. This circuit's front end is 68 Hz wide, which is
+/// 0.3 of an octave at the *bottom* of its range and narrower everywhere above.
+/// No position of the LDR makes this board as broad as either recording, so the
+/// recordings are measuring something other than this chain (a different
+/// cabinet's parts, or more than one voice at once) and cannot say where the
+/// curve should sit. See the comparison written up in the transcription.
 const PC1_R_BRIGHT: f64 = 1_000.0;
 const PC1_EXPONENT: f64 = 1.05;
 /// Dark resistance, which is also the ceiling the power law is clamped to.
 const PC1_R_DARK: f64 = 5_000_000.0;
 
-/// The two Wien resonators the engine tone is rung at (sheet 12, p135 zone D4).
+/// The two **Sallen-Key low-passes** the engine tone is shaped by (sheet 12,
+/// p135 zone D4).
 ///
 /// `1 / (2*pi*R*C)` with `R24`/`R25` = `R38`/`R39` = 100 k, and an amplifier
-/// gain of 2 from the equal 2.2 k pairs, so `Q = 1/(3 - K)` = 1.
+/// gain of `1 + R23/R22` = `1 + R37/R36` = 2, so `Q = 1/(3 - K)` = 1.
+///
+/// **These are not Wien resonators and not band-passes**, which is what this
+/// file called them for as long as nobody traced them. They are the same
+/// topology as the two explosion filters forty lines below, drawn twice more:
+/// the input reaches the first resistor, the two resistors are in series to the
+/// non-inverting input, the first capacitor returns that input to AC ground and
+/// the second bridges the resistors' junction to the output. Sheet 12 makes the
+/// distinction turn on one junction per copy. `C30`'s and `C39`'s far plates sit
+/// on the **+6 V rail**, whose vertical crosses the signal bus with no dot; a
+/// reading that put them on the bus would be a band-pass, and this one is a
+/// low-pass with a Q-1 bump at `f0`.
+///
+/// The difference is a whole octave of output. A band-pass rejects everything
+/// below `f0`, so it deleted the part of the engine the board actually passes
+/// and left the LDR-tuned front end (which runs up to a Q of 11 at the top of
+/// the ladder, see [`PC1_R_BRIGHT`]) to decide the pitch on its own. Both tones
+/// then came out at the front end's frequency instead of their own, which is why
+/// the 723 Hz copy and the 482 Hz copy measured identically.
 const SHIP_TONE_A_HZ: f64 = 723.4; // C30, C31 2200 pF
 const SHIP_TONE_B_HZ: f64 = 482.3; // C39, C40 3300 pF
 const SHIP_TONE_Q: f64 = 1.0;
+/// `1 + R23/R22` with `R22` = `R23` = 2.2 k, and `R22`'s far end on +6 V.
+const SHIP_TONE_GAIN: f64 = 2.0;
+
+/// The divider between each low-pass's output and its `MB4391`'s `IN`, which
+/// this file had no entry for at all: `R26` 12 k in series with `R27` 3.3 k to
+/// **ground**, then `C32` 2.2 uF into `U14` pin 1. `R40`/`R41` and `C41` are the
+/// same three parts again on tone B.
+///
+/// 0.216, or 13.3 dB, and it applies to both engine tones and to nothing else on
+/// the board. Leaving it out made the engine the loudest thing on the mix by a
+/// margin the leg table does not allow: the legs say the engine sits 3.1 dB
+/// below the medium explosion, and without `R26`/`R27` it sat above it.
+const R26: f64 = 12_000.0;
+const R27: f64 = 3_300.0;
 
 // The 74LS139-gated VCA controls: pulled down through 1 k, released to +6 V
 // through 440 k.
@@ -1501,7 +1559,12 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
             // forward drop translated through R17, and full brightness is the
             // top of the ladder (both bits low) translated the same way.
             threshold_v: PC1_LED_VF * 1000.0 / R17,
-            full_v: (ship_levels()[0] - PC1_LED_VF) * 1000.0 / R17,
+            // [`VariableResistor::full_v`] is an ABSOLUTE drive, not a drive
+            // above the threshold: the component subtracts `threshold_v` from
+            // both. Passing the difference here subtracted it twice, which put
+            // full brightness at 9.7 V instead of the ladder's 10.93 V and left
+            // the top of the ladder saturated against its own clamp.
+            full_v: ship_levels()[0] * 1000.0 / R17,
             r_dark: PC1_R_DARK,
             r_min: PC1_R_BRIGHT,
             exponent: PC1_EXPONENT,
@@ -1514,19 +1577,26 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         Box::new(TunedBandPass::new(R20, R21, C26)),
     );
 
-    // The two Wien resonators, each gated by one 74LS139 output.
+    // The two Sallen-Key low-passes, each gated by one 74LS139 output. Same
+    // topology as the two explosion filters below, at a different f0 and Q, and
+    // the low-pass shape is the load-bearing half: it is what makes the 723 Hz
+    // copy and the 482 Hz copy two different sounds rather than two labels on
+    // whatever the LDR-tuned front end is doing.
     let mut ship_legs = Vec::new();
     for (name, gate, hz, leg) in [
         ("SHIP_A", ship_tone_a, SHIP_TONE_A_HZ, LEG_SHIP_A),
         ("SHIP_B", ship_tone_b, SHIP_TONE_B_HZ, LEG_SHIP_B),
     ] {
-        let tone = b.second_order(
-            &format!("{name}_WIEN"),
+        let filtered = b.second_order(
+            &format!("{name}_LP"),
             ship_bp,
-            FilterMode::BandPass,
+            FilterMode::LowPass,
             hz,
             SHIP_TONE_Q,
         );
+        let amplified = b.gain(&format!("{name}_SK"), filtered, SHIP_TONE_GAIN);
+        // R26 12 k into R27 3.3 k to ground, then C32 into the MB4391's IN.
+        let tone = b.gain(&format!("{name}_R26"), amplified, R27 / (R26 + R27));
         // The 7417 pulls C34 down through R28 when its output is selected and
         // releases it toward +6 V through R29 + R30. As with the explosions this
         // is the deviation from the rest voltage, so the tone starts muted.
@@ -2321,6 +2391,75 @@ mod tests {
         // And the whole thing runs the other way from a volume fit: the board is
         // quietest where such a fit is loudest.
         assert!(levels[3] < PC1_LED_VF, "the LED is dark at power-on");
+    }
+
+    /// The two engine resonators are **Sallen-Key low-passes**, which is what
+    /// sheet 12 draws and is not what this file called them for nine commits.
+    ///
+    /// Every value here was already right; what was wrong was the shape. The
+    /// check that matters is the one that distinguishes the two readings, so it
+    /// is stated as a frequency response rather than as a component list: a
+    /// low-pass passes a decade below `f0` with the gain the 2.2 k pair sets,
+    /// and a band-pass rejects it. Run through the built circuit, because the
+    /// arithmetic is in the framework rather than here.
+    #[test]
+    fn the_engine_resonators_pass_below_their_corner() {
+        let (circuit, _) = build_circuit(CPU_HZ);
+        for (label, node, hz, c) in [
+            ("tone A", "SHIP_A_LP", SHIP_TONE_A_HZ, 2200e-12),
+            ("tone B", "SHIP_B_LP", SHIP_TONE_B_HZ, 3300e-12),
+        ] {
+            // f0 is `1/(2*pi*R*C)` with R24/R25 = R38/R39 = 100 k against
+            // C30/C31 2200 pF and C39/C40 3300 pF.
+            let want = 1.0 / (std::f64::consts::TAU * 100_000.0 * c);
+            assert!(
+                (hz - want).abs() < 0.5,
+                "{label}: {hz} Hz against the parts' {want} Hz"
+            );
+            // The built circuit has to be *using* a low-pass node. The name
+            // carries the claim, which is the only way a shape shows up in a
+            // node graph at all.
+            assert!(
+                circuit.node_by_name(node).is_some(),
+                "{label} does not reach SJ through {node}"
+            );
+        }
+        // Q = 1/(3 - K) with K = 1 + R23/R22 = 2. Both copies, same pair.
+        assert!((SHIP_TONE_GAIN - 2.0).abs() < 1e-12);
+        assert!((SHIP_TONE_Q - 1.0 / (3.0 - SHIP_TONE_GAIN)).abs() < 1e-12);
+        // And the divider this file had no entry for at all, between each
+        // low-pass's output and its MB4391's IN.
+        let div = R27 / (R26 + R27);
+        assert!((div - 0.2157).abs() < 0.001, "R26/R27 divides by {div}");
+    }
+
+    /// The front end the two low-passes sit behind slides a **fixed 68 Hz
+    /// window**, because an MFB band-pass's `f0/Q` is `1/(pi*Rf*C)` and the LDR
+    /// touches neither part.
+    ///
+    /// This is what says the reference recordings cannot place [`PC1_R_BRIGHT`]:
+    /// both of them are about an octave wide and this circuit is 0.3 of an
+    /// octave wide at its widest. Kept as a check so that a later pass tempted
+    /// to fit the LDR to a measurement has to confront the bandwidth first.
+    #[test]
+    fn the_engine_front_end_has_a_fixed_bandwidth() {
+        let bw = 1.0 / (std::f64::consts::PI * R21 * C26);
+        assert!((bw - 67.7).abs() < 0.5, "R21 and C26 give {bw} Hz");
+        // Dark, the input resistance is R20 alone: the bottom of the range, and
+        // the one point of it the drawing fixes.
+        let f_dark = 1.0 / (std::f64::consts::TAU * C26 * (R20 * R21).sqrt());
+        assert!((f_dark - 232.0).abs() < 1.0, "LED dark: {f_dark} Hz");
+        // Even there the window is under a third of an octave, so no LDR value
+        // makes this as broad as a recording of an octave-wide voice.
+        assert!(
+            bw / f_dark < 0.33,
+            "widest the front end gets is {} of its center",
+            bw / f_dark
+        );
+        // And the peak gain is R21/(2*R20) wherever the center goes, so the
+        // ladder moves the engine's pitch and not its level.
+        let peak_gain = R21 / (2.0 * R20);
+        assert!((peak_gain - 23.5).abs() < 0.01, "{peak_gain}");
     }
 
     #[test]

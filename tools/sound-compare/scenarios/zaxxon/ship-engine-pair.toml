@@ -1,0 +1,43 @@
+schema = 1
+id = "zaxxon/ship-engine-pair"
+target = "zaxxon-discrete"
+duration_s = 4.0
+description = "Both engine tones back to back at one ladder level, to hear them apart"
+
+# The two tones are the same LDR-tuned noise through two Sallen-Key low-passes,
+# 723 Hz for A and 482 Hz for B, and until the low-passes were traced this file
+# band-passed them instead and the two came out measurably identical. This
+# scenario is the guard: one level, one gap, both tones, so any capture of it
+# either has two distinguishable halves or it does not.
+#
+# U32's decode makes the pair exclusive (Y0 needs PA2 and PA3 both low, Y1 needs
+# PA2 high with PA3 low), so asking for B releases A without a gap of its own;
+# the idle stretch in the middle is there to separate them for a reader.
+[[action]]
+at_s = 0.3
+control = "ship-level"
+value = 3
+
+[[action]]
+at_s = 0.3
+control = "ship-tone-a"
+value = true
+
+[[action]]
+at_s = 1.7
+control = "ship-tone-a"
+value = false
+
+[[action]]
+at_s = 2.0
+control = "ship-tone-b"
+value = true
+
+[[action]]
+at_s = 3.4
+control = "ship-tone-b"
+value = false
+
+[analysis]
+start_s = 0.25
+end_s = 4.0

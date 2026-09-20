@@ -37,8 +37,19 @@ The reference emulator plays recorded WAV samples for this board. That is not
 evidence about the hardware, for exactly the reason written up in
 [`congo-percussion.md`](congo-percussion.md) for the sibling board: a sample set
 is what somebody did instead of reading this sheet. Comparing a model against
-those recordings would measure whoever made the recordings, so there is no
-comparison to run here and the drawing is the only reference.
+those recordings would measure whoever made the recordings, so the drawing is
+the only reference and nothing here is fitted to a sample.
+
+That does not make the samples useless, and later passes have used them: they
+say what a voice **is**, and they are how you notice that something is wrong. A
+constant has twice been moved to make a measurement match and twice been
+reverted (`BATTLESHIP_HZ` to 750 Hz, and the alarm divider to `1QB`, which is
+not wired to anything). The rule that came out of it is that a measurement is
+taken *after* a change and never before it, and that a recording of one cabinet
+cannot settle which pin a wire is on. The engine comparison below is the case
+where a sample said loudly that something was wrong, the sheet said what, and
+the sample then turned out to be unable to place the one number the sheet does
+not give.
 
 ## The architecture
 
@@ -48,7 +59,7 @@ flowchart LR
   GATES["7406 / 7417 / 74LS139<br/>open-collector buffers"] --> SHAPE
   MM["MM5837 U2<br/>NOISE 1"] --> N2["U3 inverting amp<br/>gain 0.1<br/>NOISE 2"]
   SHAPE["74123 one-shots<br/>+ diode/RC envelope shapers"] --> VCA
-  N2 --> FILT["Sallen-Key and Wien<br/>resonators, 226-723 Hz"]
+  N2 --> FILT["Sallen-Key low-passes<br/>226-723 Hz"]
   FILT --> VCA
   OSC["555 / 556 / 74393<br/>oscillators and dividers"] --> VCA
   VCA["MB4391 VCAs<br/>+ 4016B analog switches"] --> LEG
@@ -166,33 +177,71 @@ Node Y drives `PC1`, an `MCD-725H` opto-isolator, through `U8` as a unity
 follower and `R17` 390 Ω. `PC1`'s photoresistor sits between +6 V and the tuning
 node of a multiple-feedback band-pass built on `U5`:
 
+![zaxxon engine resonator](zaxxon-engine-resonator.svg)
+
+[`zaxxon-engine-resonator.json`](zaxxon-engine-resonator.json), which draws tone
+A; tone B is the same twelve parts with different designators.
+
 | Part | Value | Role |
 |---|---|---|
 | `R18` | 200 kΩ | `NOISE 1` into `U4` pin 2 |
 | `R19` | 10 kΩ | `U4` feedback; gain 0.05, inverting |
 | `C28` | 2.2 uF | block into the band-pass input |
-| `R20` | 10 kΩ | band-pass input resistor |
-| `PC1` LDR | variable | from +6 V to the same node, so it parallels `R20` for AC |
+| `R20` | 10 kΩ | band-pass input resistor, to node X |
+| `PC1` LDR | variable | from +6 V to node X, so it parallels `R20` for AC |
 | `C26`, `C27` | 0.01 uF | the band-pass's two feedback capacitors |
-| `R21` | 470 kΩ | `U5` feedback |
+| `R21` | 470 kΩ | `U5`(1,2,3) feedback |
 
-With the LED dark the input resistance is `R20` alone and the center frequency is
-`1 / (2*pi*C*sqrt(R20*R21))` = **232 Hz**; as the LDR falls the parallel
-resistance falls with it and both the center frequency and the gain
-(`R21 / 2*Rin`) rise. So the two level bits set the engine's pitch *and* its
-loudness through one part, and there is no separate volume control anywhere on
-the path.
+`U5`(1,2,3)'s pin 3 is on **+5 V**, not the +6 V mid-rail the rest of the analog
+board swings about. The label is drawn beside the pin at 400 dpi. It changes
+nothing audible, because `C28` blocks going in and `C29`/`C38` block coming out,
+and the LDR's other end is on +6 V so node X floats there with no current in it.
+It is recorded because this is the only op-amp on the board referenced anywhere
+but the mid-rail, and because a later pass that assumes +6 V here would be
+assuming rather than reading.
+
+Three things about this front end follow from `R21` and `C26` and nothing else:
+
+- with the LED dark the input resistance is `R20` alone and the center is
+  `1 / (2*pi*C*sqrt(R20*R21))` = **232 Hz**;
+- the **peak gain is `R21/(2*R20)` = 23.5 wherever the center goes**, because an
+  MFB band-pass's peak depends on the input resistor alone and not on the
+  parallel pair. The LDR moves the engine's *pitch*, not its level;
+- the **bandwidth is `1/(pi*R21*C26)` = 68 Hz wherever the center goes** too,
+  for the same reason. So the `Q` runs 3.4 with the LED dark and rises with the
+  center: the LDR slides a fixed window rather than widening it.
+
+That third point is the one an earlier draft of this section got backwards. It
+said the gain rose with the center "so the two level bits set the engine's pitch
+*and* its loudness through one part". They do not. Both the gain and the
+bandwidth are pinned by two parts the LDR cannot reach.
 
 That one band-pass output feeds **both** engine tones, through `C29` and `C38`:
 
-| Tone | Resonator | Values | VCA | Leg |
-|---|---|---|---|---|
-| A | Wien, `U5` | `R24`/`R25` 100 kΩ, `C30`/`C31` 2200 pF, gain `1 + R23/R22` = 2 | `MB4391 U14` ch B | `R174`/`R175` |
-| B | Wien, `U5` | `R38`/`R39` 100 kΩ, `C39`/`C40` 3300 pF, gain `1 + R37/R36` = 2 | `MB4391 U15` ch B | `R177`/`R178` |
+| Tone | Filter | Values | Divider | VCA | Leg |
+|---|---|---|---|---|---|
+| A | Sallen-Key low-pass, `U5`(9,10,8) | `R24`/`R25` 100 kΩ, `C30`/`C31` 2200 pF, gain `1 + R23/R22` = 2 | `R26` 12 kΩ / `R27` 3.3 kΩ, then `C32` | `MB4391 U14` ch A | `R174`/`R175` |
+| B | Sallen-Key low-pass, `U5`(12,13,14) | `R38`/`R39` 100 kΩ, `C39`/`C40` 3300 pF, gain `1 + R37/R36` = 2 | `R40` 12 kΩ / `R41` 3.3 kΩ, then `C41` | `MB4391 U15` ch A | `R177`/`R178` |
 
-`1 / (2*pi*R*C)` gives **723 Hz** and **482 Hz**, and an amplifier gain of 2 in a
-Wien network gives `Q = 1/(3-K)` = 1: these resonate rather than oscillate, so
-what comes out is the LDR-tuned noise rung at two fixed pitches.
+`1 / (2*pi*R*C)` gives **723 Hz** and **482 Hz**, and `Q = 1/(3-K)` with `K` = 2
+gives **Q 1**: a gentle bump at the corner on top of everything below it.
+
+**These are the two explosion filters again, at a different corner, and they are
+not band-passes.** This file called them "Wien resonators" for nine commits on
+the strength of a part list that was entirely correct, which is the same failure
+the cannon, the shot and the battleship's `R96` each produced once already. The
+distinguishing junction is `C30`'s far plate (and `C39`'s). It sits on the
+**+6 V rail**, whose vertical crosses the audio bus at the page seam with no
+junction dot; the bus is the next vertical to the right and carries `C29` and
+`C38`. Put `C30` on the bus and the stage is a band-pass. Put it on +6 V, which
+is where the drawing puts it, and the stage is a low-pass.
+
+`R26` and `R27` had no entry here at all. `R26` 12 kΩ leaves `U5` pin 8, `R27`
+3.3 kΩ goes from their junction to **ground**, and `C32` 2.2 uF takes the
+junction to `U14` pin 1. That is a divider of **0.216**, or 13.3 dB, and it
+applies to these two voices and to nothing else on the board. The MB4391s' `RO`
+pins carry `C33` and `C42` 680 pF to ground, which is the part's own rolloff pin
+and not in the signal path.
 
 `PLAYER SHIP C` and `D` reach `U32`, a 74LS139 with its enable grounded. Only
 `Y0` (pin 4) and `Y1` (pin 5) are connected; `Y2` and `Y3` go nowhere. Each
@@ -231,7 +280,7 @@ explosion's decay.
 | noise filter | `R113`/`R116` 15 kΩ, `C70`/`C71` 0.033 uF | `R119`/`R122` 15 kΩ, `C72`/`C73` 0.047 uF |
 | filter center, Q | **321 Hz**, Q 2.0 | **226 Hz**, Q 2.0 |
 | filter gain | `1 + R115/R114` = 2.5 | `1 + R121/R120` = 2.5 |
-| VCA | `MB4391 U15` ch A | `MB4391 U13` ch A |
+| VCA | `MB4391 U15` ch B (5, 6, 10, 11) | `MB4391 U13` ch B (5, 6, 10, 11) |
 | leg | `R194` 15 kΩ / `R195` 8.2 kΩ | `R197` 8.2 kΩ / `R198` 47 kΩ |
 | leg attenuation | 0.353 | **0.851, the loudest leg on the board** |
 
@@ -294,7 +343,7 @@ sitting *at* 7.4 kHz with a gain of 2.35, which is a thin whistle carrying a
 twentieth of the energy. The device made exactly that mistake and the voice was
 inaudible in play; see the note at the end of this file.
 
-Its output reaches `MB4391 U13` ch B through the `R134`/`R135` divider and
+Its output reaches `MB4391 U13` ch A (1, 2, 14, 15) through the `R134`/`R135` divider and
 `C84` 4.7 uF, and the leg is `R200` 47 kΩ / `R201` 3.9 kΩ, an attenuation of
 0.0766. That VCA's `CON` pin is driven by `U12`'s **other** section, an
 inverting amp with `R136` 51 kΩ in and `R137` 51 kΩ of feedback about the
@@ -460,7 +509,7 @@ f = (A/2) / (window * C92 * (R156 + R156*R159/(R156 - R159)))
 so the voice covers roughly 1.1 kHz at rest to 10 kHz at the head of a trigger,
 warbling with the 555. Its duty is 45.5 % rather than the battleship's exact
 50 %, because `R156` against `R159` is 2.2 to 1 where the battleship's pair is 2
-to 1. It reaches `MB4391 U16` ch B through `R164` 1 MΩ against `R165` 220 kΩ, a
+to 1. It reaches `MB4391 U16` ch A (1, 2, 14, 15) through `R164` 1 MΩ against `R165` 220 kΩ, a
 divider of **0.18**, and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
 
 ## The base missile, still read at block level
@@ -472,9 +521,10 @@ are now solved, in their own sections below.
 - **`BASE MISSILE` (`PA5`)** triggers `U22` half B (`C48` 15 uF, `R56` 36 kΩ,
   **151 ms**), whose `Q` drives `R57` 1 kΩ, `D2`, `R58` 470 Ω and `C49` 15 uF,
   recovering through `R59`+`R60` 440 kΩ (**6.6 s**) into `U20`. It controls
-  `MB4391 U14` ch A, whose audio is a third Sallen-Key noise band on sheet 12
-  (`R61`/`R62` 15 kΩ, `C50`/`C137` 0.022 uF, **482 Hz**, gain `1 + R63/R64` =
-  1.5, Q 0.67) through `C51` 22 uF; the leg is `R183` 39 kΩ / `R184` 8.2 kΩ.
+  `MB4391 U14` ch B (5, 6, 10, 11), whose audio is a third Sallen-Key noise band
+  on sheet 12 (`R61`/`R62` 15 kΩ, `C50`/`C137` 0.022 uF, **482 Hz**, gain
+  `1 + R63/R64` with `R63` 50 kΩ and `R64` 100 kΩ = 1.5, Q 0.67) through `C51`
+  22 uF; the leg is `R183` 39 kΩ / `R184` 8.2 kΩ.
 
 ## The homing missile: a 555 whose control pin is driven
 
@@ -676,10 +726,18 @@ sources.
 - **The PPI map, at component level.** Every voice is labeled on `U23`'s pins on
   the drawing. Fourteen signals: twelve gates, and two that are not.
 - **Player ship A and B set a near-linear two-bit level with `PA0` as the MSB,
-  and the level falls as the bits rise.** Four solved control voltages, a 0.4 s
-  glide between them, and an LDR that makes pitch and loudness one control.
-  Every part of that contradicts a `data & 3` volume fit, which has the two
-  middle states swapped and the slope inverted.
+  and the level falls as the bits rise.** Four solved control voltages and a
+  0.4 s glide between them. Every part of that contradicts a `data & 3` volume
+  fit, which has the two middle states swapped and the slope inverted.
+- **The engine's front end slides a fixed window.** An MFB band-pass's peak gain
+  is `R21/(2*R20)` = 23.5 and its bandwidth is `1/(pi*R21*C26)` = 68 Hz, and the
+  LDR appears in neither. The ladder sets the engine's pitch and nothing else,
+  and the 68 Hz is what says the reference recordings cannot place the LDR.
+- **The two engine tones are Sallen-Key low-passes at 723 Hz and 482 Hz, Q 1**,
+  the same topology as the two explosion filters, with `C30` and `C39` returning
+  to the +6 V rail rather than to the signal bus. They are followed by `R26`/
+  `R27` and `R40`/`R41`, a divider of 0.216 that applies to these two voices
+  alone.
 - **The board is silent at reset** and stays silent until the program writes,
   because all fourteen lines are pulled high (which for the level pair is the
   bottom of the ladder, with `PC1`'s LED dark) and the amplifier mutes itself
@@ -740,11 +798,17 @@ sources.
 ## What this does NOT establish
 
 - **The `MCD-725H`'s resistance against LED current.** The opto-isolator's
-  transfer curve is not on the drawing and no datasheet was found, so the engine
-  pitch at each of the four levels is *not* established: only that node Y takes
-  those four voltages, that the LED is dark at the lowest one, and that the
-  band-pass reaches 232 Hz with the LED dark. The device models the curve with
-  an explicitly invented law and says so at the call site.
+  transfer curve is not on the drawing and no datasheet was found (searched
+  again 2026-09-20; the part appears only in distributor stock listings), so the
+  engine pitch at each of the four levels is *not* established: only that node Y
+  takes those four voltages, that the LED is dark at the lowest one, and that
+  the band-pass reaches 232 Hz with the LED dark. The device models the curve
+  with an explicitly invented law and says so at the call site.
+
+  **The reference recordings cannot narrow this, and were not used to.** Both
+  engine samples are about an octave wide and this front end is 68 Hz wide at
+  every LDR position, so no value here reproduces their shape. See the third
+  pass's section below.
 - **The `MM5837`'s shift rate on this board.** The part's clock is internal, it
   is specified at a supply this board does not give it, and part-to-part spread
   is wide. The model uses the commonly quoted 100 kHz, which is a convention and
@@ -758,9 +822,11 @@ sources.
   12 and 6 follow from which audio each section passes, not from tracing the
   control wires, which were not followed across the sheet boundary.
 - **Which explosion buffer goes to which VCA.** `S-EXP`'s buffered envelope was
-  traced by its crossing height at the sheet seam to `U15` ch A, the 321 Hz path.
-  `M-EXP` to `U13` ch A is by elimination, corroborated by the medium explosion
-  being the lower and louder of the two.
+  traced by its crossing height at the sheet seam to `U15` ch B, the 321 Hz
+  path. `M-EXP` to `U13` ch B is by elimination, corroborated by the medium
+  explosion being the lower and louder of the two. The **channels** are read
+  (pins 5, 6, 10, 11 in both cases); it is the envelope's routing to them that
+  is not.
 - **The 555's output levels and its control pin's impedance.** Both are
   properties of the part rather than of the drawing. The shot's node A is
   directly proportional to the first, so its pitch scales with a number no sheet
@@ -857,6 +923,95 @@ could have rebuilt the oscillator from it. What it did not say was what was
 connected to what, and the model built from it band-passed noise at a frequency
 the circuit never produces.
 
+## What a third pass got wrong, and how
+
+The two engine tones, which nine commits of this file never traced and no
+capture had ever been compared against anything. Three errors, and they are the
+same three shapes as every error before them.
+
+- **The two resonators are Sallen-Key low-passes, and this file called them Wien
+  resonators.** That is the cannon's mistake, the shot's mistake and `R96`'s
+  mistake for the fourth time: a topology taken from what the part list looks
+  like rather than from where a wire lands. Every value was right. `R24`, `R25`,
+  `C30`, `C31`, `R22` and `R23` were all correctly read, and 723 Hz and Q 1 fall
+  out of them under either reading, so nothing about the wrong one looked wrong.
+  The junction that settles it is `C30`'s far plate: it sits on the **+6 V
+  rail**, whose vertical crosses the audio bus at the page seam with no dot, one
+  column left of the bus that carries `C29` and `C38`. It is drawn twice,
+  identically, and both copies read the same way at 500 %.
+
+  What it cost is the whole point of the voice. A band-pass rejects below `f0`,
+  so the two corners stopped shaping anything and the LDR-tuned front end
+  decided the pitch on its own. The 723 Hz copy and the 482 Hz copy came out
+  **measurably identical**, which is a circuit with two filters in it doing the
+  work of none.
+
+- **`R26` 12 kΩ and `R27` 3.3 kΩ had no entry anywhere in this file.** They sit
+  between `U5` pin 8 and `C32`, with `R27` to ground, and they divide each
+  engine tone by 0.216 before its VCA. `R40`/`R41` are the same pair on tone B.
+  This is the omission the format is worst at catching, because a part that is
+  missing from a table looks exactly like a part that is not on the board.
+
+- **Every one of the six `MB4391` channel labels was backwards.** The parts are
+  `IN 1, CON 2, RO 14, OUT 15` for channel A and `IN 5, CON 6, RO 10, OUT 11`
+  for channel B, which is the pinout this file already carried in its argument
+  about the control window. All six assignments were written with the opposite
+  convention: ship tone A is `U14` ch A and the base missile ch B, ship tone B
+  is `U15` ch A and the small explosion ch B, the cannon is `U13` ch A and the
+  medium explosion ch B, and the shot is `U16` ch A. Nothing depends on it,
+  which is why it survived: a label that changes no arithmetic is never checked
+  by the arithmetic. `U16` ch B is spare.
+
+And one that was not wrong but was stated backwards. This section used to say
+that as the LDR falls "both the center frequency and the gain rise", so the two
+level bits set the engine's pitch *and* its loudness. They do not. An MFB
+band-pass's peak gain is `Rf/(2*Rin)` and its bandwidth is `1/(pi*Rf*C)`, and
+neither expression contains the resistor the LDR parallels. The ladder slides a
+fixed 68 Hz window of fixed height. That matters beyond the engine, because it
+is what says the reference recordings cannot place the LDR curve.
+
+### The engine, measured against the reference for the first time
+
+MAME's `04.wav` and `05.wav` are this voice family and nobody had ever put them
+beside a capture. Octave-band energy, in dB relative to each file's own
+full-band RMS, our tone A and tone B at the top of the ladder:
+
+| Band | `05` | tone A | `04` | tone B |
+|---|---|---|---|---|
+| 125-250 | -29.7 | -33.7 | -14.1 | -27.5 |
+| 250-500 | -12.2 | -18.7 | -5.5 | -13.7 |
+| 500-1000 | **-2.6** | **-1.4** | -12.2 | **-1.9** |
+| 1000-2000 | -15.8 | -18.2 | -22.4 | -20.2 |
+| 2000-4000 | -21.8 | -38.1 | -35.6 | -41.0 |
+| 4000-8000 | -33.2 | -46.1 | -48.9 | -50.9 |
+
+Two things are worth taking from this and a third is worth refusing.
+
+**What the low-pass correction bought, and it is the level-independent half.**
+Before it, tone A and tone B measured the same in every band to within 1.5 dB:
+two voices, one sound. After it they separate in the same direction the two
+recordings do, in every band, sign for sign. They separate about a third as far
+as `04` and `05` do, and the shortfall is the front end still dominating both.
+
+**Which ladder level each recording was made at is not knowable**, so the
+absolute placement cannot be scored. `04` peaks an octave below tone B, but a
+recording taken at the bottom of the ladder would do that whatever this model's
+LDR curve is. MAME also treats `PA2` and `PA3` as two independent gates playing
+two independent samples, where this sheet decodes them through `U32`'s 74LS139
+and selects one of two tones, so the two sets of states do not correspond
+one-for-one either.
+
+**And the recordings cannot be used to move [the LDR curve](#what-this-does-not-establish).**
+This is the part worth refusing rather than the part worth doing. Both samples
+are about an octave wide: `04` is 6.7 dB down one octave below its peak and `05`
+is 9.6 dB down. This circuit's front end is 68 Hz wide, which is 0.3 of an
+octave at the *bottom* of its range and narrower everywhere above, and the 68 Hz
+is arithmetic on `R21` and `C26` rather than anything invented. **No position of
+the LDR makes this board as broad as either recording.** Whatever those files
+are a recording of, it is not this chain alone, and a curve fitted to make the
+peak land in the right band would be a curve fitted to a shape the circuit
+cannot produce. The invented law is unchanged.
+
 ## Confidence
 
 A good scan. The PPI map, the ladder network, the seven one-shot R/C pairs, the
@@ -865,10 +1020,17 @@ with every designator and value legible, and those are the parts to trust.
 
 The battleship's, the shot's and the laser's oscillators are now read at
 component level and solved, and so are the junctions their rates turn on, and so
-is the homing missile's chain from its gate to `U6`'s control pin. The base
-missile, and the routing of control voltages across the sheet seam other than
-the shot's and the alarms', are still read at block level and are marked so
-above.
+is the homing missile's chain from its gate to `U6`'s control pin. The engine's
+two resonators and the divider after them are read too, at 500 %, in both
+copies. The base missile, and the routing of control voltages across the sheet
+seam other than the shot's and the alarms', are still read at block level and
+are marked so above.
 
-This is a hand transcription and can be wrong. Nothing in it is checked by a
-test; the section above it is what keeps that honest.
+This is a hand transcription and can be wrong. Most of it is not checked by a
+test, and the sections above are what keep that honest. The parts that *are*
+checked are the arithmetic the device shares with this file, in
+`machines/src/zaxxon_sound.rs`'s test module: the one-shot widths, both
+battleship stages, the shot's and laser's oscillators, the alarm comparator, the
+engine's two corners and its front end's fixed bandwidth, and the mix table's
+shape. A test can pin a derivation; it cannot pin a junction, which is the
+failure this file keeps making.

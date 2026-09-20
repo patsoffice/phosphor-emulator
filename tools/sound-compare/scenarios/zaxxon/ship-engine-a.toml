@@ -2,7 +2,7 @@ schema = 1
 id = "zaxxon/ship-engine-a"
 target = "zaxxon-discrete"
 duration_s = 5.0
-description = "Engine tone A (723 Hz Wien) through all four ladder levels"
+description = "Engine tone A (723 Hz Sallen-Key) through all four ladder levels"
 
 # The engine is the one voice where the level bits matter, so this walks them.
 # C25 is 15 uF against about 26 kOhm, so node Y glides with a 0.4 s time

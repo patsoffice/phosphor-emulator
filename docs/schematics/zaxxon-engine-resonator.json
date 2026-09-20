@@ -1,0 +1,159 @@
+{
+  "modules": {
+    "zaxxon engine tone A: a Sallen-Key low-pass, not a band-pass": {
+      "ports": {
+        "NOISE 1": { "direction": "input", "bits": [2] },
+        "PA2 / PA3": { "direction": "input", "bits": [21] },
+        "R174 15k -> SJ": { "direction": "output", "bits": [60] }
+      },
+      "cells": {
+        "r18": {
+          "type": "R18 200k",
+          "port_directions": { "NOISE 1": "input", "-> pin 2": "output" },
+          "connections": { "NOISE 1": [2], "-> pin 2": [3] },
+          "attributes": {}
+        },
+        "u4": {
+          "type": "U4a x0.05",
+          "port_directions": {
+            "- (2)": "input",
+            "+ (3) +6V": "input",
+            "out (1)": "output"
+          },
+          "connections": { "- (2)": [3], "+ (3) +6V": ["1"], "out (1)": [4] },
+          "attributes": {}
+        },
+        "r19": {
+          "type": "R19 10k",
+          "port_directions": { "out (1)": "input", "-> pin 2": "output" },
+          "connections": { "out (1)": [4], "-> pin 2": [3] },
+          "attributes": {}
+        },
+        "c28r20": {
+          "type": "C28 2u2 / R20 10k",
+          "port_directions": { "in": "input", "node X": "output" },
+          "connections": { "in": [4], "node X": [6] },
+          "attributes": {}
+        },
+        "pc1": {
+          "type": "PC1 LDR",
+          "port_directions": { "+6V": "input", "node X": "output" },
+          "connections": { "+6V": ["1"], "node X": [6] },
+          "attributes": {}
+        },
+        "c26": {
+          "type": "C26 10n",
+          "port_directions": { "node X": "input", "- (2)": "output" },
+          "connections": { "node X": [6], "- (2)": [7] },
+          "attributes": {}
+        },
+        "c27": {
+          "type": "C27 10n",
+          "port_directions": { "node X": "input", "out (1)": "output" },
+          "connections": { "node X": [6], "out (1)": [9] },
+          "attributes": {}
+        },
+        "r21": {
+          "type": "R21 470k",
+          "port_directions": { "- (2)": "input", "out (1)": "output" },
+          "connections": { "- (2)": [7], "out (1)": [9] },
+          "attributes": {}
+        },
+        "u5a": {
+          "type": "U5a band-pass",
+          "port_directions": {
+            "- (2)": "input",
+            "+ (3) +5V": "input",
+            "out (1)": "output"
+          },
+          "connections": { "- (2)": [7], "+ (3) +5V": ["1"], "out (1)": [9] },
+          "attributes": {}
+        },
+        "c29": {
+          "type": "C29 2u2",
+          "port_directions": { "out (1)": "input", "-> R24": "output" },
+          "connections": { "out (1)": [9], "-> R24": [10] },
+          "attributes": {}
+        },
+        "r24": {
+          "type": "R24 100k",
+          "port_directions": { "in": "input", "node P": "output" },
+          "connections": { "in": [10], "node P": [11] },
+          "attributes": {}
+        },
+        "r25": {
+          "type": "R25 100k",
+          "port_directions": { "node P": "input", "+ (10)": "output" },
+          "connections": { "node P": [11], "+ (10)": [12] },
+          "attributes": {}
+        },
+        "c30": {
+          "type": "C30 2n2",
+          "port_directions": { "+ (10)": "input", "+6V": "output" },
+          "connections": { "+ (10)": [12], "+6V": ["1"] },
+          "attributes": {}
+        },
+        "c31": {
+          "type": "C31 2n2",
+          "port_directions": { "node P": "input", "out (8)": "output" },
+          "connections": { "node P": [11], "out (8)": [13] },
+          "attributes": {}
+        },
+        "u5c": {
+          "type": "U5c low-pass",
+          "port_directions": {
+            "- (9)": "input",
+            "+ (10)": "input",
+            "out (8)": "output"
+          },
+          "connections": { "- (9)": [14], "+ (10)": [12], "out (8)": [13] },
+          "attributes": {}
+        },
+        "r22": {
+          "type": "R22 2k2",
+          "port_directions": { "+6V": "input", "- (9)": "output" },
+          "connections": { "+6V": ["1"], "- (9)": [14] },
+          "attributes": {}
+        },
+        "r23": {
+          "type": "R23 2k2",
+          "port_directions": { "out (8)": "input", "- (9)": "output" },
+          "connections": { "out (8)": [13], "- (9)": [14] },
+          "attributes": {}
+        },
+        "r26r27": {
+          "type": "R26 12k / R27 3k3",
+          "port_directions": { "out (8)": "input", "x0.216": "output" },
+          "connections": { "out (8)": [13], "x0.216": [15] },
+          "attributes": {}
+        },
+        "u14": {
+          "type": "U14a MB4391",
+          "port_directions": {
+            "C32 2u2 IN (1)": "input",
+            "CON (2)": "input",
+            "OUT (15)": "output"
+          },
+          "connections": {
+            "C32 2u2 IN (1)": [15],
+            "CON (2)": [16],
+            "OUT (15)": [60]
+          },
+          "attributes": {}
+        },
+        "u31": {
+          "type": "U31 7417 / C34",
+          "port_directions": { "U32 Y0": "input", "CON (2)": "output" },
+          "connections": { "U32 Y0": [20], "CON (2)": [16] },
+          "attributes": {}
+        },
+        "u32": {
+          "type": "U32 74LS139",
+          "port_directions": { "PA2 / PA3": "input", "Y0 (4)": "output" },
+          "connections": { "PA2 / PA3": [21], "Y0 (4)": [20] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

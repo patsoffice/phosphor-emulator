@@ -43,11 +43,11 @@ pub static SPEC: TargetSpec = TargetSpec {
         },
         ControlSpec {
             name: "ship-tone-a",
-            description: "Engine tone A, 723 Hz Wien (U32 Y0: PA2 and PA3 both low)",
+            description: "Engine tone A, 723 Hz Sallen-Key (U32 Y0: PA2 and PA3 both low)",
         },
         ControlSpec {
             name: "ship-tone-b",
-            description: "Engine tone B, 482 Hz Wien (U32 Y1: PA2 high, PA3 low)",
+            description: "Engine tone B, 482 Hz Sallen-Key (U32 Y1: PA2 high, PA3 low)",
         },
         ControlSpec {
             name: "homing-missile",

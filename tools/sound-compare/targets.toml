@@ -283,6 +283,7 @@ scenarios = [
   "zaxxon/s-exp",
   "zaxxon/ship-engine-a",
   "zaxxon/ship-engine-b",
+  "zaxxon/ship-engine-pair",
   "zaxxon/shot",
 ]
 notes = """
@@ -306,17 +307,29 @@ and that was half the picture: the other comparison this tool supports is one
 revision of a device against the next, and on a board transcribed by hand from a
 1982 drawing that is the comparison that keeps paying. Reading `R96` off the
 wrong node moved the battleship two octaves, and the way that was told from an
-improvement was to capture the voice either side and listen to both. Twelve
-scenarios, one per voice, exist so that is one command rather than a scratch test
-somebody writes again each time.
+improvement was to capture the voice either side and listen to both. Thirteen
+scenarios, at least one per voice, exist so that is one command rather than a
+scratch test somebody writes again each time.
+
+The samples do have one honest use, and the engine is the worked example. They
+say what a voice IS and they are how you notice that something is wrong: putting
+the two engine captures beside 04.wav and 05.wav is what showed that our two
+engine tones were measurably identical when the board's are an octave apart, and
+re-reading sheet 12 is what found the reason (they are Sallen-Key low-passes,
+not band-passes). What the samples cannot do is place a constant, and the same
+comparison shows why: both of them are an octave wide and this board's engine
+front end is 68 Hz wide at every LDR position, which is arithmetic on R21 and
+C26. Two constants have been fitted to these recordings in the past and both
+were reverted.
 
 What IS derived, and is what a review would check: the seven 74123 one-shot
 widths at the plain part's 0.28 constant, the three Sallen-Key noise bands, the
-two Wien engine resonators, the 556-into-74393 alarm divider, the player ship's
-two-bit level solved as a resistive network, both battleship oscillators and the
-50 % duty and 3.378 Vpp swing that follow from their resistors, and the
-eleven-leg mix, whose balance is entirely the attenuator ahead of each leg
-because the summing resistors are all the same 51k.
+two Sallen-Key engine tones and the R26/R27 divider after them, the
+556-into-74393 alarm divider, the player ship's two-bit level solved as a
+resistive network, both battleship oscillators and the 50 % duty and 3.378 Vpp
+swing that follow from their resistors, and the eleven-leg mix, whose balance is
+entirely the attenuator ahead of each leg because the summing resistors are all
+the same 51k.
 
 What is NOT: the MCD-725H opto-isolator's transfer curve, the MB4391's control
 law beyond its direction, Q6's collector-emitter resistance, the op-amps' output
