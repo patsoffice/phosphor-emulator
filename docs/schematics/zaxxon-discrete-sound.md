@@ -852,6 +852,60 @@ output ramps at `I / C99` = **0.4 V per microsecond** until it reaches a rail
 and stays there. The voice is a square with 25 us edges, not a triangle: at
 `1QC`'s 2535 Hz those edges are an eighth of a half period.
 
+### The two recordings corroborate `1QC` and `1QD`, which is the one thing they can do here
+
+An earlier pass moved this divider to `1QB` "because two files in MAME's sample
+set measure near 5 kHz", and `1QB` is not wired to anything. Restoring it was
+done from the sheet, and the recordings were left alone on the principle that a
+recording of one cabinet cannot settle which pin a wire is on. That principle
+holds. But there is one question a pair of recordings *can* answer, which is
+whether the two taps are adjacent, because that is a ratio and a ratio survives
+everything a cabinet's tolerances do to an absolute rate.
+
+`disasm audiodiff` estimates a fundamental by **autocorrelation**, which locks
+to the period regardless of harmonic structure, with the largest spectral bin
+only as a fallback. On the two alarm files:
+
+| | `20.wav` (alarm 3) | `21.wav` (alarm 2) | ratio |
+|---|---|---|---|
+| fundamental | **2264.7 Hz** | **1133.8 Hz** | **1.997** |
+| ours | 2536.3 Hz | 1268.3 Hz | 2.000 |
+| ours over the recording | 1.120 | 1.119 | |
+| centroid | 4280 Hz | 3360 Hz | |
+| 85 % rolloff | 6805 Hz | 5663 Hz | |
+
+Three things fall out and the third is the useful one.
+
+- **The taps are adjacent**, to a quarter of a percent, in the recordings and in
+  the model. Two divider outputs an octave apart is what `1QC` and `1QD` are.
+- **They are the right two.** `1QB` and `1QC` would be 5070 and 2535 Hz, which
+  is a factor of 2.2 away from what these files measure. Whatever produced
+  "near 5 kHz", it was not a fundamental: both files' *centroid* and *85 %
+  rolloff* land there, which is what a harmonic-weighted measure of a square
+  does and what the autocorrelation exists not to do.
+- **The remaining 12 % is one cabinet's parts.** Both files sit the same
+  distance below `1.4427/((R168 + 2*R169) * C97)`, by 11.99 % and 11.86 %, so
+  it is the 556's clock and not either tap. Nothing on the sheet accounts for
+  it and nothing needs to: a 555 astable on a 470 Ω, a 120 Ω and a ceramic
+  0.1 uF is a ±12 % part in series with two ±5 % parts, and the 555's own
+  discharge transistor and propagation delay are worth about 1 % between them
+  at this rate. **It was not fitted**, and a constant moved to close it would
+  be the third time this file did that.
+
+What the recordings still disagree with is the top of the spectrum. Above
+8 kHz, in the same order:
+
+| | `20.wav` | `21.wav` |
+|---|---|---|
+| the recording | **13.8 %** | **13.0 %** |
+| an ideal square at that fundamental | 5.2 % | 4.6 % |
+| ours | 3.5 % | 3.1 % |
+
+Ours is that ideal square with `C99`'s 25 us edges taken off, which is what the
+slew limit is for and is the right direction. The recordings are at nearly
+three times an ideal square, and a square is the most harmonic-rich thing this
+chain can produce, so whatever that energy is it is not the tone. Not acted on.
+
 ## The mix: eleven legs into one node
 
 Every voice ends the same way: a series resistor, a shunt resistor to ground, a
@@ -982,6 +1036,13 @@ sources.
   envelope (the shot), or a 555's capacitor directly (the laser).
 - **The alarm stage is a comparator**, driven a hundred times past its rails,
   whose output is slew-limited by `C99` to 0.4 V per microsecond.
+- **`1QC` and `1QD` are corroborated by the two recordings**, which is the one
+  thing a pair of recordings can settle here because it is a ratio. Their
+  autocorrelated fundamentals are 2264.7 and 1133.8 Hz, adjacent to a quarter
+  of a percent, and both sit 12 % below the taps this file reads where `1QB`
+  would be a factor of 2.2 away. The "near 5 kHz" that once moved this divider
+  to a pin wired to nothing is where both files' *centroid* and *rolloff* sit,
+  which is what a harmonic-weighted measure of a square does.
 - **Seven 74123 one-shot widths**, from their own R and C:
 
   | Voice | Package | R | C | Width at 0.28 R C |
