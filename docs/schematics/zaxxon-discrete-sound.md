@@ -1552,24 +1552,85 @@ paragraph as a curiosity about the file. It was the finding.
 
 ## Where every voice stands, and what the number is worth
 
-All twelve, measured the same way: worst octave-band error between 125 Hz and
-8 kHz, each file normalized to its own full-band RMS, over windows of the same
-length. "Before" is the figure on `phosphor-emulator-uy54` before this pass.
+All twelve, through `disasm audiodiff`, over windows matched to each reference's
+own length. The hand-rolled octave table this replaces is at the end of this
+section, along with why it was replaced.
 
-| Voice | Before | Now | |
+```bash
+sndcmp capture zaxxon/<voice> --out /tmp/ours.wav
+disasm audiodiff <samples>/NN.wav /tmp/ours.wav --range-b <start>:<end>
+```
+
+| Voice | Reference clips | Worst band | Centroid, reference / ours | STFT distance |
+|---|---|---|---|---|
+| homing missile | 0.0 % | 21.3 pp at 1-3 kHz | 1794 / 1875 Hz | **0.92** |
+| cannon | 0.0 % | 6.0 pp at 3-8 kHz | 2628 / 2312 Hz | 1.22 |
+| laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1444 Hz | 1.52 |
+| battleship | 0.0 % | 14.7 pp at 0-150 Hz | 248 / 320 Hz | 1.79 |
+| alarm 3 | 0.0 % | 10.3 pp at 8 kHz+ | 4280 / 3360 Hz | 1.90 |
+| alarm 2 | 0.0 % | 9.9 pp at 8 kHz+ | 3360 / 1935 Hz | 1.91 |
+| medium explosion, retriggered | **5.1 %** | 7.7 pp at 150-400 Hz | 201.5 / 198.6 Hz | 2.69 |
+| small explosion | 0.8 % | 8.2 pp at 150-400 Hz | 275.9 / 282.0 Hz | 3.43 |
+| base missile | **6.8 %** | 35.2 pp at 150-400 Hz | 398 / 333 Hz | 4.10 |
+| shot | 0.0 % | 13.7 pp at 150-400 Hz | 1385 / 2026 Hz | 5.10 |
+| engine tone B | **6.8 %** | 57.5 pp at 400-1000 Hz | 399 / 510 Hz | 5.59 |
+| engine tone A | **14.5 %** | 11.4 pp at 150-400 Hz | 759 / 555 Hz | 6.41 |
+
+Read the clipping column first and the band column last, which is the order
+`audiodiff` prints them in and the opposite of the order four rounds of this
+file read them in.
+
+**The homing missile is the worked example of why a band delta is not a score.**
+It has the largest band disagreement in the table and the smallest STFT
+distance, by a factor of one and a half over the next voice. Both are correct.
+Its fundamental **warbles across the 1000 Hz band edge** thirty times in two
+seconds, so the fraction of each sweep that lands below the edge is a steep
+function of where the sweep's center sits, and a 4.6 % difference in center
+moves 20 percentage points across the boundary. 1794 Hz against 1875 Hz is what
+that voice actually is: 4.5 % apart on a chain whose 555 nobody has measured.
+
+Three more things this table says that the octave one could not.
+
+- **Four of the twelve references are clipped**, and they are four of the five
+  worst rows. Clipping raises RMS and generates harmonics, which broadens a
+  spectrum in exactly the way a wider filter would, so a band comparison against
+  a clipped file cannot distinguish the two. `audiodiff` calls this a capture
+  defect rather than a difference, in its verdict.
+- **The two explosions' centroids land within 1.5 %**, where the base missile's
+  and the engine's do not. The centroid survives clipping better than the bands
+  do, which is what makes that worth saying.
+- **The shot is the only unclipped row in the bottom third**, and it is the
+  only one whose error is not a shape at all. See its section: its pitch falls
+  by two octaves across the voice on the board and does not move in the device.
+
+### The table this replaces
+
+It was the worst octave-band error between 125 Hz and 8 kHz, each file
+normalized to its own full-band RMS, computed by hand in a shell. It is kept
+here because two of its entries are still the clearest statement of what those
+voices are, and because the reason it was replaced is the reason this file spent
+four rounds not noticing that the ship explosion is a two-second roar.
+
+| Voice | On the issue | The last hand-rolled figure | |
 |---|---|---|---|
 | battleship | 0.8 | 0.8 | solved end to end |
 | laser | 2.1 | 2.0 | solved end to end |
 | small explosion | 2.6 | 2.6 | matches its own ideal filter to 0.5 dB |
 | cannon | 7.1 | **3.8** | `Q6`'s threshold derived |
-| medium explosion | 7.8 | 7.4 | matches its own ideal filter to 0.5 dB; **retriggered**, see below |
+| medium explosion | 7.8 | 7.4 | matches its own ideal filter to 0.5 dB |
 | alarm 3 | 8.8 | 8.3 | the `C24` droop, which the sample cannot contain |
-| shot | 11.5 | 11.5 | 11.5 dB **deficient** at 125-250, not hot |
+| shot | 11.5 | 11.5 | deficient at 125-250, not hot |
 | engine tone B | never measured | 11.8 | |
-| base missile | 15.6 | 15.3 | matches its own ideal filter to 0.6 dB; `02.wav` is an engine sample |
+| base missile | 15.6 | 15.3 | matches its own ideal filter to 0.6 dB |
 | engine tone A | never measured | 17.0 | |
 | alarm 2 | 19.4 | 17.6 | the `C24` droop |
-| homing missile | 17.4 | 18.8 | the warble's own bandwidth |
+| homing missile | 17.4 | 18.8 | |
+
+A per-file-normalized octave table compares spectrum, which is what it is for
+and is a real thing to compare. What it cannot see is a level, an envelope, a
+clipped capture, an event count or a spacing, and `audiodiff` reports all five
+in the same output. It also does not know that a voice's own bandwidth can
+straddle one of its bin edges, which is the homing missile above.
 
 ### The board was quiet, and the leg table does not say what it looks like
 
