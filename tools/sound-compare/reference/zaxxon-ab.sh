@@ -47,6 +47,14 @@ command -v "$SOX" >/dev/null 2>&1 || SOX="$(command -v sox)"
 mkdir -p "$OUT"
 
 # voice  mame-file  trim-start  trim-length  repeats-for-listening
+#
+# `m-exp-sustained` rather than `m-exp` is deliberate and is the one row here
+# that is not the obvious scenario. The game pulses M-EXP instead of striking it
+# once, the 74123 is retriggerable, and 10.wav is accordingly flat for two
+# seconds before it decays. Held against the single-trigger scenario our side is
+# a thump where the reference is a roar, and the octave-band numbers do not show
+# it at all, because retriggering changes the envelope and not the spectrum.
+# That is worth knowing about the band metric as well as about the voice.
 ROWS='
 battleship 00 0.05 0.34 3
 laser 01 0.05 0.20 4
@@ -55,7 +63,7 @@ homing-missile 03 0.30 0.46 3
 ship-engine-b 04 0.30 0.75 2
 ship-engine-a 05 0.60 0.60 2
 cannon 08 0.05 1.19 2
-m-exp 10 0.05 3.50 1
+m-exp-sustained 10 0.05 3.83 1
 s-exp 11 0.05 1.75 1
 alarm3 20 0.06 0.047 6
 alarm2 21 0.06 0.078 6

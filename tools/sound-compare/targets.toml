@@ -280,6 +280,7 @@ scenarios = [
   "zaxxon/homing-missile",
   "zaxxon/laser",
   "zaxxon/m-exp",
+  "zaxxon/m-exp-sustained",
   "zaxxon/s-exp",
   "zaxxon/ship-engine-a",
   "zaxxon/ship-engine-b",

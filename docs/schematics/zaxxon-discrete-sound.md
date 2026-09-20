@@ -294,7 +294,29 @@ The two filters are Sallen-Key low-passes with equal resistors and equal
 capacitors, so `f0 = 1/(2*pi*R*C)` and `Q = 1/(3-K)` with `K` the amplifier's
 non-inverting gain. `K` = 2.5 puts both at Q 2, a broad resonance rather than a
 tone: band-limited noise, low for the medium explosion and higher for the small
-one, which is the correct way round.
+one, which is the correct way round. Both were checked against white noise
+through the two-pole low-pass their own parts give and both match it to 0.5 dB.
+
+### The medium explosion is retriggered, and that is most of its length
+
+The `74123` is a **retriggerable** monostable, and for `M-EXP` that is the voice
+rather than a footnote. A single trigger is 43 ms of pulse followed by `C63`
+recovering through `R109` + `R110` for 2.0 s, so the sound decays from its first
+instant. The reference recording does not: it is flat for two seconds and then
+falls off a cliff, which no RC recovery produces.
+
+What produces it is the game pulsing `PB5` repeatedly. While the pulses arrive
+faster than 43 ms apart the one-shot never finishes, `D8` holds `C63` at a diode
+drop, the `MB4391` stays wide open, and the 2.0 s recovery becomes the cliff at
+the end instead of the whole shape. The evidence that the game does this is not
+the recording: it is that the reference driver guards `M-EXP` and alarm 3
+against restarting while already playing, and guards nothing else. A guard
+against a restart exists where restarts happen.
+
+The small explosion has no such guard and is struck once, which is why the
+single-trigger scenario matches it and not its neighbor. The rate at which the
+game pulses `M-EXP` has **not** been read out of the ROM; `zaxxon/m-exp-sustained`
+picks 25 ms to demonstrate the mechanism and says so.
 
 ## The cannon
 
@@ -1266,12 +1288,23 @@ generated and measured the same way:
 
 These are the same circuit one octave apart. One of them agrees with its
 reference and the other does not, and both agree with the drawing to half a
-decibel, so the disagreement is in `10.wav` rather than in the model. `10.wav`
-is also the odd file in the set: 3.83 s where the next longest is 1.75 s, and
-the only one at 22 kHz. Our shortfall against it is spread evenly over four
-octaves above 500 Hz rather than sitting in one band, which is what a second
-voice still sounding under a ship explosion would look like and is not what a
-wrong filter looks like. Nothing changed.
+decibel, so the spectral disagreement is in `10.wav` rather than in the filter.
+Our shortfall against it is spread evenly over four octaves above 500 Hz rather
+than sitting in one band, which is what a second voice still sounding under a
+ship explosion would look like and is not what a wrong filter looks like.
+Nothing about the filter changed.
+
+**That analysis was right about the spectrum and it stopped one question too
+early.** It was reached entirely from these tables, and a table like this cannot
+hear an envelope: `10.wav` is flat for two seconds and a single trigger of this
+voice decays from its first instant, and the two score 7.8 dB apart, which is
+the same as a voice that is merely a bit bright. Somebody listened to the A/B
+wavs and the ship explosion was obviously missing. The board sustains it by
+retriggering, as the section on the two explosions now records, and the metric
+that is the whole apparatus of this file moves **0.4 dB** between the two.
+
+`10.wav` being 3.83 s where the next longest sample is 1.75 s was in this
+paragraph as a curiosity about the file. It was the finding.
 
 ## Where every voice stands, and what the number is worth
 
@@ -1285,7 +1318,7 @@ length. "Before" is the figure on `phosphor-emulator-uy54` before this pass.
 | laser | 2.1 | 2.0 | solved end to end |
 | small explosion | 2.6 | 2.6 | matches its own ideal filter to 0.5 dB |
 | cannon | 7.1 | **3.8** | `Q6`'s threshold derived |
-| medium explosion | 7.8 | 7.8 | matches its own ideal filter to 0.5 dB; `10.wav` is the outlier |
+| medium explosion | 7.8 | 7.4 | matches its own ideal filter to 0.5 dB; **retriggered**, see below |
 | alarm 3 | 8.8 | 8.3 | the `C24` droop, which the sample cannot contain |
 | shot | 11.5 | 11.5 | 11.5 dB **deficient** at 125-250, not hot |
 | engine tone B | never measured | 11.8 | |
@@ -1293,6 +1326,37 @@ length. "Before" is the figure on `phosphor-emulator-uy54` before this pass.
 | engine tone A | never measured | 17.0 | |
 | alarm 2 | 19.4 | 17.6 | the `C24` droop |
 | homing missile | 17.4 | 18.8 | the warble's own bandwidth |
+
+### What this column cannot see at all
+
+It is blind to the envelope, and that is not a small blind spot. Every figure
+here normalizes a file by its own full-band RMS, which is exactly what makes it
+a comparison of shape rather than of level, and exactly what makes it unable to
+tell a two-second roar from a thump.
+
+The ship explosion is the case. `10.wav` sits **flat for two seconds** and then
+falls off a cliff; a single trigger of `U21` half B is a 43 ms pulse followed by
+a 2.0 s exponential, so it decays from its first instant. Those are completely
+different sounds and the table above scores them 7.8 dB apart, which is the
+same as several voices that are merely a bit bright.
+
+The board makes the roar, and the reason is that the **74123 is retriggerable**
+and the game pulses `M-EXP` rather than striking it once. The reference driver
+carries a `!playing()` guard on that voice and on alarm 3 and on no others, and
+a guard against restarting only exists where restarts happen. While the pulses
+keep arriving the one-shot never finishes, `D8` holds `C63` down and the VCA
+stays open; the 2.0 s recovery is the cliff at the end rather than the whole
+shape. Retriggered at 25 ms, our envelope is flat to 2.25 s and gone by 3.5 s,
+against the recording's flat to 2.0 s and gone by 3.5 s.
+
+**The octave-band figure for that voice moves 0.4 dB between the two**, because
+retriggering changes the envelope and not the spectrum. It was found by
+listening, after four rounds of these tables had been written and none of them
+had noticed. `zaxxon/m-exp-sustained` is the scenario, and
+`the_one_shots_retrigger_and_that_is_what_sustains_the_ship_explosion` is what
+keeps the path covered.
+
+### Two entries that moved the wrong way
 
 **Read that column with care, because it moved the wrong way twice and both
 times the change was right.** The engine tones are now low-passes rather than

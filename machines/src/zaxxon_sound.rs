@@ -900,6 +900,16 @@ fn homing_beta() -> f64 {
 ///
 /// The duty is exactly 50 % for the same reason, because the two thresholds sit
 /// symmetrically about +6 V and the two rails do too.
+///
+/// Nothing in the built circuit calls this, for the same reason
+/// [`laser_repeat_hz`] and [`homing_missile_hz`] are not called: what the rest
+/// of the voice uses is the waveform on `C43`, so [`OpAmpRelaxation`] integrates
+/// the capacitor rather than being handed a rate. It is the closed form the
+/// component has to agree with, and
+/// `the_homing_missiles_warble_free_runs_and_does_not_rest_on_the_swing` is
+/// what makes it. `allow` rather than `expect`, because `expect` reports itself
+/// unfulfilled in the build where the test does use it.
+#[allow(dead_code)] // checked against OpAmpRelaxation by a test; see above
 fn homing_warble_hz() -> f64 {
     let beta = homing_beta();
     let half = R44 * C43 * ((1.0 + beta) / (1.0 - beta)).ln();
@@ -2645,6 +2655,57 @@ mod tests {
                 "{label}: {got_ms} ms against {want_ms} ms"
             );
         }
+    }
+
+    /// The 74123 is **retriggerable**, and on this board that is not a detail:
+    /// it is the difference between the ship explosion being a 2 s roar and a
+    /// thump.
+    ///
+    /// The game pulses `M-EXP` rather than striking it once, which is why the
+    /// reference driver carries a `!playing()` guard on that voice and on alarm
+    /// 3 and on no others: a guard against restarting only exists where
+    /// restarts happen. While the pulses keep arriving the one-shot never
+    /// finishes, `D8` holds `C63` down and the VCA stays open, and `10.wav` is
+    /// flat for two seconds and then falls off a cliff, which is that and not
+    /// an exponential.
+    ///
+    /// Nothing else on this board had covered the retrigger path, and the
+    /// octave-band comparison cannot see it: retriggering changes the envelope
+    /// and not the spectrum, so the shape metric moves 0.4 dB while the voice
+    /// goes from one second to four.
+    #[test]
+    fn the_one_shots_retrigger_and_that_is_what_sustains_the_ship_explosion() {
+        let mut os = OneShot74123::new(OS_M_EXP);
+        let dt = 1.0 / 96_000.0;
+        let width = K74123 * OS_M_EXP.0 * OS_M_EXP.1;
+
+        // Struck once, it runs for its width and stops.
+        os.step(&[1.0], dt);
+        os.step(&[0.0], dt);
+        let mut ran = 0usize;
+        while os.step(&[0.0], dt) > 0.5 {
+            ran += 1;
+        }
+        let once = (ran + 2) as f64 * dt;
+        assert!((once - width).abs() < 1e-3, "one strike ran {once} s");
+
+        // Pulsed every 25 ms, which is inside its 43 ms, it never stops.
+        let mut os = OneShot74123::new(OS_M_EXP);
+        let period = (0.025 / dt) as usize;
+        let mut low = 0usize;
+        for i in 0..(period * 40) {
+            let gate = f64::from(u8::from(i % period == 0));
+            if os.step(&[gate], dt) < 0.5 {
+                low += 1;
+            }
+        }
+        assert_eq!(low, 0, "the pulse dropped {low} samples while retriggered");
+
+        // And when they stop it recovers over R109 + R110 against C63, which is
+        // the cliff at the end of the recording rather than the whole shape.
+        let recover = R109_R110 * C63;
+        assert!((recover - 2.0).abs() < 0.01, "recovery {recover} s");
+        assert!(width < recover / 20.0, "the strike is short against it");
     }
 
     /// The battleship's two stages are one circuit built twice, so everything

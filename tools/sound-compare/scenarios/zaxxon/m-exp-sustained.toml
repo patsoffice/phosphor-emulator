@@ -1,0 +1,465 @@
+schema = 1
+id = "zaxxon/m-exp-sustained"
+target = "zaxxon-discrete"
+duration_s = 6.0
+description = "The ship explosion retriggered, which is how the game plays it"
+
+# `zaxxon/m-exp` fires U21 half B once, and a single trigger is a 43 ms pulse
+# followed by a 2.0 s exponential: the voice decays from its first instant.
+# MAME's 10.wav does not do that. It sits flat for two seconds and then falls off
+# a cliff, which no RC recovery produces and which a decaying model cannot be
+# tuned into.
+#
+# The reason is that the 74123 is RETRIGGERABLE and the game retriggers it. Two
+# voices in the reference driver carry a `!playing()` guard, M-EXP and ALARM3,
+# and a guard that suppresses a restart only exists because restarts happen.
+# While the pulses keep arriving the one-shot never finishes, D8 holds C63 down,
+# and the VCA stays open; when they stop, the 2.0 s recovery runs.
+#
+# The 25 ms period here is a demonstration of that mechanism and NOT a reading:
+# it is inside the one-shot's 43 ms so the pulse is held, and the game's actual
+# rate has not been read out of the ROM. What the capture is for is showing that
+# the board sustains at all, which the single-trigger scenario cannot show.
+[[action]]
+at_s = 0.5
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.52
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.545
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.565
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.59
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.61
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.635
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.655
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.68
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.70
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.725
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.745
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.77
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.79
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.815
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.835
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.86
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.88
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.905
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.925
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.95
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 0.97
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 0.995
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.015
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.04
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.06
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.085
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.105
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.13
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.15
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.175
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.195
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.22
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.24
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.265
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.285
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.31
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.33
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.355
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.375
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.40
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.42
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.445
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.465
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.49
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.51
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.535
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.555
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.58
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.60
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.625
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.645
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.67
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.69
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.715
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.735
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.76
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.78
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.805
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.825
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.85
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.87
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.895
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.915
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.94
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 1.96
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 1.985
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.005
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.03
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.075
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.095
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.12
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.14
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.165
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.185
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.21
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.23
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.255
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.275
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.30
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.32
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.345
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.365
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.39
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.41
+control = "m-exp"
+value = false
+
+[[action]]
+at_s = 2.435
+control = "m-exp"
+value = true
+
+[[action]]
+at_s = 2.455
+control = "m-exp"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 6.0
