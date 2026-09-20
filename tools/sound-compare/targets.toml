@@ -322,6 +322,17 @@ front end is 68 Hz wide at every LDR position, which is arithmetic on R21 and
 C26. Two constants have been fitted to these recordings in the past and both
 were reverted.
 
+reference/zaxxon-ab.sh builds both comparisons as wavs you can actually listen
+to: every voice beside its sample, and every voice beside a previous revision's
+capture. It carries the voice-to-sample mapping from MAME's zaxxon_a.cpp and,
+per voice, the window that makes our capture the same LENGTH as the sample it is
+held against, which matters more than it sounds like: these voices run from
+47 ms to 3.8 s and a mismatched window moves the 125-250 Hz band by 5 dB on its
+own. Its before/after half also prints how far each voice moved, so a change
+meant to touch four voices can be shown to have touched four: the other eight
+null out 66 to 84 dB down, which is this board's equivalent of a byte-identical
+golden frame.
+
 What IS derived, and is what a review would check: the seven 74123 one-shot
 widths at the plain part's 0.28 constant, the three Sallen-Key noise bands, the
 two Sallen-Key engine tones and the R26/R27 divider after them, the
