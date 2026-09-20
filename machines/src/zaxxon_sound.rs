@@ -884,11 +884,28 @@ fn homing_warble_hz() -> f64 {
 const R51: f64 = 12_000.0;
 const R52: f64 = 3_300.0;
 
-const R58: f64 = 470.0; // base missile envelope discharge
+const R58: f64 = 470.0; // base missile envelope discharge, through D2
 const C49: f64 = 15e-6;
-const R59_R60: f64 = 440_000.0; // its recovery -> 6.6 s
+/// `R59` + `R60`, **220 kOhm each**, from `C49` up to +5 V.
+///
+/// Both values are read, and their being equal is what justifies the halving
+/// [`inverted_envelope`] applies: `U20`(5,6,7) taps their junction, not the
+/// capacitor, so the control moves half as far as `C49` does. The sum is the
+/// recovery path, 6.6 s, which is three times either explosion's and is the
+/// longest time constant on the board.
+const R59_R60: f64 = 220_000.0 + 220_000.0;
 /// The third Sallen-Key noise band, on sheet 12: `R61`/`R62` 15 k with
-/// `C50`/`C137` 0.022 uF, gain `1 + R63/R64` = 1.5, so `Q = 1/(3 - K)` = 0.67.
+/// `C50`/`C137` 0.022 uF, gain `1 + R63/R64` with `R63` 50 k and `R64` 100 k =
+/// 1.5, so `Q = 1/(3 - K)` = 0.67.
+///
+/// Traced at component level: `C137` bridges the `R61`/`R62` junction to the
+/// output and `C50` takes `U4` pin 10 to **ground**, which is the same shape as
+/// the two explosions and the two engine tones. It is the fifth copy of one
+/// filter on this board.
+///
+/// Note that this lands on **exactly** engine tone B's 482.3 Hz, from a
+/// completely different pair: 15 k with 0.022 uF here, 100 k with 3300 pF
+/// there. That is a coincidence in the parts and a fact about the board.
 const BASE_MISSILE_HZ: f64 = 482.3;
 const BASE_MISSILE_Q: f64 = 0.667;
 const BASE_MISSILE_GAIN: f64 = 1.5;
@@ -1548,8 +1565,19 @@ fn mb4391_gain(b: &mut DiscreteCircuitBuilder, name: &str, control: NodeId) -> N
 /// capacitor that rests charged and is pulled toward a diode drop while the
 /// one-shot runs, then crawls back up.
 ///
+/// `pulse` is the **one-shot running**, which on all three of these is `Qbar`
+/// rather than `Q`. Every 74123 on this board that shapes an envelope is drawn
+/// with its `Q` pin present and connected to nothing and its `Qbar` driving the
+/// pull-up node: `U22` pin 4 for the small explosion, `U21` pin 12 for the
+/// medium one, `U22` pin 12 for the base missile, `U21` pin 4 for the shot.
+/// That is what makes the diodes' cathodes face the one-shot and the capacitor
+/// rest charged, which is the polarity this function models. This file named
+/// three of those four pins correctly and called them `Q` anyway.
+///
 /// Returns the **control** node, which is the midpoint of the two-resistor
-/// divider between the rail and the capacitor, not the capacitor itself.
+/// divider between the rail and the capacitor, not the capacitor itself. The
+/// `0.5` below is that divider and is only right because each of the three
+/// pairs is two equal resistors, which is read in all three cases.
 ///
 /// Expressed as the rail *minus* a drop rather than as the capacitor's own
 /// voltage, because every state node in the framework powers up at zero and the
@@ -2844,6 +2872,50 @@ mod tests {
             corner < homing_warble_hz() / 5.0,
             "C46 must be a block, not a differentiator"
         );
+    }
+
+    /// The base missile, now read at component level, is the last voice on this
+    /// board that was only ever read at block level.
+    ///
+    /// Nothing in it needed changing, which is worth pinning precisely because
+    /// nothing did: every one of its numbers is arithmetic on read parts, and
+    /// the one thing a reader would want to check against the reference
+    /// recording cannot be checked. See the transcription.
+    #[test]
+    fn the_base_missile_is_arithmetic_on_read_parts() {
+        // U22 half B: C48 15 uF and R56 36 k at the plain 74123's 0.28.
+        let width = K74123 * OS_BASE_MISSILE.0 * OS_BASE_MISSILE.1;
+        assert!((width - 0.1512).abs() < 1e-4, "one-shot {width} s");
+
+        // C49 against R58 470 ohms going down through D2, and against
+        // R59 + R60 440 k coming back up. The recovery is three times either
+        // explosion's and is the longest time constant on the board.
+        let attack = R58 * C49;
+        let recover = R59_R60 * C49;
+        assert!((attack - 7.05e-3).abs() < 1e-4, "attack {attack} s");
+        assert!((recover - 6.6).abs() < 0.01, "recovery {recover} s");
+        assert!(
+            recover > 3.0 * R109_R110 * C63,
+            "against the medium explosion"
+        );
+
+        // U20 taps the R59/R60 junction, so the control swings half as far as
+        // C49 does: 5.00 V at rest and 2.80 V at the bottom, which is the same
+        // window both explosions use and straddles the MB4391's 4.76 and 2.84.
+        let rest = V5;
+        let floor = V_DIODE + (V5 - V_DIODE) * 0.5;
+        assert!((floor - 2.8).abs() < 1e-9, "floor {floor} V");
+        assert!(rest > mb4391_mute_v(), "rests muted");
+        assert!(floor < mb4391_full_v(), "opens fully");
+
+        // R61/R62 15 k with C50/C137 0.022 uF, and a gain of 1 + R63/R64 with
+        // R63 50 k and R64 100 k. It lands on engine tone B's frequency from a
+        // completely different pair of parts.
+        let f0 = 1.0 / (std::f64::consts::TAU * 15_000.0 * 0.022e-6);
+        assert!((BASE_MISSILE_HZ - f0).abs() < 0.5, "{BASE_MISSILE_HZ} Hz");
+        assert!((BASE_MISSILE_HZ - SHIP_TONE_B_HZ).abs() < 0.1);
+        assert!((BASE_MISSILE_GAIN - (1.0 + 50_000.0 / 100_000.0)).abs() < 1e-12);
+        assert!((BASE_MISSILE_Q - 1.0 / (3.0 - BASE_MISSILE_GAIN)).abs() < 1e-3);
     }
 
     #[test]

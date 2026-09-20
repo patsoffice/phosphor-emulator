@@ -270,7 +270,8 @@ explosion's decay.
 | timing cap | `C60` 1 uF | `C62` 3.3 uF |
 | timing resistor | `R102` 36 kΩ to +5 V | `R107` 47 kΩ to +5 V |
 | pulse width (0.28 R C) | **10.1 ms** | **43.4 ms** |
-| output tap | `Q` (pin 4), pulled up by `R103` 1 kΩ | `Q` (pin 12), pulled up by `R108` 1 kΩ |
+| output tap | `Qbar` (pin 4), pulled up by `R103` 1 kΩ | `Qbar` (pin 12), pulled up by `R108` 1 kΩ |
+| the other output | `Q` (pin 13), drawn and unconnected | `Q` (pin 5), drawn and unconnected |
 | discharge diode | `D7`, cathode toward the one-shot | `D8`, cathode toward the one-shot |
 | discharge resistor | `R106` 1 kΩ | `R212` 470 Ω |
 | envelope cap | `C61` 2.2 uF | `C63` 1 uF |
@@ -512,19 +513,85 @@ warbling with the 555. Its duty is 45.5 % rather than the battleship's exact
 to 1. It reaches `MB4391 U16` ch A (1, 2, 14, 15) through `R164` 1 MΩ against `R165` 220 kΩ, a
 divider of **0.18**, and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
 
-## The base missile, still read at block level
+## The base missile, and the last block-level reading on the board
 
-Enough to name every part and the signal flow, not enough to state a sweep law
-from the values. The laser and the homing missile used to sit here beside it and
-are now solved, in their own sections below.
+This was the last voice named only at block level. It is read at component level
+now, and the result is the one this format almost never produces: **nothing was
+wrong**. Every junction is where a part list would have put it, and the device
+built from the old bullet is the device the trace gives.
 
 - **`BASE MISSILE` (`PA5`)** triggers `U22` half B (`C48` 15 uF, `R56` 36 kΩ,
-  **151 ms**), whose `Q` drives `R57` 1 kΩ, `D2`, `R58` 470 Ω and `C49` 15 uF,
+  **151 ms**), whose `Qbar` drives `R57` 1 kΩ, `D2`, `R58` 470 Ω and `C49` 15 uF,
   recovering through `R59`+`R60` 440 kΩ (**6.6 s**) into `U20`. It controls
   `MB4391 U14` ch B (5, 6, 10, 11), whose audio is a third Sallen-Key noise band
   on sheet 12 (`R61`/`R62` 15 kΩ, `C50`/`C137` 0.022 uF, **482 Hz**, gain
   `1 + R63/R64` with `R63` 50 kΩ and `R64` 100 kΩ = 1.5, Q 0.67) through `C51`
   22 uF; the leg is `R183` 39 kΩ / `R184` 8.2 kΩ.
+
+Four things the trace adds to that bullet.
+
+**`Qbar` drives `R57`, and `Q` is drawn and goes nowhere.** That is true of all
+four one-shot-shaped voices on this board and this file had it right once, on
+the shot, and wrong three times. `U22` pin 4 (small explosion), `U21` pin 12
+(medium), `U22` pin 12 (base missile) and `U21` pin 4 (shot) are every one of
+them `Qbar` on a 74123, and every one of them is the pin the file named while
+calling it `Q`. It changes nothing, because the polarity the model was built
+from is the diodes': all four cathodes face the one-shot, so the capacitor rests
+charged and is pulled down. But a pin name that contradicts its own pin number
+is exactly the kind of thing the next pass reasons from.
+
+**`U20` taps the `R59`/`R60` junction, not `C49`.** Both are 220 kΩ, so the
+control moves half as far as the capacitor does: 5.00 V at rest and 2.80 V at
+the bottom, which is the same window both explosions land in and straddles the
+`MB4391`'s 4.76 V and 2.84 V. That is the fourth independent landing on it.
+
+**The filter is the fifth copy of one Sallen-Key low-pass**, with `C137`
+bridging the `R61`/`R62` junction to the output and `C50` taking `U4` pin 10 to
+ground: the identical shape to the two explosions and, now, the two engine
+tones. And it lands on **482.3 Hz, which is exactly engine tone B's**, from a
+completely different pair of parts: 15 kΩ with 0.022 uF here, 100 kΩ with
+3300 pF there.
+
+**6.6 seconds is the recovery**, three times either explosion's and the longest
+time constant on the board. With the `MB4391`'s squared law the voice is still
+4 dB down after three seconds and does not reach the mute point for about
+fifteen. That is what the parts say.
+
+### What the reference recording cannot settle here
+
+MAME's `02.wav` is the base missile, and it does not match. Octave-band energy
+in dB relative to each file's own full-band RMS, ours measured over the same
+0.72 s the sample lasts:
+
+| Band | `02` | ours | 2-pole ideal |
+|---|---|---|---|
+| 125-250 | -14.1 | -12.0 | -12.0 |
+| 250-500 | **-5.5** | **-8.7** | **-8.7** |
+| 500-1000 | -12.2 | -9.7 | -9.6 |
+| 1000-2000 | -22.5 | -16.4 | -16.3 |
+| 2000-4000 | -35.7 | -24.6 | -24.9 |
+| 4000-8000 | -49.0 | -33.7 | -34.3 |
+
+The third column is white noise through a 482.3 Hz two-pole low-pass at Q 0.667,
+generated and measured the same way, and **our voice matches it in every band to
+within 0.6 dB**. So the model is the drawing, exactly, and the recording is
+something else: `02` is peaked and falls away on *both* sides, which is a
+resonance, where a low-pass passes everything below its corner.
+
+There is a likely reason it is something else. **`02.wav` and `04.wav` are
+statistically indistinguishable.** Their octave bands agree to 0.1 dB in all six,
+their peak and trough amplitudes agree to six figures, their maximum sample
+delta agrees to six figures (0.231995), and their RMS agrees to 0.2 %; they are
+different files of different lengths, so one is not a copy of the other, but
+these are not two independent recordings of a noise source. `04` is an engine
+sample. Either the sample set uses one recording for two voices, or the two
+voices really do sound the same on a real board, which the drawing says they
+should because both are 482.3 Hz noise bands.
+
+Either way `02.wav` cannot be used to correct this voice: under the first
+reading it is a recording of the engine, and under the second it disagrees with
+the engine sample's own circuit as much as with this one. Nothing here was
+changed to chase it.
 
 ## The homing missile: a 555 warbled at 15 Hz, and the gate is only a switch
 
@@ -1029,6 +1096,21 @@ premise. **A pass that re-derives from the previous pass's node list rather than
 from the drawing cannot find a wrong node, however carefully it works**, and its
 output is indistinguishable from progress.
 
+### And the base missile, where nothing was wrong
+
+The last voice read only at block level is read end to end now, and it came out
+unchanged. Three notes on it are in its section above: `Qbar` rather than `Q`
+drives `R57` (as on every other one-shot voice here, and as this file said only
+for the shot), `U20` taps the `R59`/`R60` junction, and the filter is the fifth
+copy of one Sallen-Key low-pass, landing on engine tone B's 482.3 Hz from
+different parts.
+
+The comparison is the interesting part and it is a negative result. Our voice
+matches a white-noise-through-a-482-Hz-two-pole-low-pass reference in **every
+band to within 0.6 dB**, so the model is the drawing; and `02.wav` matches
+neither, because `02.wav` is statistically indistinguishable from `04.wav`, the
+engine sample. Detail and numbers in that section.
+
 ### The engine, measured against the reference for the first time
 
 MAME's `04.wav` and `05.wav` are this voice family and nobody had ever put them
@@ -1074,22 +1156,25 @@ cannot produce. The invented law is unchanged.
 ## Confidence
 
 A good scan. The PPI map, the ladder network, the seven one-shot R/C pairs, the
-three Sallen-Key filters and the whole eleven-leg mix table were read at 400 dpi
+five Sallen-Key filters and the whole eleven-leg mix table were read at 400 dpi
 with every designator and value legible, and those are the parts to trust.
 
-The battleship's, the shot's and the laser's oscillators are now read at
-component level and solved, and so are the junctions their rates turn on, and so
-is the homing missile's chain from `U5` to `U6`'s control pin. The engine's
-two resonators and the divider after them are read too, at 500 %, in both
-copies. The base missile, and the routing of control voltages across the sheet
-seam other than the shot's and the alarms', are still read at block level and
-are marked so above.
+**Every voice on this board is now read at component level.** The battleship's,
+the shot's and the laser's oscillators are solved, and so are the junctions
+their rates turn on; the homing missile's chain is traced from `U5` to `U6`'s
+control pin and its gate is traced to `U17`; the engine's two resonators and the
+divider after them are read at 500 % in both copies; and the base missile, which
+was the last block-level entry, is read end to end. What remains unread is not a
+voice but a routing: the control voltages that cross the sheet seam, other than
+the shot's and the alarms', are still assigned by which audio each section
+passes rather than by following the wire, and that is marked above.
 
 This is a hand transcription and can be wrong. Most of it is not checked by a
 test, and the sections above are what keep that honest. The parts that *are*
 checked are the arithmetic the device shares with this file, in
 `machines/src/zaxxon_sound.rs`'s test module: the one-shot widths, both
-battleship stages, the shot's and laser's oscillators, the alarm comparator, the
-engine's two corners and its front end's fixed bandwidth, and the mix table's
-shape. A test can pin a derivation; it cannot pin a junction, which is the
-failure this file keeps making.
+battleship stages, the shot's and laser's oscillators, the homing missile's
+warble and its 555, the alarm comparator, the engine's two corners and its front
+end's fixed bandwidth, the base missile end to end, and the mix table's shape. A
+test can pin a derivation; it cannot pin a junction, which is the failure this
+file keeps making.
