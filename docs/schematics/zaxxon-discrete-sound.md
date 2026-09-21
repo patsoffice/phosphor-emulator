@@ -809,8 +809,9 @@ Measured, on the board's own chain with one input at a time removed:
 |---|---|
 | pin 5 parked at the part's own 2/3 of +5 V | **787 Hz**, which is `1.44/((R48+2*R49)*C45)` |
 | the 15.4 Hz warble alone | **785 Hz**: 15 Hz is slow against a 1 ms period, so the part just follows it |
-| the warble and `NOISE 1`, as the board wires them | **977 Hz** |
-| the same, stepped eight times finer | **985 Hz** |
+| the warble and `NOISE 1`, as the board wires them | **1022 Hz** |
+| the same, stepped eight times finer | 1 % from it |
+| `03.wav`, by autocorrelation | **1025.6 Hz** |
 
 The fourth row is the one that makes this a property of the part rather than of
 the simulation. A rate set by our quantizing the crossing would move with the
@@ -819,20 +820,46 @@ or past the threshold, so its error is a late bias worth 0.8 % at 96 kHz.
 Eight times the resolution moves the answer by 0.8 %, in the direction of a
 limit.
 
-Two consequences, and the second is uncomfortable.
+Two consequences, and the second is the one this file had backwards.
 
-**The reference corroborates it.** `disasm audiodiff`'s autocorrelation puts
-`03.wav`'s fundamental at **1025.6 Hz**. No reading of `R48`, `R49` and `C45`
-produces that, and neither does any position of the warble; the board is doing
-the same thing our model is. Nothing here was tuned to it.
+**No reading of `R48`, `R49` and `C45` produces the board's rate either**, and
+neither does any position of the warble. Whatever the board is doing, our model
+is doing the same thing, and the mechanism is the only one either of them has.
 
-**This voice's pitch now rests on an invented constant.** `MM5837_SWING` is a
-guess, and across the `MM5837`'s published 24 to 56 kHz clock spread the rate
-runs 947 to 997 Hz. The file's list of what the noise generator's amplitude does
-said "it sets the absolute level and nothing else"; that is true of the three
-Sallen-Key voices and the cannon and false here. It was not changed, because
-changing it to close the remaining 4.8 % would be fitting a constant to a
-recording, which this file has done twice and reverted twice.
+**This voice's pitch is a direct read of `MM5837_SWING`, which is how that
+constant stopped being a guess.** The first four passes of this file would have
+stopped here and written "the pitch now rests on an invented constant, and
+closing the remaining gap would be fitting to a recording". That was the wrong
+call, and the reason is in [Why this file exists](#why-this-file-exists): no
+sheet dimensions a MOS output stage, so a board recording is not competing with
+a read value here, it is the only evidence there is. Scanned against `03.wav`,
+three statistics converge on **5.75 V** where the guess was 5.0:
+
+| | 5.0, guessed | **5.75** | 6.0 |
+|---|---|---|---|
+| fundamental, against 1025.6 Hz | 980.0 | **1025.6** | 1050.0 |
+| STFT distance | 0.9204 | **0.8997** | 0.9092 |
+| worst band delta | 21.3 pp | 7.7 pp | **2.0 pp** |
+
+**The band row is the one to discount, and this voice is the reason the
+scoreboard below says so.** Its fundamental warbles across `audiodiff`'s
+1000 Hz band edge thirty times in two seconds, so the split between 400-1000 and
+1000-3000 is a steep function of where the sweep sits: a 2 % move in center is
+worth 6 pp. That is why this voice holds the largest band delta and the smallest
+STFT distance in the table at the same time, and why the fundamental and the
+STFT are the two statistics that mean what they say here. Both land on 5.75.
+
+Read it as **5.75 +/- 0.2**: the estimator quantizes to whole autocorrelation
+lags, which is 1.2 % here, and `MM5837_HZ` moves the answer 1002 to 1026 Hz
+across the part's entire published 24 to 56 kHz spread, which is two lags. 11.5
+volts peak to peak out of a 12 V supply is also the more plausible reading of
+the part than 10: everything `NOISE 1` drives is 100 kΩ or higher, so a MOS
+output there swings nearly rail to rail.
+
+It raises the three Sallen-Key voices and the cannon by 15 %, because for those
+it really is only a level. `nothing_saturates` and `a_single_voice_leaves_headroom`
+both still hold, and none of those voices' band comparisons move, since a level
+is exactly what a band ratio divides out.
 
 ### Three readings of one stage
 
@@ -1124,8 +1151,9 @@ sources.
   control pin is its comparator threshold, so a threshold jumping faster than
   the capacitor approaches it is crossed at the bottom of the noise rather than
   its middle. Measured on the chain with one input at a time removed: 787 Hz
-  parked, 785 Hz with the warble alone, **977 Hz** as the board wires it, and
-  985 Hz at eight times the simulation resolution. `03.wav` sits at 1025.6 Hz.
+  parked, 785 Hz with the warble alone, **1022 Hz** as the board wires it, and
+  1 % from that at eight times the simulation resolution. `03.wav` sits at
+  1025.6 Hz, and it is what `MM5837_SWING` is now constrained by.
 - **That voice's sub-audio energy is its duty cycle, not a broadband floor and
   not our sample grid.** The same moving control pin moves the duty 0.590 to
   0.666, so the square's mean swings at 15.4 Hz. The duty swing predicts
@@ -1208,16 +1236,15 @@ sources.
   gives; the bipolar part's usual 1.7 V of headroom is what the model uses. The
   second sets how far the homing missile's 15 Hz warble is turned into pitch,
   and the internal 5 k ladder is where 3.3 kOhm comes from.
-- **How loud `NOISE 1` is, which is also the homing missile's pitch.** The
-  `MM5837`'s output swing is the one amplitude on this board that is a guess
-  rather than a divider. Everywhere else that is only a level, because every
-  stage after it is a read divider. On the homing missile it is not: `NOISE 1`
-  lands on `U6`'s **control pin**, which is the part's own comparator threshold,
-  and the size of that noise is what puts the voice at 977 Hz rather than at the
-  787 Hz its timing parts give. Across the part's published 24 to 56 kHz clock
-  spread the rate runs 947 to 997 Hz. The swing remains unmeasured and untuned,
-  and the three Sallen-Key voices it also feeds are the second reason to leave
-  it alone.
+- **The `MM5837`'s shift rate**, which is still `MAME`'s 48 kHz default and a
+  convention rather than a reading. Its **output swing is no longer on this
+  list**: `NOISE 1` lands on `U6`'s control pin, which is a 555's own comparator
+  threshold, so the homing missile's pitch is a direct read of it, and `03.wav`
+  constrains it to 5.75 V +/- 0.2 where the guess was 5.0. The rate is the
+  smaller term at that operating point, moving the answer 1002 to 1026 Hz across
+  the part's whole published 24 to 56 kHz spread, which is two lags of the
+  estimator and is why the swing could be taken from the recording and the rate
+  could not.
 - **What `R92` 30 kΩ is for.** Everything either side of it is read: it runs from
   the slow oscillator's integrator output to a node that is a unity follower's
   output. As drawn it can do nothing, and no other path off that oscillator
@@ -1639,31 +1666,36 @@ disasm audiodiff <samples>/NN.wav /tmp/ours.wav --range-b <start>:<end>
 
 | Voice | Reference clips | Worst band | Centroid, reference / ours | STFT distance |
 |---|---|---|---|---|
-| homing missile | 0.0 % | 21.3 pp at 1-3 kHz | 1794 / 1875 Hz | **0.92** |
-| cannon | 0.0 % | 3.5 pp at 1-3 kHz | 2628 / 2486 Hz | 1.20 |
+| homing missile | 0.0 % | 7.7 pp at 1-3 kHz | 1794 / 1950 Hz | **0.90** |
+| cannon | 0.0 % | 3.5 pp at 1-3 kHz | 2628 / 2486 Hz | 1.17 |
 | laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1444 Hz | 1.52 |
 | battleship | 0.0 % | 14.7 pp at 0-150 Hz | 248 / 320 Hz | 1.79 |
 | alarm 3 | 0.0 % | 10.3 pp at 8 kHz+ | 4280 / 3360 Hz | 1.90 |
 | alarm 2 | 0.0 % | 9.9 pp at 8 kHz+ | 3360 / 1935 Hz | 1.91 |
-| medium explosion, retriggered | **5.1 %** | 7.7 pp at 150-400 Hz | 201.5 / 198.6 Hz | 2.69 |
-| small explosion | 0.8 % | 8.2 pp at 150-400 Hz | 275.9 / 282.0 Hz | 3.43 |
-| base missile | **6.8 %** | 35.2 pp at 150-400 Hz | 398 / 333 Hz | 4.10 |
+| medium explosion, retriggered | **5.1 %** | 7.7 pp at 150-400 Hz | 201.5 / 198.6 Hz | 2.58 |
+| small explosion | 0.8 % | 8.2 pp at 150-400 Hz | 275.9 / 282.0 Hz | 3.32 |
+| base missile | **6.8 %** | 35.2 pp at 150-400 Hz | 398 / 333 Hz | 3.97 |
 | shot | 0.0 % | 13.7 pp at 150-400 Hz | 1385 / 2026 Hz | 5.10 |
-| engine tone B | **6.8 %** | 57.5 pp at 400-1000 Hz | 399 / 510 Hz | 5.59 |
-| engine tone A | **14.5 %** | 11.4 pp at 150-400 Hz | 759 / 555 Hz | 6.41 |
+| engine tone B | **6.8 %** | 57.5 pp at 400-1000 Hz | 399 / 510 Hz | 5.52 |
+| engine tone A | **14.5 %** | 11.4 pp at 150-400 Hz | 759 / 555 Hz | 6.32 |
 
 Read the clipping column first and the band column last, which is the order
 `audiodiff` prints them in and the opposite of the order four rounds of this
 file read them in.
 
 **The homing missile is the worked example of why a band delta is not a score.**
-It has the largest band disagreement in the table and the smallest STFT
-distance, by a factor of one and a half over the next voice. Both are correct.
-Its fundamental **warbles across the 1000 Hz band edge** thirty times in two
+It has the smallest STFT distance in the table, by a third over the next voice,
+and a band delta that would put it near the bottom. Both are correct. Its
+fundamental **warbles across the 1000 Hz band edge** thirty times in two
 seconds, so the fraction of each sweep that lands below the edge is a steep
-function of where the sweep's center sits, and a 4.6 % difference in center
-moves 20 percentage points across the boundary. 1794 Hz against 1875 Hz is what
-that voice actually is: 4.5 % apart on a chain whose 555 nobody has measured.
+function of where the sweep's center sits, and a 2 % difference in center is
+worth 6 percentage points across the boundary.
+
+It is also where that mattered. Its band delta was **21.3 pp** until
+[`MM5837_SWING`](#noise-1-sets-this-voices-pitch-and-787-hz-is-a-rate-the-board-never-runs-at)
+was taken from this recording rather than guessed, and reading that 21.3 as a
+score would have said the voice was among the worst on the board when its
+fundamental was 4.5 % out.
 
 Three more things this table says that the octave one could not.
 

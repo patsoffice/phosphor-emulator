@@ -54,7 +54,8 @@
 //!
 //! The homing missile's 555 is the exception to that list and the one voice
 //! whose rate is not arithmetic at all. Its parts give 787 Hz, and with the
-//! noise its control pin actually carries it runs near 977 Hz.
+//! noise its control pin actually carries it runs near 1022 Hz, against the
+//! board's 1025.6.
 //!
 //! # What the reference recordings can and cannot settle
 //!
@@ -139,11 +140,9 @@ const V_DIODE: f64 = 0.6;
 /// 100 kHz figure the file first carried, which is outside it.
 const MM5837_HZ: f64 = 48_000.0;
 
-/// `U2`'s output swing about the mid-rail, after `C66` blocks its DC.
-///
-/// The part is a MOS output on a 12 V supply; this is half of that, which makes
-/// `NOISE 1` a +/-5 V square sequence. It is the one amplitude on the board that
-/// is a guess rather than a divider.
+/// `U2`'s output swing about the mid-rail, after `C66` blocks its DC:
+/// **+/-5.75 V**, so `NOISE 1` is an 11.5 V peak-to-peak square sequence on a
+/// 12 V supply.
 ///
 /// **It does not only set a level.** This comment used to end "so it sets the
 /// absolute level and nothing else", which is true of the three Sallen-Key
@@ -151,11 +150,40 @@ const MM5837_HZ: f64 = 48_000.0;
 /// it is a read divider. It is not true of the homing missile, where `NOISE 1`
 /// lands on `U6`'s **control pin**: a 555's control pin is its comparator's
 /// threshold, so noise on it biases every crossing early and moves the voice's
-/// *pitch*. See
-/// `the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin`, which
-/// measures 787 Hz without it and 977 Hz with it. Changing this constant
-/// retunes that voice, which is the opposite of what a level control does.
-const MM5837_SWING: f64 = 5.0;
+/// *pitch*.
+///
+/// That is what turns this from a guess into a **measurement**. It was 5.0, as
+/// "half of 12 V", and nothing on the sheet dimensions a MOS output stage. The
+/// homing missile's pitch is a direct read of it, and scanned against `03.wav`
+/// three statistics converge:
+///
+/// | | 5.0, guessed | **5.75** | 6.0 |
+/// |---|---|---|---|
+/// | fundamental, against the board's 1025.6 Hz | 980.0 | **1025.6** | 1050.0 |
+/// | STFT distance | 0.9204 | **0.8997** | 0.9092 |
+/// | worst band delta | 21.3 pp | 7.7 pp | **2.0 pp** |
+///
+/// **The band row is the one to discount, and this voice is why.** Its
+/// fundamental warbles across `audiodiff`'s 1000 Hz band edge thirty times in
+/// two seconds, so the split between 400-1000 and 1000-3000 is a steep function
+/// of where the sweep sits and a 2 % move in center is worth 6 pp. That is the
+/// same effect written up in the transcription's scoreboard, where this voice
+/// holds the largest band delta and the smallest STFT distance at once. The
+/// fundamental and the STFT are the statistics that mean what they say here,
+/// and both land on 5.75.
+///
+/// The estimator quantizes to whole autocorrelation lags, which is 1.2 % at
+/// this pitch, and [`MM5837_HZ`] moves the answer 1002 to 1026 Hz across the
+/// part's whole published spread, so read this as **5.75 +/- 0.2** rather than
+/// as three figures. 11.5 V out of 12 is also the more plausible reading of the
+/// part: everything `NOISE 1` drives is 100 kOhm or higher, so a MOS output
+/// there swings nearly rail to rail, and 10 V was the conservative guess.
+///
+/// Raising it also raises the three Sallen-Key voices and the cannon by 15 %,
+/// since for those it is purely a level. `nothing_saturates` and
+/// `a_single_voice_leaves_headroom` both still hold, and none of those voices'
+/// band comparisons move, because a level is what a band ratio divides out.
+const MM5837_SWING: f64 = 5.75;
 
 /// The MM5837's 17-bit register, tapped at bits 13 and 16.
 fn mm5837_lfsr() -> LfsrSpec {
@@ -921,7 +949,7 @@ const C45: f64 = 0.01e-6;
 /// was.** The control pin is not left alone: `U4` puts the 15.4 Hz warble
 /// *and* `NOISE 1` on it, and the noise is what sets the rate. See
 /// `the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin`. The
-/// warble alone leaves the part here; the noise moves it to about 977 Hz, and
+/// warble alone leaves the part here; the noise moves it to about 1022 Hz, and
 /// the "710 Hz to 872 Hz" this file and the transcription both carried is the
 /// sweep the warble would make around a rate the board does not run at.
 #[allow(dead_code)] // checked against Timer555 by a test; see above
@@ -3327,20 +3355,20 @@ mod tests {
     ///
     /// - the warble alone leaves `U6` on [`homing_missile_hz`], because 15 Hz is
     ///   slow against a 1 ms period and the part simply follows it;
-    /// - adding `NOISE 1` moves it to about 977 Hz, a **24 % rise**;
+    /// - adding `NOISE 1` moves it to about 1022 Hz, a **30 % rise**;
     /// - stepping the same chain **eight times finer** moves it by about 1 %.
     ///   A rate set by our quantizing the crossing would not survive that: the
     ///   framework triggers on the first step at or past the threshold, so the
     ///   grid's error is a *late* bias of up to one step, worth 0.8 % at
     ///   [`MIN_SIM_RATE`] and in the opposite direction.
     ///
-    /// What this costs is that the voice's pitch now rests on [`MM5837_SWING`],
-    /// which is invented, and on [`MM5837_HZ`], which is a convention: across
-    /// the part's published 24 to 56 kHz spread the rate moves 947 to 997 Hz.
-    /// Nothing here is tuned to the reference recording, which sits at
-    /// 1025.6 Hz by `disasm audiodiff`'s autocorrelation; that number is
-    /// corroboration that the mechanism is on the board too, since no reading of
-    /// `R48`, `R49` and `C45` produces it either.
+    /// The consequence is that this voice's pitch rests on [`MM5837_SWING`] and
+    /// [`MM5837_HZ`] rather than on `R48`, `R49` and `C45`, and the swing is
+    /// what [`MM5837_SWING`] is now **constrained by this recording**: `03.wav`
+    /// autocorrelates to 1025.6 Hz and the chain lands on 1022.5. The rate is
+    /// the smaller term at this operating point, moving the answer 1002 to
+    /// 1026 Hz across the part's whole published 24 to 56 kHz spread, which is
+    /// two lags of the estimator.
     #[test]
     fn the_homing_missiles_pitch_is_set_by_the_noise_on_its_control_pin() {
         let (warble_only, _) = homing_chain(MIN_SIM_RATE, true, false);
@@ -3357,9 +3385,12 @@ mod tests {
             "NOISE 1 on the control pin must raise the rate well clear of the \
              free-run one: {with_noise} Hz against {warble_only} Hz"
         );
+        // And it lands on the board's, which is what constrains MM5837_SWING:
+        // `03.wav` autocorrelates to 1025.6 Hz.
         assert!(
-            (with_noise - 977.0).abs() < 15.0,
-            "the rate this chain settles on: {with_noise} Hz"
+            (with_noise - 1025.6).abs() < 15.0,
+            "the rate this chain settles on: {with_noise} Hz, against the \
+             board's 1025.6"
         );
 
         // And it is the part, not the grid. Eight times the resolution.
