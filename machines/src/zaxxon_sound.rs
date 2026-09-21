@@ -1192,6 +1192,29 @@ const R76: f64 = 2_200.0;
 /// tolerances, on two chains of six resistors and a ceramic capacitor each,
 /// which is the same answer the alarms' 12 % got. Left at 5.0, because fitting
 /// it to either voice would put the other one further out.
+///
+/// # This constant is doing three jobs and a real op-amp does not
+///
+/// It stands for a **symmetric** swing about the +6 V mid-rail, and three
+/// different things on this board read three different parts of it:
+///
+/// - the battleship's and laser's rates come from the Schmitt window, which is
+///   `R_in/(R_in+R_fb)` of the output's **span**, `V_OH - V_OL`;
+/// - the shot's tail pitch is a direct read of **`V_OL` alone**, because
+///   `U19`(1,2,3)'s low rail lands on `U18`'s control pin and sets that 555's
+///   duty cycle;
+/// - the shot's head is **`V_OH` alone**, for the same reason.
+///
+/// A single-supply op-amp on +12 V does not sit symmetrically, so tying all
+/// three to one number is a modeling choice rather than a reading, and the
+/// shot's tail is where it shows: at `6 - 5.0` = 1.0 V the 555 keeps running at
+/// 39 Hz and an 11 % duty, holding our pitch floor at 1182 Hz against the
+/// board's 276 to 300. At a floor of 0.15 V the duty collapses to 2 % and the
+/// tail lands at 310 Hz. The transcription works that through.
+///
+/// Splitting this into a floor and a ceiling is the next thing to try, and two
+/// voices now point at the same floor from different directions: the laser's
+/// span implies about 0.2 V and the shot's tail wants 0.15 V.
 const OPAMP_SWING: f64 = 5.0;
 
 // ---------------------------------------------------------------------------

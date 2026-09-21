@@ -668,6 +668,63 @@ this drafter's points print when they are there.
 So the device's value is right, the hypothesis is dead, and the sweep is still
 unexplained. Which is worth having: it was the cheapest remaining explanation.
 
+### The oscillator half is re-read too, and net 21 carries three things
+
+The three items this file listed as unread on this voice are read now.
+
+- **`U19`(1,2,3)'s reference is `+6V`**, on pin 3, drawn beside the pin. It is
+  an inverting amplifier of `-R150/R149` = `-33k/5.6k` = **-5.89** about that,
+  fed by `U19`(12,13,14), which is strapped output-to-inverting-input and is
+  therefore a unity follower of node X. `U20`(1,2,3) is the same shape on node
+  Y. Its *supply* pins are not drawn in this region, so the output's range is
+  still [`OPAMP_SWING`]'s assumption and not a reading.
+- **Node A is exactly the three legs this file names**: `R153` 2.7 kΩ from
+  `U18` pin 3, `R154` 8.2 kΩ up from net 21, `R155` 820 Ω to ground and `C91`
+  15 uF to ground. `U18` is a 555 on **+12 V** with `R151` 10 kΩ and `R152`
+  10 kΩ charging and `R152` discharging `C90` 3.3 uF.
+- **Nothing else lands on net 21.** It is `U19`(1,2,3)'s output, `U18`'s pin 5,
+  and `R154`. That was the open question, and the answer is that there is no
+  fourth thing.
+
+So the shot's topology is the model's topology, everywhere except `R147`.
+
+### What the tail says, and it is not a topology at all
+
+Follow the read values to the end of the voice and something falls out that no
+amount of further tracing would have given.
+
+Our pitch bottoms at **1182 Hz** and the board's tail sits at **276 to 300 Hz**.
+Node A is `R153` and `R154` into `R155`, weights 0.216 and 0.071, so
+
+```text
+A = 0.216 * <V_555> + 0.071 * V_amp
+f = A * 3331 Hz/V
+```
+
+and at the end of the voice `V_amp` is whatever `U19`(1,2,3) sits at when it is
+railed low. The device puts that at `6 - OPAMP_SWING` = **1.0 V**, and 1.0 V on
+`U18`'s control pin leaves the 555 running at 39 Hz and an 11 % duty, so
+`<V_555>` is 1.31 V and `A` is 0.355 V. That is the 1182 Hz.
+
+Drop the amplifier's floor to **0.15 V** and the 555's duty collapses to about
+2 %, because its charge leg is working against +12 V while its discharge leg
+works against ground. `<V_555>` falls to 0.38 V, `A` to 0.093 V, and the tail
+lands at **310 Hz**.
+
+**So the shot's tail is a direct read of the op-amp's output floor**, and that
+is a different quantity from the one the battleship and the laser depend on.
+Their rates come from the Schmitt window, which is `R_in/(R_in+R_fb)` of the
+output's **span**, `V_OH - V_OL`. The shot's tail comes from `V_OL` alone, and
+its head from `V_OH` alone. `OPAMP_SWING` ties all three together by assuming
+the output swings symmetrically about the +6 V mid-rail, which is the one thing
+a single-supply op-amp reliably does not do.
+
+That is the next thing to try on this voice, and it is worth noting that it also
+touches the battleship and laser disagreement above: the laser wants a span
+implying a floor near 0.2 V, and the shot's tail independently wants 0.15 V.
+Two voices asking for the same floor is the first thing on this board that has
+pointed at that constant from two directions.
+
 ### The board sweeps this voice down over its whole length and the device does not
 
 The open item on the shot was "11.5 dB deficient at 125-250 Hz and bright at
