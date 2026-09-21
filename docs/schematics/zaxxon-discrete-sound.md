@@ -362,23 +362,23 @@ tuning leg of a band-pass, so the pitch falls as the envelope decays.
 | `R133` | 1.5 kΩ | `Q6`'s collector to ground, which **bounds** the sweep |
 | `C80` | 2.2 uF | `NOISE 2` in |
 | `R128` | 10 kΩ | input resistor, **to the inverting input** |
-| `R127` | 47 kΩ | `U12` feedback (see below: the designator is reused) |
+| `R129` | 47 kΩ | `U12` feedback (the drawing labels this `R127` too; see below) |
 | `C81`, `C82` | 0.01 uF | the bridged-T's two capacitors |
 | `C83`, `R134`, `R135` | 10 uF, 100 kΩ, 100 kΩ | a 2:1 divider out to `C84` |
 
 **This is not the multiple-feedback band-pass the rest of the board uses, and
 the difference is one wire.** In every other filter here the input resistor
 lands on the capacitor junction. `R128` does not: it lands on `U12`'s
-**inverting input**, with `R127` bridging input to output and `C81`/`C82` in
+**inverting input**, with `R129` bridging input to output and `C81`/`C82` in
 series between them, their junction tied to ground through `R130` and `Q6`. The
 feedback network is a bridged-T, and the stage is an inverting **low-pass**:
 
 ```text
-gain(s) = -(R127/R128) * (1 + 2*s*C*r) / (1 + 2*s*C*r + R127*r*C^2*s^2)
+gain(s) = -(R129/R128) * (1 + 2*s*C*r) / (1 + 2*s*C*r + R129*r*C^2*s^2)
 
-DC gain = R127/R128 = 4.7
-f0      = 1 / (2*pi*C*sqrt(R127*r))
-Q       = 0.5 * sqrt(R127/r)
+DC gain = R129/R128 = 4.7
+f0      = 1 / (2*pi*C*sqrt(R129*r))
+Q       = 0.5 * sqrt(R129/r)
 ```
 
 with `r` = `R130` in series with `R133` paralleled by `Q6`, so `r` runs between
@@ -413,8 +413,10 @@ inverting amp with `R136` 51 kΩ in and `R137` 51 kΩ of feedback about the
 
 **`R127` appears twice on sheet 11**, once as the 100 kΩ envelope shunt and once
 as the 47 kΩ band-pass feedback, both legible and both unambiguously reading
-`R127` at 400 dpi. One of them is presumably `R129`, which appears nowhere; the
-drawing does not say which, and this note distinguishes them by function.
+`R127` at 400 dpi, while `R129` appears nowhere on the sheet. **The 47 kΩ one is
+`R129`**, and this file carried them as `R127_ENV` and `R127_FB` until somebody
+who knows the board said so. It is the one thing on these two sheets that no
+amount of re-reading could have settled, because the error is in the drawing.
 
 ## The battleship: two relaxation oscillators, one of which reaches nothing
 
@@ -638,6 +640,33 @@ warbling with the 555. Its duty is 45.5 % rather than the battleship's exact
 50 %, because `R156` against `R159` is 2.2 to 1 where the battleship's pair is 2
 to 1. It reaches `MB4391 U16` ch A (1, 2, 14, 15) through `R164` 1 MΩ against `R165` 220 kΩ, a
 divider of **0.18**, and `C93` 2.2 uF; the leg is `R203` 39 kΩ / `R204` 8.2 kΩ.
+
+### The shaper half is re-read, and `C88` is 0.047 uF
+
+The first half of this voice has now been read a second time at 400 dpi, and
+every value and junction holds: `R142` 18 kΩ with `C87` 2.2 uF on `U21`'s pins
+14 and 15; **`Qbar` on pin 4** driving `R144` **560 Ω** into the shaper node,
+with `R143` 3.3 kΩ from +5 V and `D10`'s cathode on the same node; `R145`
+270 kΩ and `R146` 1 MΩ **in series** from +12 V down to node X; `R147` 1 MΩ
+from node X to node Y; `R148` and `C89` below that.
+
+**`C88` was the reason to look, and it is 0.047 uF.** The drawing writes its
+value as `047UF` with **no decimal point at all**, neither leading nor medial,
+which leaves it open between 0.047 and 0.47 uF. That is not an idle
+distinction: 0.47 uF would put node X's time constant at 260 ms instead of
+26 ms, which is the right order to produce the sweep the board has and the
+device does not.
+
+It is settled by comparing glyphs at 600 % against a known `.047 UF` elsewhere
+in the same drawing set, on `C139` and `C140`'s bypass rows. There the leading
+point is clearly drawn. Held side by side at one scale, `C88`'s label is that
+same `047UF` with the point missing, at identical glyph size and identical
+`0`-to-`4` spacing: there is no room between its `0` and `4` for the point that
+`0.47` would need, and `C87`'s own `2.2UF` on the same crop shows how plainly
+this drafter's points print when they are there.
+
+So the device's value is right, the hypothesis is dead, and the sweep is still
+unexplained. Which is worth having: it was the cheapest remaining explanation.
 
 ### The board sweeps this voice down over its whole length and the device does not
 

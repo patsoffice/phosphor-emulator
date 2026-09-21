@@ -505,8 +505,8 @@ const EXP_FILTER_GAIN: f64 = 2.5;
 
 const R126: f64 = 330.0; // Q's pull-up, so the envelope's charge path
 const C79: f64 = 6.8e-6; // the envelope cap
-const R127_ENV: f64 = 100_000.0; // its decay to ground -> 0.68 s
-const R127_FB: f64 = 47_000.0; // U12's band-pass feedback (see below)
+const R127: f64 = 100_000.0; // its decay to ground -> 0.68 s
+const R129: f64 = 47_000.0; // U12's band-pass feedback (see below)
 const R128: f64 = 10_000.0; // the band-pass input resistor
 const R130: f64 = 100.0; // in series with Q6, from the tuning node to ground
 const C81: f64 = 0.01e-6; // the two band-pass feedback caps (C81 = C82)
@@ -525,10 +525,11 @@ const R135: f64 = 100_000.0;
 /// threshold, is the third independent landing on that window.
 const U12_CANNON_REF: f64 = 6.0 * 22_000.0 / (33_000.0 + 22_000.0);
 
-// `R127` really does appear twice on sheet 11, once as the 100 k envelope shunt
-// and once as the 47 k band-pass feedback, both legible at 400 dpi. One of them
-// is presumably `R129`, which appears nowhere. The two names above distinguish
-// them by function because the drawing does not.
+// The drawing labels BOTH of those `R127`, once as the 100 k envelope shunt and
+// once as the 47 k band-pass feedback, both legible at 400 dpi, while `R129`
+// appears nowhere on the sheet. **The 47 k one is `R129`**, which the drawing
+// does not say and a board does: this file carried them as `R127_ENV` and
+// `R127_FB` until somebody who knew told us which was which.
 
 /// `R133`, from `Q6`'s collector to ground, which is what **bounds** the
 /// cannon's sweep at the quiet end.
@@ -2044,7 +2045,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         Box::new(OneShot74123::new(OS_CANNON)),
     );
     let cannon_env_target = b.logic_levels("CANNON_TGT", cannon_pulse, 0.0, V5 - V_DIODE);
-    let cannon_env = b.rc_envelope("CANNON_ENV", cannon_env_target, R126 * C79, R127_ENV * C79);
+    let cannon_env = b.rc_envelope("CANNON_ENV", cannon_env_target, R126 * C79, R127 * C79);
     let q6 = b.custom(
         "Q6_RCE",
         vec![cannon_env],
@@ -2069,7 +2070,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let cannon_bp = b.custom(
         "U12_CANNON_LP",
         vec![noise2, cannon_leg_r],
-        Box::new(BridgedTLowPass::new(R128, R127_FB, C81)),
+        Box::new(BridgedTLowPass::new(R128, R129, C81)),
     );
     // The filter is always live, so something downstream has to stop it hissing
     // between shots: `MB4391 U13` ch B, whose IN is fed by `C84`. Its CON pin is
@@ -3677,7 +3678,7 @@ mod tests {
             peak * div
         );
 
-        let tau = R127_ENV * C79;
+        let tau = R127 * C79;
         let sweeping = tau * (peak / threshold).ln();
         assert!(
             (sweeping - 0.190).abs() < 0.005,
@@ -3689,7 +3690,7 @@ mod tests {
         );
 
         // And where it parks once Q6 is off: R130 in series with R133.
-        let parked = 1.0 / (std::f64::consts::TAU * C81 * (R127_FB * (R130 + R133)).sqrt());
+        let parked = 1.0 / (std::f64::consts::TAU * C81 * (R129 * (R130 + R133)).sqrt());
         assert!((parked - 1835.0).abs() < 10.0, "parked at {parked} Hz");
     }
 
