@@ -1200,10 +1200,17 @@ sources.
   the band-pass reaches 232 Hz with the LED dark. The device models the curve
   with an explicitly invented law and says so at the call site.
 
-  **The reference recordings cannot narrow this, and were not used to.** Both
-  engine samples are about an octave wide and this front end is 68 Hz wide at
-  every LDR position, so no value here reproduces their shape. See the third
-  pass's section below.
+  **The reference recordings cannot narrow this, and were not used to**: moving
+  a front end both tones share moves them together, and the board's two tones
+  disagree with ours *relative to each other*, tone B an octave below tone A
+  where ours is above it. No position of the LDR produces that pair.
+
+  What the recordings say instead is that the **front end's bandwidth** is the
+  thing to re-read, because the board lets each Sallen-Key corner decide its own
+  tone's pitch and a 68 Hz window at 770 Hz cannot. `R21` is the candidate: the
+  bandwidth is `1/(pi*R21*C26)`, so 470 kΩ gives 68 Hz where 47 kΩ gives 677 Hz.
+  That is a read value and a recording cannot correct one; see the engine
+  section below.
 - **The `MM5837`'s shift rate on this board.** The part's clock is internal, it
   is specified at a supply this board does not give it, and part-to-part spread
   is wide. The model uses the commonly quoted 100 kHz, which is a convention and
@@ -1457,16 +1464,63 @@ two independent samples, where this sheet decodes them through `U32`'s 74LS139
 and selects one of two tones, so the two sets of states do not correspond
 one-for-one either.
 
-**And the recordings cannot be used to move [the LDR curve](#what-this-does-not-establish).**
-This is the part worth refusing rather than the part worth doing. Both samples
-are about an octave wide: `04` is 6.7 dB down one octave below its peak and `05`
-is 9.6 dB down. This circuit's front end is 68 Hz wide, which is 0.3 of an
-octave at the *bottom* of its range and narrower everywhere above, and the 68 Hz
-is arithmetic on `R21` and `C26` rather than anything invented. **No position of
-the LDR makes this board as broad as either recording.** Whatever those files
-are a recording of, it is not this chain alone, and a curve fitted to make the
-peak land in the right band would be a curve fitted to a shape the circuit
-cannot produce. The invented law is unchanged.
+**And the recordings still cannot move [the LDR curve](#what-this-does-not-establish),
+but not for the reason this section used to give.** The old argument was that
+both samples are about an octave wide where this front end is 68 Hz wide, so
+"whatever those files are a recording of, it is not this chain alone". They are
+a recording of this chain. What the width disagreement actually says is that
+**our reading of the front end is wrong**, and the two tones compared side by
+side say it much more sharply than the widths do.
+
+### The two tones at one ladder level, which is the comparison that settles it
+
+`zaxxon/ship-engine-pair` holds tone A and then tone B at the same ladder
+position, which is the only way to compare them against `05.wav` and `04.wav`:
+the two recordings were made at an unknown level, but they were made at the
+*same* unknown level as each other, so the pair is a ratio and a ratio is
+usable.
+
+| | tone A (`05.wav`) | tone B (`04.wav`) |
+|---|---|---|
+| the board, fundamental | **630.0 Hz** | **344.5 Hz** |
+| ours | 588.0 Hz | **760.3 Hz** |
+| the board, centroid | 759.4 Hz | 399.1 Hz |
+| ours | 678.2 Hz | 732.3 Hz |
+
+**The board's tone B is an octave below its tone A, and ours is above it.** Our
+tone A is close, at 588 against 630; our tone B is 2.2 times too high. So the
+board's two tones are set by their own Sallen-Key corners, 723 Hz and 482 Hz,
+whose ratio of 1.50 is near the board's measured 1.83, and **ours are both set
+by the front end they share**. This file already suspected that in one sentence
+("the shortfall is the front end still dominating both") and treated it as a
+residual. It is the finding.
+
+A front end 68 Hz wide, sitting at 770 Hz at the top of the ladder, *must*
+dominate: it hands each low-pass a narrow band already above both corners, and a
+low-pass cannot move a pitch down, only attenuate it. That is exactly what ours
+does, and the board does not do it. For the board's two tones to land where they
+do, the signal reaching `C29` and `C38` has to be broad enough for a 482 Hz
+corner to shape it.
+
+**So the number to re-read is `R21`, and possibly `C26`.** The bandwidth is
+`1/(pi*R21*C26)` and nothing else, so 470 kΩ with 0.01 uF gives 68 Hz where
+47 kΩ would give 677 Hz, which is the right order to make the two corners decide
+the pitch. This file's own provenance section says `2.2K` and `2.2M` are not
+separable below 400 dpi, and a `470K` misread for `47K` is the same shape of
+error. It is a read value, so a recording cannot correct it and nothing here was
+changed: what the recording does is say that it is worth putting back under the
+loupe, which is not something the old framing would ever have concluded.
+
+Clipping does not explain this. `05` clips on 14.5 % of its samples and `04` on
+6.8 %, and that is why their *widths* cannot be compared with ours. It is not
+why their fundamentals sit an octave apart in the opposite order to ours:
+clipping broadens a spectrum, it does not halve a period, and the estimator
+autocorrelates.
+
+The invented LDR law is unchanged, and now for a demonstrated reason rather than
+an assumed one. No position of the LDR produces the board's pair, because moving
+a shared front end moves both tones together and the disagreement is between
+them.
 
 ## The low-band residual: not one cause, and not those voices
 

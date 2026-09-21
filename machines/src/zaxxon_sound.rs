@@ -327,14 +327,33 @@ const PC1_LED_VF: f64 = 1.2;
 ///   arithmetic on read values rather than a consequence of anything invented.
 ///
 /// **The reference recordings cannot place this curve, and it was not fitted to
-/// them.** MAME's `04.wav` and `05.wav` are the two engine states, and both are
-/// about an octave wide: `04` sits 6.7 dB down one octave below its peak and
-/// `05` sits 9.6 dB down. This circuit's front end is 68 Hz wide, which is
-/// 0.3 of an octave at the *bottom* of its range and narrower everywhere above.
-/// No position of the LDR makes this board as broad as either recording, so the
-/// recordings are measuring something other than this chain (a different
-/// cabinet's parts, or more than one voice at once) and cannot say where the
-/// curve should sit. See the comparison written up in the transcription.
+/// them.** The reason is not the one this comment used to give, which was that
+/// the recordings are "measuring something other than this chain". They are
+/// recordings of this board.
+///
+/// The reason is that moving a front end both tones share moves them **together**,
+/// and the board's two tones disagree with ours relative to each other. Held at
+/// one ladder level by `zaxxon/ship-engine-pair` and compared with `05.wav` and
+/// `04.wav`, which were recorded at the same unknown level as one another:
+///
+/// | | tone A (`05`) | tone B (`04`) |
+/// |---|---|---|
+/// | the board | **630.0 Hz** | **344.5 Hz** |
+/// | ours | 588.0 Hz | **760.3 Hz** |
+///
+/// The board's tone B is an octave *below* its tone A and ours is above it. So
+/// the board lets each Sallen-Key corner decide its own tone's pitch, and ours
+/// has both decided by the front end they share, which no LDR position fixes.
+///
+/// **What that points at is [`R21`], which is a read value.** The front end's
+/// bandwidth is `1/(pi*R21*C26)` and nothing else, so 470 kOhm with 0.01 uF
+/// gives 68 Hz where 47 kOhm would give 677 Hz, and only the second lets a
+/// 482 Hz corner shape anything. A 68 Hz window sitting at 770 Hz hands each
+/// low-pass a narrow band already above both corners, and a low-pass cannot move
+/// a pitch down. The transcription's provenance section says `470K` and `47K`
+/// are exactly the pair that is unreadable below 400 dpi. Nothing was changed
+/// here: a recording cannot correct a read value, it can only say which one is
+/// worth putting back under the loupe.
 const PC1_R_BRIGHT: f64 = 1_000.0;
 const PC1_EXPONENT: f64 = 1.05;
 /// Dark resistance, which is also the ceiling the power law is clamped to.
