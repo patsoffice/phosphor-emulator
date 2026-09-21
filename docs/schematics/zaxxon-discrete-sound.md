@@ -495,7 +495,72 @@ kind of result and it is the point of reading the sheet: a 7 % duty pulse at
 3 Hz is exactly what somebody would *want* to shape this voice with, and
 modeling it anyway would have been modeling a wire that is not drawn.
 
-## The shot: the same oscillator again, with its reference swept
+### `Q5` has to be a very good switch, and that is a constraint rather than a choice
+
+`Q5` reverses the integrator by sinking its summing node through `R96` 15 kΩ
+against `R93` 30 kΩ charging it, and the node carries only **0.248 V**. The
+reverse current is `(v_g - v_sat)/R96 - v_g/R93`, so a saturation voltage of
+
+```text
+v_g * (1 - R96/R93) = 0.248 * 0.5 = 0.124 V
+```
+
+cancels it exactly and **the stage never turns round**. A small-signal
+transistor sinking the 8 uA this node carries saturates at tens of millivolts,
+so the board works with room to spare, but the model's perfect switch is
+*required* rather than convenient: at 50 mV the rate is already 92 Hz instead
+of 122.
+
+That direction matters for the section below. The battleship is the voice that
+measures **slow** against its recording, and every real value of `Q5`'s
+saturation makes it slower still.
+
+### The battleship and the laser disagree by 26 %, and it is not a misread
+
+These two voices share exactly one unknown, [`OPAMP_SWING`], and their rates are
+both inversely proportional to it through the same `51 k` / `100 k` Schmitt
+pair. Everything else in either rate is a read value, so **their ratio is a
+reading**. Against one board that ratio is 26 % out, and the whole of both
+chains has now been read a second time at 400 dpi to find out why:
+
+| | battleship | laser |
+|---|---|---|
+| reference | `R80` 2.2 MΩ, `R81` 220 kΩ into a `U9` follower, then `R90` 120 kΩ / `R91` 100 kΩ | `U7` on +12 V with pin 5 carrying `C54` 0.01 uF to ground, so the ramp is `V/3` to `2V/3` |
+| halving | `R94` 51 kΩ / `R95` 51 kΩ | `R68` 51 kΩ / `R69` 51 kΩ |
+| integrator | `R93` 30 kΩ, `C58` 0.01 uF | `R67` 120 kΩ, `C138` 0.01 uF |
+| sink | `R96` 15 kΩ | `R70` 47 kΩ |
+| Schmitt | `R98` 51 kΩ, `R99` 100 kΩ | `R72` 51 kΩ, `R73` 100 kΩ |
+
+Every value above was re-read, and so was every junction the rates turn on:
+`R96` and `R70` both land on their integrator's **pin 6**, with the pin-5
+divider crossing that vertical and no dot, in both copies; `U10`(1,2,3) and
+`U8`(1,2,3) are both strapped output-to-inverting-input, so both are followers;
+`U10`(12,13,14) taps the `R98`/`R99` junction rather than pin 8; and `U7` pin 5
+carries a decoupling capacitor rather than a signal, so its ramp really is the
+part's own thirds. **Nothing is misread.**
+
+The measurement, in 25 ms windows, which is what a swept voice needs rather
+than one averaged fundamental:
+
+| | ours | the board |
+|---|---|---|
+| battleship | 122.5 Hz | **132.0 Hz** |
+| laser, bottom of sweep | 322.6 Hz | **280.6 Hz** |
+| laser, top of sweep | 579.4 Hz | **493.3 Hz** |
+| laser, top over bottom | 1.80 | 1.76 |
+
+The sweep's **shape agrees to 2 %**, which is what says the laser's disagreement
+is a clean scale factor rather than a wrong topology: ours is uniformly 16 %
+high, and the battleship is 7 % low. The battleship wants a Schmitt window of
+3.13 V and the laser wants 3.97 V.
+
+So the gap is not the shared unknown, not a misread value, not a misread
+junction, and not `Q5`, which pushes the wrong way. What is left is **one
+cabinet's tolerances**: six resistors and a ceramic capacitor in each chain, at
+5 % and 10 to 20 %. That is the same answer the alarms' uniform 12 % got, and it
+is unsatisfying in the same way. It is also the answer that stops a constant
+being moved, which is the useful part: fitting the swing to either voice puts
+the other one further out than it started.
 
 `SHOT` (`PC0`) is a **tone**, and there is no noise anywhere in it. That is the
 first thing to say, because the obvious reading of `R156` 33 kΩ with `C92`
@@ -1268,17 +1333,10 @@ sources.
   the one term the battleship's absolute pitch rests on. The two stages' ratio
   does not.
 
-  **The recordings cannot place it either, and why not is a finding about the
-  board.** The battleship's rate and the laser's are both inversely proportional
-  to this one number, through the same `51 k` / `100 k` Schmitt pair, and
-  everything else in either rate is read. Against their own recordings the
-  battleship wants a swing of **4.63** and the laser wants **5.80**: no value
-  satisfies both, and since the swing cancels in their ratio, **a ratio of read
-  values is 22 % out**. Ours is 7 % low on the battleship and 14 % high on the
-  laser against one board. One of those two chains has an error that is not this
-  constant, and fitting the constant to either voice would bury it. The two to
-  re-read are the battleship's reference divider off +12 V and `U7`'s ramp into
-  `U8`'s integrator.
+  **The recordings cannot place it either, and both chains were read twice to
+  establish that.** See the section below: no value in either is misread, the
+  ratio of read values is 26 % out against one board, and `Q5`'s saturation
+  moves it the wrong way. Left at 5.0.
 - **Anything a topology comparison would settle.** Every voice here has now been
   compared against a recording of a real board through `disasm audiodiff`, and
   the scoreboard below is that comparison. What those recordings cannot review

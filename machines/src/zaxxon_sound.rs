@@ -1150,29 +1150,47 @@ const R76: f64 = 2_200.0;
 /// that those voices are at least the right size relative to the ones that are
 /// derived end to end.
 ///
-/// **The recordings cannot place it, and why not is a finding about the board
-/// rather than about them.** The battleship's rate and the laser's are both
+/// **The recordings cannot place it, and both chains have now been read twice
+/// to establish that.** The battleship's rate and the laser's are both
 /// inversely proportional to this one number, through the identical `51 k` /
-/// `100 k` Schmitt pair, and everything else in either rate is a read value.
-/// Scanned against their own recordings:
+/// `100 k` Schmitt pair, and **everything else in either rate is a read value**:
 ///
-/// | `OPAMP_SWING` | battleship | laser |
+/// | | battleship | laser |
 /// |---|---|---|
-/// | 4.6 | **132.8 Hz** | 512.8 Hz |
-/// | 5.0, as shipped | 122.5 Hz | 469.1 Hz |
-/// | 5.8 | 105.5 Hz | **404.6 Hz** |
-/// | the board (`00.wav`, `01.wav`) | **132.0 Hz** | **404.6 Hz** |
+/// | reference | `R80` 2.2 M, `R81` 220 k, `R90` 120 k, `R91` 100 k | `U7` on +12 V with pin 5 decoupled by `C54`, so the ramp is `V/3` to `2V/3` |
+/// | halving | `R94`/`R95` 51 k | `R68`/`R69` 51 k |
+/// | integrator | `R93` 30 k, `C58` 0.01 uF | `R67` 120 k, `C138` 0.01 uF |
+/// | sink, on pin 6 | `R96` 15 k | `R70` 47 k |
+/// | Schmitt | `R98` 51 k, `R99` 100 k | `R72` 51 k, `R73` 100 k |
 ///
-/// The battleship wants 4.63 and the laser wants 5.80, so no value satisfies
-/// both and the disagreement is **25 %**. Since the swing cancels in their
-/// ratio, that ratio is a reading, and a reading is 22 % out: our battleship is
-/// 7 % low and our laser 14 % high against one board.
+/// Every one of those was read at 400 dpi, along with each junction the rates
+/// turn on: `R96` and `R70` both land on their integrator's pin 6 with the
+/// pin-5 divider crossing and no dot, `U10`(1,2,3) and `U8`(1,2,3) are both
+/// followers, and `U7` pin 5 carries a capacitor rather than a signal. **No
+/// value is misread.**
 ///
-/// So **one of those two chains has an error that is not this constant**, and
-/// until that is found, fitting this to either voice would bury it. Left at 5.0.
-/// The two chains to re-read are `battleship_ref_v`'s divider off +12 V and
-/// `U7`'s ramp into `U8`'s integrator; every resistor in both is read, which is
-/// what makes the 22 % worth chasing.
+/// Measured in 25 ms windows, which is the comparison to make on a swept voice
+/// rather than one averaged fundamental:
+///
+/// | | ours | the board |
+/// |---|---|---|
+/// | battleship | 122.5 Hz | **132.0 Hz** (`00.wav`) |
+/// | laser, bottom of sweep | 322.6 Hz | **280.6 Hz** (`01.wav`) |
+/// | laser, top of sweep | 579.4 Hz | **493.3 Hz** |
+/// | laser, top over bottom | 1.80 | 1.76 |
+///
+/// The sweep's *shape* agrees to 2 %, so the laser is uniformly 16 % high while
+/// the battleship is 7 % low. The battleship wants a window of 3.13 V and the
+/// laser wants 3.97 V, and since the window cancels in their ratio, **a ratio
+/// of read values is 26 % out**.
+///
+/// `the_battleships_fast_stage_needs_a_near_perfect_switch` makes that worse
+/// rather than better: any real saturation on `Q5` slows the battleship, which
+/// is already the slow one. So the gap is not this constant, it is not a
+/// misread, and it is not the transistor. What is left is one cabinet's
+/// tolerances, on two chains of six resistors and a ceramic capacitor each,
+/// which is the same answer the alarms' 12 % got. Left at 5.0, because fitting
+/// it to either voice would put the other one further out.
 const OPAMP_SWING: f64 = 5.0;
 
 // ---------------------------------------------------------------------------
@@ -3022,6 +3040,68 @@ mod tests {
         // so it is the one term OPAMP_SWING reaches.
         assert!((battleship_swing_v() - 3.3775).abs() < 1e-3);
         assert!((schmitt_window_v(R86, R88) - schmitt_window_v(R98, R99)).abs() < 1e-12);
+    }
+
+    /// `Q5` has to be a very good switch, and the fast stage stops dead if it
+    /// is not. This is a constraint the drawing imposes rather than a choice.
+    ///
+    /// The transistor reverses the integrator by sinking its summing node
+    /// through `R96` 15 k, against `R93` 30 k charging it from
+    /// [`battleship_fast_src_v`]. The reverse current is
+    /// `(v_g - v_sat)/R96 - v_g/R93`, and `v_g` is only **0.248 V**, so a
+    /// saturation voltage of `v_g * (1 - R96/R93)` = **0.124 V** cancels it
+    /// exactly and the integrator never turns round.
+    ///
+    /// A small-signal transistor sinking the 8 uA this node carries saturates
+    /// at tens of millivolts, so the board works. What it means for the model
+    /// is that treating `Q5` as a perfect switch is **required** rather than
+    /// convenient: at 50 mV the rate already falls from 122 Hz to 92 Hz, which
+    /// is further from the board's 132 Hz, not nearer. That direction matters,
+    /// because it means the one unknown this voice shares with the laser cannot
+    /// be blamed for the gap between them. See [`OPAMP_SWING`].
+    ///
+    /// The doc for [`relaxation_hz`] warns that arithmetic hypersensitive to an
+    /// unknown is usually a misread topology. Here the topology is read twice
+    /// and the sensitivity is real, which is the case that warning does not
+    /// cover: the board is genuinely operating a transistor switch against a
+    /// quarter of a volt.
+    #[test]
+    fn the_battleships_fast_stage_needs_a_near_perfect_switch() {
+        let v_g = battleship_fast_src_v() / 2.0;
+        let rate_with_sat = |v_sat: f64| {
+            let i_charge = v_g / R93;
+            let i_reverse = (v_g - v_sat) / R96 - i_charge;
+            if i_reverse <= 0.0 {
+                return 0.0;
+            }
+            1.0 / (schmitt_window_v(R98, R99) * C58 * (1.0 / i_charge + 1.0 / i_reverse))
+        };
+
+        // The voltage at which the sink can no longer beat the source.
+        let stall = v_g * (1.0 - R96 / R93);
+        assert!(
+            (stall - 0.124).abs() < 1e-3,
+            "Q5 stalls the stage at {stall} V"
+        );
+        assert_eq!(
+            rate_with_sat(stall + 1e-6),
+            0.0,
+            "past the stall it cannot run"
+        );
+        assert!(
+            rate_with_sat(stall - 0.01) > 0.0,
+            "just inside it still runs"
+        );
+
+        // A perfect switch is the shipped figure, and any real saturation moves
+        // the voice AWAY from the board's 132 Hz rather than toward it.
+        assert!((rate_with_sat(0.0) - 122.3).abs() < 0.5);
+        let at_50mv = rate_with_sat(0.05);
+        assert!(
+            (at_50mv - 91.6).abs() < 1.0,
+            "at 50 mV of saturation: {at_50mv} Hz"
+        );
+        assert!(at_50mv < rate_with_sat(0.0), "saturation can only slow it");
     }
 
     /// `U12`'s alarm section is modeled as a comparator rather than an
