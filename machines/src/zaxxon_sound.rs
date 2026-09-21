@@ -1106,6 +1106,30 @@ const R76: f64 = 2_200.0;
 /// voice whose own chain is read only at block level is expressed against, so
 /// that those voices are at least the right size relative to the ones that are
 /// derived end to end.
+///
+/// **The recordings cannot place it, and why not is a finding about the board
+/// rather than about them.** The battleship's rate and the laser's are both
+/// inversely proportional to this one number, through the identical `51 k` /
+/// `100 k` Schmitt pair, and everything else in either rate is a read value.
+/// Scanned against their own recordings:
+///
+/// | `OPAMP_SWING` | battleship | laser |
+/// |---|---|---|
+/// | 4.6 | **132.8 Hz** | 512.8 Hz |
+/// | 5.0, as shipped | 122.5 Hz | 469.1 Hz |
+/// | 5.8 | 105.5 Hz | **404.6 Hz** |
+/// | the board (`00.wav`, `01.wav`) | **132.0 Hz** | **404.6 Hz** |
+///
+/// The battleship wants 4.63 and the laser wants 5.80, so no value satisfies
+/// both and the disagreement is **25 %**. Since the swing cancels in their
+/// ratio, that ratio is a reading, and a reading is 22 % out: our battleship is
+/// 7 % low and our laser 14 % high against one board.
+///
+/// So **one of those two chains has an error that is not this constant**, and
+/// until that is found, fitting this to either voice would bury it. Left at 5.0.
+/// The two chains to re-read are `battleship_ref_v`'s divider off +12 V and
+/// `U7`'s ramp into `U8`'s integrator; every resistor in both is read, which is
+/// what makes the 22 % worth chasing.
 const OPAMP_SWING: f64 = 5.0;
 
 // ---------------------------------------------------------------------------

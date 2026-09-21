@@ -1225,6 +1225,18 @@ sources.
 - **The op-amps' output swing.** Nothing on the drawing dimensions it, and it is
   the one term the battleship's absolute pitch rests on. The two stages' ratio
   does not.
+
+  **The recordings cannot place it either, and why not is a finding about the
+  board.** The battleship's rate and the laser's are both inversely proportional
+  to this one number, through the same `51 k` / `100 k` Schmitt pair, and
+  everything else in either rate is read. Against their own recordings the
+  battleship wants a swing of **4.63** and the laser wants **5.80**: no value
+  satisfies both, and since the swing cancels in their ratio, **a ratio of read
+  values is 22 % out**. Ours is 7 % low on the battleship and 14 % high on the
+  laser against one board. One of those two chains has an error that is not this
+  constant, and fitting the constant to either voice would bury it. The two to
+  re-read are the battleship's reference divider off +12 V and `U7`'s ramp into
+  `U8`'s integrator.
 - **Anything a topology comparison would settle.** Every voice here has now been
   compared against a recording of a real board through `disasm audiodiff`, and
   the scoreboard below is that comparison. What those recordings cannot review
