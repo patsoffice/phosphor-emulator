@@ -288,19 +288,32 @@ scenarios = [
   "zaxxon/shot",
 ]
 notes = """
-BUILT FROM THE DRAWING, AND THERE IS NOTHING TO COMPARE IT AGAINST. The board has
-no sound chip: twelve active-low bits of the i8255 at U23 gate eleven analog
+BUILT FROM THE DRAWING, AND COMPARED AGAINST RECORDINGS OF A REAL BOARD. The board
+has no sound chip: twelve active-low bits of the i8255 at U23 gate eleven analog
 voices, two further bits set a level, and all eleven meet at one passive summing
 node the drawing calls SJ. Transcribed in docs/schematics/zaxxon-discrete-sound.md
 from IC Board A 834-0214 sheets 11 and 12 (PDF pp132-135, not pp131-135 as this
 row previously said: p131 is the cabinet wiring).
 
-`implemented-unvalidated` and NOT `implemented-needs-validation`, which is the
-honest end state rather than a waypoint. The reference driver plays recorded WAV
-samples, so a comparison against it would measure whoever made the recordings,
-and no scenario here will ever change that. It can only reach `validated` by
-someone reviewing the device against the drawing, which is a different piece of
-work from anything sndcmp does.
+`implemented-unvalidated` and NOT `implemented-needs-validation`. This row used
+to justify that with "the reference driver plays recorded WAV samples, so a
+comparison against it would measure whoever made the recordings", WHICH IS WRONG
+AND WAS WRONG EVERYWHERE IT WAS WRITTEN. MAME's zaxxon sample set is recorded
+from a real Zaxxon board. It is board evidence, through one cabinet and an
+unknown recording chain, four files of which are clipped.
+
+What that means is a distinction rather than a dismissal, and it is the rule this
+row now keeps: A RECORDING CAN CONSTRAIN A PART PROPERTY THE DRAWING DOES NOT
+GIVE. IT CANNOT MOVE A JUNCTION. Both of the fits that were made and reverted
+were junction claims dressed as measurements, and both had a bad measurement
+underneath: the alarm divider moved to 1QB, a pin wired to nothing, off a "near
+5 kHz" reading that was a spectral centroid rather than a fundamental, and
+BATTLESHIP_HZ moved to 750 Hz against a derived 122. Neither revert rested on
+recordings being inadmissible.
+
+The status stays `implemented-unvalidated` because the samples cannot review a
+topology, which is where this board's errors have all been. Reaching `validated`
+still means someone checking the device against the drawing.
 
 THE ADAPTER AND SCENARIOS ARE NOT A CLAIM THAT SUCH A COMPARISON EXISTS. This row
 previously said there could be none because there was nothing to compare against,
@@ -312,16 +325,20 @@ improvement was to capture the voice either side and listen to both. Thirteen
 scenarios, at least one per voice, exist so that is one command rather than a
 scratch test somebody writes again each time.
 
-The samples do have one honest use, and the engine is the worked example. They
-say what a voice IS and they are how you notice that something is wrong: putting
-the two engine captures beside 04.wav and 05.wav is what showed that our two
-engine tones were measurably identical when the board's are an octave apart, and
-re-reading sheet 12 is what found the reason (they are Sallen-Key low-passes,
-not band-passes). What the samples cannot do is place a constant, and the same
-comparison shows why: both of them are an octave wide and this board's engine
-front end is 68 Hz wide at every LDR position, which is arithmetic on R21 and
-C26. Two constants have been fitted to these recordings in the past and both
-were reverted.
+The engine is the worked example of what the samples are for. They say what a
+voice IS and they are how you notice that something is wrong: putting the two
+engine captures beside 04.wav and 05.wav is what showed that our two engine tones
+were measurably identical when the board's are an octave apart, and re-reading
+sheet 12 is what found the reason (they are Sallen-Key low-passes, not
+band-passes).
+
+The engine is ALSO where the samples and the drawing contradict each other and
+nobody has settled it: both recordings are about an octave wide and this board's
+engine front end is 68 Hz wide at every LDR position, which is arithmetic on R21
+and C26. That used to be written here as the reason the samples cannot place a
+constant. It is not a reason, it is a finding, and it now cuts the other way:
+either R21 and C26 are misread, or 05.wav's 14.5 % clipping is broad enough to
+smear a narrow band across an octave, or those files carry more than this chain.
 
 USE `disasm audiodiff` FOR THE COMPARISON ITSELF, which is what this crate's own
 module doc has said since it was written: sndcmp produces captures and audiodiff

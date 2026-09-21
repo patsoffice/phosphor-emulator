@@ -33,23 +33,40 @@ speaker connector.
 
 ## Why this file exists
 
-The reference emulator plays recorded WAV samples for this board. That is not
-evidence about the hardware, for exactly the reason written up in
-[`congo-percussion.md`](congo-percussion.md) for the sibling board: a sample set
-is what somebody did instead of reading this sheet. Comparing a model against
-those recordings would measure whoever made the recordings, so the drawing is
-the only reference and nothing here is fitted to a sample.
+The reference emulator plays recorded WAV samples for this board rather than
+emulating it, so the drawing is what a model has to be built from. That much has
+always been right, and it is why this file exists.
 
-That does not make the samples useless, and later passes have used them: they
-say what a voice **is**, and they are how you notice that something is wrong. A
-constant has twice been moved to make a measurement match and twice been
-reverted (`BATTLESHIP_HZ` to 750 Hz, and the alarm divider to `1QB`, which is
-not wired to anything). The rule that came out of it is that a measurement is
-taken *after* a change and never before it, and that a recording of one cabinet
-cannot settle which pin a wire is on. The engine comparison below is the case
-where a sample said loudly that something was wrong, the sheet said what, and
-the sample then turned out to be unable to place the one number the sheet does
-not give.
+**What was wrong, everywhere this file said it, is the next step: that the
+samples are therefore not evidence about the hardware.** They are recordings of
+a real Zaxxon board. Comparing against them measures that board, through one
+cabinet and an unknown recording chain, with four of the twelve files clipped.
+Writing that a sample set "is what somebody did instead of reading this sheet"
+confused the *reason a sample set exists* with *what is on it*.
+
+The rule that survives is a distinction rather than a dismissal, and it is worth
+stating precisely because this file spent five passes with the blunt version:
+
+- **A recording can constrain a part property the drawing does not give.** The
+  `MCD-725H`'s curve, `Q6`'s on-resistance, the `MM5837`'s swing, the op-amps'
+  output swing and the `MB4391`'s control law are not in competition with a read
+  value; no sheet dimensions any of them. For those, a board measurement is the
+  only evidence there is, and refusing it leaves the number an invention.
+- **A recording cannot move a junction.** This is what the two reverted fits
+  actually were. The alarm divider went to `1QB`, a pin wired to nothing, and
+  `BATTLESHIP_HZ` went to 750 Hz against a derived 122. Neither revert needed
+  the samples to be inadmissible, and both had a bad measurement underneath:
+  "near 5 kHz" is where both alarm files' *centroid* and *rolloff* sit, and
+  their fundamentals are 2264.7 and 1133.8 Hz.
+- **And it cannot correct a value the drawing gives.** Both alarms sit 12 %
+  below the clock `R168`, `R169` and `C97` give, by the same factor within
+  0.15 %. That is one cabinet's ceramic capacitor, and a constant moved to close
+  it would be a read value overwritten by a tolerance.
+
+A measurement is still taken *after* a change and never before it. What has
+changed is that a constant the drawing does not give may now be **constrained by
+a recording and labeled as such**, rather than carrying `INVENTED` on the
+grounds that the only evidence for it was inadmissible.
 
 ## The architecture
 
@@ -1205,8 +1222,14 @@ sources.
 - **The op-amps' output swing.** Nothing on the drawing dimensions it, and it is
   the one term the battleship's absolute pitch rests on. The two stages' ratio
   does not.
-- **Any measurement.** Nothing here was compared against a board or a recording,
-  and nothing could be: the reference plays samples.
+- **Anything a topology comparison would settle.** Every voice here has now been
+  compared against a recording of a real board through `disasm audiodiff`, and
+  the scoreboard below is that comparison. What those recordings cannot review
+  is which pin a wire lands on, which is where all of this board's errors have
+  been, so nothing in the tables above rests on one. This entry used to read
+  "nothing here was compared against a board or a recording, and nothing could
+  be: the reference plays samples", and the second half of that was wrong: the
+  reference plays samples **of a board**.
 
 ## What a first pass got wrong, and how
 

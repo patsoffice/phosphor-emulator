@@ -51,14 +51,36 @@
 //! whose rate is not arithmetic at all. Its parts give 787 Hz, and with the
 //! noise its control pin actually carries it runs near 977 Hz.
 //!
-//! # There is no reference to compare against
+//! # What the reference recordings can and cannot settle
 //!
-//! The reference emulator plays recorded WAV samples for this board, so a
-//! comparison would measure whoever made the recordings rather than the
-//! hardware. Same situation as Congo Bongo's percussion, and the reasoning is in
-//! `docs/schematics/congo-percussion.md`. The catalog row in
-//! `tools/sound-compare/targets.toml` says `implemented-unvalidated` for that
-//! reason and cannot honestly say more.
+//! This section used to be headed "there is no reference to compare against",
+//! on the grounds that the reference emulator plays recorded WAV samples rather
+//! than emulating the board. **That was wrong.** MAME's `zaxxon` sample set is
+//! recorded from a real Zaxxon board, so it is evidence about this hardware:
+//! one cabinet, through an unknown recording chain, four of its twelve files
+//! clipped.
+//!
+//! The rule that survives is a distinction, not a dismissal:
+//!
+//! - **A recording can constrain a part property the drawing does not give.**
+//!   [`CANNON_R_Q6_ON`] and [`PC1_R_BRIGHT`] are not in competition with a read
+//!   value, because no sheet dimensions them. A board measurement is the only
+//!   evidence that exists for either.
+//! - **A recording cannot move a junction.** Both of the fits this file made and
+//!   reverted were junction claims underneath: the alarm divider moved to `1QB`,
+//!   a pin wired to nothing, and the battleship's rate moved to 750 Hz against a
+//!   derived 122. Both also rested on a bad measurement, which is worth
+//!   separating from the principle: the `1QB` fit came from a "near 5 kHz"
+//!   reading that is where both alarm files' *centroid* sits, not their
+//!   fundamental.
+//! - **And it cannot correct a value the drawing gives.** Both alarms measure
+//!   12 % below the clock `R168`, `R169` and `C97` give, by the same factor.
+//!   That is one cabinet's ceramic capacitor and it is not a reason to move a
+//!   read value.
+//!
+//! The catalog row in `tools/sound-compare/targets.toml` stays
+//! `implemented-unvalidated`, because what the samples cannot review is a
+//! topology and that is where every error on this board has been.
 
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
 use phosphor_core::device::{
