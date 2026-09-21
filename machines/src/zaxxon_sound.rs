@@ -327,33 +327,29 @@ const PC1_LED_VF: f64 = 1.2;
 ///   arithmetic on read values rather than a consequence of anything invented.
 ///
 /// **The reference recordings cannot place this curve, and it was not fitted to
-/// them.** The reason is not the one this comment used to give, which was that
-/// the recordings are "measuring something other than this chain". They are
-/// recordings of this board.
+/// them.** Two reasons have been given for that and both were wrong. The first
+/// was that the recordings are "measuring something other than this chain";
+/// they are recordings of this board. The second was that `05.wav` and `04.wav`
+/// are the two tones at one ladder level, so their octave of separation showed
+/// the front end could not be 68 Hz wide and [`R21`] must be misread.
 ///
-/// The reason is that moving a front end both tones share moves them **together**,
-/// and the board's two tones disagree with ours relative to each other. Held at
-/// one ladder level by `zaxxon/ship-engine-pair` and compared with `05.wav` and
-/// `04.wav`, which were recorded at the same unknown level as one another:
+/// **[`R21`] is 470 kOhm**, re-read at 400 dpi along with `C26`, `C27` and
+/// `R20` and the whole stage's topology. What was wrong was the pairing: `05`
+/// is triggered by `PA2` alone and `04` by `PA3` alone, and the ladder is
+/// `PA0`/`PA1`, so nothing makes those two files share a level. Their octave is
+/// two ladder positions, not two tones.
 ///
-/// | | tone A (`05`) | tone B (`04`) |
-/// |---|---|---|
-/// | the board | **630.0 Hz** | **344.5 Hz** |
-/// | ours | 588.0 Hz | **760.3 Hz** |
+/// The real reason is duller. The front end is a fixed 68 Hz window that both
+/// tones share, so moving it moves them **together**, and where either
+/// recording sits says which level it was captured at rather than what this
+/// curve is. Both tones at one level are correctly the same narrow band at two
+/// amplitudes: measured on `zaxxon/ship-engine-pair`, ours is 98.0 % and 97.0 %
+/// inside 400-1000 Hz, 6 dB apart.
 ///
-/// The board's tone B is an octave *below* its tone A and ours is above it. So
-/// the board lets each Sallen-Key corner decide its own tone's pitch, and ours
-/// has both decided by the front end they share, which no LDR position fixes.
-///
-/// **What that points at is [`R21`], which is a read value.** The front end's
-/// bandwidth is `1/(pi*R21*C26)` and nothing else, so 470 kOhm with 0.01 uF
-/// gives 68 Hz where 47 kOhm would give 677 Hz, and only the second lets a
-/// 482 Hz corner shape anything. A 68 Hz window sitting at 770 Hz hands each
-/// low-pass a narrow band already above both corners, and a low-pass cannot move
-/// a pitch down. The transcription's provenance section says `470K` and `47K`
-/// are exactly the pair that is unreadable below 400 dpi. Nothing was changed
-/// here: a recording cannot correct a read value, it can only say which one is
-/// worth putting back under the loupe.
+/// What survives is a weak consistency check. The two samples' fundamentals,
+/// 630.0 and 344.5 Hz, both fall inside the 232 to 770 Hz these three numbers
+/// span across the four levels. Agreeing with a range an invented law produced
+/// is not evidence about the law.
 const PC1_R_BRIGHT: f64 = 1_000.0;
 const PC1_EXPONENT: f64 = 1.05;
 /// Dark resistance, which is also the ceiling the power law is clamped to.
