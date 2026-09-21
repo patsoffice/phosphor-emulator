@@ -1184,10 +1184,13 @@ sources.
   the sign. How many volts of control correspond to how much attenuation is not
   established at all, and the device carries a named, invented mapping for it.
 - **How far `Q6` pulls the cannon's tuning node down at full envelope.** Where
-  its sweep *stops* is now read (`R131`/`R132` and a silicon base-emitter drop
-  put it 0.19 s in) and `R133` bounds what it can do at the quiet end, so what
-  is left is only how bright the first fifth of the voice is. Still invented,
-  still labeled so at the call site, and not fitted to anything.
+  its sweep *stops* is read (`R131`/`R132` and a silicon base-emitter drop put
+  it 0.19 s in) and `R133` bounds what it can do at the quiet end, so what is
+  left is only how bright the first fifth of the voice is. **This is no longer
+  invented: it is constrained by `08.wav` to roughly 60 to 90 ohms and the
+  device carries 80.** See the section below. It is the one number on this board
+  where the recording is unambiguously the best evidence available, because no
+  sheet dimensions a transistor's on-resistance and that file does not clip.
 - **Which 4016B section each of the three sheet-12 gate bits controls.** `U17`'s
   three used sections take their control on pins 13, 6 and 12; the battleship's
   is pin 13, read on sheet 11. The homing-missile and laser assignments to pins
@@ -1543,6 +1546,44 @@ threshold at zero it kept the corner moving for the whole 0.68 s instead of
 parking at 1835 Hz after 0.19 s. Nothing was tuned; the base divider is read and
 the turn-on voltage is the same silicon drop this file uses for every diode.
 
+### And `Q6`'s on-resistance, which is the first constant here taken from a recording
+
+`CANNON_R_Q6_ON` was 120 Ω and was a guess. It is the one number on this board
+where a recording is unambiguously the best evidence available: **no sheet
+dimensions a transistor's collector-emitter resistance against its base drive**,
+so there is no read value for a measurement to overwrite, and `08.wav` is the
+cannon's own recording and is one of the eight that **do not clip**.
+
+Scanned against it, every summary statistic is monotone in this constant, and
+all of them improve:
+
+| | 120 Ω, guessed | **80 Ω** | 60 Ω |
+|---|---|---|---|
+| centroid, against the board's 2627.7 Hz | 2312.3 | **2486.1** | 2628.6 |
+| 85 % rolloff, against 4177.4 Hz | 3876.0 | **4392.8** | 4823.4 |
+| worst band delta | 5.99 pp | **3.51 pp** | 5.77 pp |
+| 1-3 kHz / 3-8 kHz | +0.05 / +5.99 | **+3.51 / +2.27** | +5.77 / -0.13 |
+
+**60 Ω lands the centroid within 0.03 % and is not the answer**, which is the
+part worth writing down. The last row is a seesaw: this constant moves energy
+between 1-3 kHz and 3-8 kHz and cannot change their sum, and ours is about
+**6 pp short across the pair** at every setting because our cannon carries that
+6 pp below 1 kHz where the recording does not. That excess drags our centroid
+down, so the value that makes the centroid agree is the value that
+over-brightens the sweep to pay for a different defect. 80 Ω is where the worst
+band delta is near its minimum and where the centroid lands once the excess is
+accounted for, so the constraint is **60 to 90 Ω** and not a decimal.
+
+80 Ω is also physically ordinary: `R131` and `R132` deliver about 35 uA of base
+drive at peak envelope, and a small-signal transistor at that drive with its
+collector near ground presents tens of ohms.
+
+The sub-1 kHz excess is the finding this leaves behind. Ours is 1.41 / 2.71 /
+7.91 % at 0-150 / 150-400 / 400-1000 against the board's 0.24 / 1.13 / 5.15, and
+about a fifth of the 0-150 part is the recording chain's own rolloff, which the
+homing missile's section establishes separately. The rest is ours and is not
+this constant.
+
 **The medium explosion is 7.8 dB out and is not going to be fixed by changing
 it, because it is already exactly the drawing.** Both explosion filters were
 checked against white noise through the two-pole low-pass their own parts give,
@@ -1587,7 +1628,7 @@ disasm audiodiff <samples>/NN.wav /tmp/ours.wav --range-b <start>:<end>
 | Voice | Reference clips | Worst band | Centroid, reference / ours | STFT distance |
 |---|---|---|---|---|
 | homing missile | 0.0 % | 21.3 pp at 1-3 kHz | 1794 / 1875 Hz | **0.92** |
-| cannon | 0.0 % | 6.0 pp at 3-8 kHz | 2628 / 2312 Hz | 1.22 |
+| cannon | 0.0 % | 3.5 pp at 1-3 kHz | 2628 / 2486 Hz | 1.20 |
 | laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1444 Hz | 1.52 |
 | battleship | 0.0 % | 14.7 pp at 0-150 Hz | 248 / 320 Hz | 1.79 |
 | alarm 3 | 0.0 % | 10.3 pp at 8 kHz+ | 4280 / 3360 Hz | 1.90 |

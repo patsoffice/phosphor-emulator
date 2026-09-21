@@ -18,13 +18,18 @@
 //! the three noise filters, the two engine resonators, the alarm divider chain
 //! and the whole eleven-leg mix are arithmetic on values read off the drawing.
 //!
-//! Two things are **not**, and each says `INVENTED` in its own doc comment
-//! rather than hiding among the read values:
+//! One thing is still **invented**, and says `INVENTED` in its own doc comment
+//! rather than hiding among the read values: the `MCD-725H` opto-isolator's
+//! resistance against LED current, which sets the player ship's engine pitch.
 //!
-//! - the `MCD-725H` opto-isolator's resistance against LED current, which sets
-//!   the player ship's engine pitch;
-//! - `Q6`'s collector-emitter resistance against its base drive, which sweeps
-//!   the cannon.
+//! One more used to be, and is now **constrained by a recording**:
+//! [`CANNON_R_Q6_ON`], `Q6`'s collector-emitter resistance against its base
+//! drive, which sweeps the cannon. `08.wav` is that voice's own recording, it
+//! does not clip, and every summary statistic is monotone in this constant and
+//! improves against the board at 80 ohms over the 120 that was guessed. That is
+//! a third category and it is marked as one at the call site: no sheet
+//! dimensions a transistor's on-resistance, so a board measurement is not
+//! competing with a read value, it is the only evidence there is.
 //!
 //! Three more rest on properties of parts rather than on the drawing, and are
 //! named where they are used rather than marked `INVENTED`, because each is a
@@ -522,13 +527,44 @@ fn cannon_q6_threshold_v() -> f64 {
     V_DIODE * (R131 + R132) / R132
 }
 
-/// **INVENTED**, and the only invented number left in this voice: how far `Q6`
-/// pulls `R133` down at full envelope.
+/// How far `Q6` pulls `R133` down at full envelope: **80 ohms**, and this is
+/// the first constant on this board to be **constrained by a recording** rather
+/// than invented or read.
 ///
-/// [`cannon_q6_threshold_v`] now fixes where the sweep *stops*, and [`R133`]
-/// fixes how little `Q6` can do at the quiet end, so this sets only how bright
-/// the first 0.19 s is. It has not been fitted to anything.
-const CANNON_R_Q6_ON: f64 = 120.0;
+/// [`cannon_q6_threshold_v`] fixes where the sweep *stops* and [`R133`] fixes
+/// how little `Q6` can do at the quiet end, so this sets only how bright the
+/// first 0.19 s is. No sheet dimensions a transistor's collector-emitter
+/// resistance against its base drive, so there is no read value for a recording
+/// to overwrite here: a board measurement is the only evidence that exists, and
+/// see the module doc for why refusing it was the wrong call.
+///
+/// `08.wav` is the right file to take it from. It is the **cannon's own
+/// recording and it does not clip**, unlike the four that do, so its spectrum
+/// is the board's rather than its capture chain's.
+///
+/// Scanned against it, every summary statistic is monotone in this constant and
+/// all of them improve from the 120 ohms that was guessed here:
+///
+/// | | 120 (guessed) | **80** | 60 |
+/// |---|---|---|---|
+/// | centroid, against 2627.7 Hz | 2312.3 | **2486.1** | 2628.6 |
+/// | 85 % rolloff, against 4177.4 Hz | 3876.0 | **4392.8** | 4823.4 |
+/// | worst band delta | 5.99 pp | **3.51 pp** | 5.77 pp |
+///
+/// **60 ohms lands the centroid within 0.03 % and it is not the answer**, which
+/// is the part worth writing down. The 1-3 kHz and 3-8 kHz bands are a seesaw
+/// in this constant, and our cannon carries about **6 pp of energy below 1 kHz
+/// that the recording does not**, from somewhere else entirely. That excess
+/// drags our centroid down, so the value that makes the centroid agree is the
+/// value that over-brightens the sweep to compensate for a different defect.
+/// 80 ohms is where the worst band delta is near its minimum and where the
+/// centroid lands once that excess is accounted for.
+///
+/// So this is constrained to roughly **60 to 90 ohms** rather than fitted to a
+/// decimal, and 80 is physically ordinary for a small-signal transistor at the
+/// 35 uA of base drive `R131` and `R132` deliver at peak envelope. The sub-1 kHz
+/// excess is a separate defect and is not chased by moving this.
+const CANNON_R_Q6_ON: f64 = 80.0;
 const CANNON_R_Q6_OFF: f64 = 10_000_000.0;
 
 // ---------------------------------------------------------------------------
