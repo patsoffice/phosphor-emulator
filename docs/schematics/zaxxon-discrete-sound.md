@@ -1112,6 +1112,30 @@ down:
 - the **`RO` rolloff** itself, down to 1.4 kHz: 18 % is still above 3 kHz,
   because what is up there is the fundamental and not a harmonic.
 
+**The obvious objection is that a rolloff would darken voices that are already
+too dark, and it does not survive the clipping check.** The same ratio taken
+over each whole sample, ours against the board:
+
+| | battleship | laser | homing | cannon | alarm 3 | base missile | s-exp | engine A | engine B |
+|---|---|---|---|---|---|---|---|---|---|
+| board | 0.014 | 0.099 | 0.143 | 0.422 | 0.281 | 0.002 | 0.001 | 0.008 | 0.002 |
+| ours | 0.075 | 0.116 | 0.168 | 0.395 | 0.139 | 0.001 | 0.000 | 0.000 | 0.000 |
+| clipped | | | | | | **6.8 %** | **0.8 %** | **14.5 %** | **6.8 %** |
+
+The laser, the homing missile and the cannon agree within 20 %. The four voices
+where **we** are the darker one are **exactly the four clipped references**, and
+clipping manufactures the harmonics that puts them there, so those four cannot
+constrain a rolloff in either direction. The alarms' excess is this file's own
+separate open item about their 8 kHz energy, and the battleship's is the one
+about `00.wav`'s third harmonic; neither goes through an `MB4391` at all, since
+both are gated by the `4016B`.
+
+What that leaves is a constraint rather than a free corner: any `RO` model has
+to be **gain dependent**, because a fixed one applied board wide would move the
+loud part of voices that already agree. A corner that only bites once a VCA is
+well down its law changes a whole-sample ratio very little and the shot's tail a
+great deal, which is the asymmetry the measurements show.
+
 Two things a next pass should not repeat. A **matched filter on STFT distance
 does not measure pitch here**: the distance is not level invariant, so every
 window of a decaying reference matches whichever calibration capture is nearest

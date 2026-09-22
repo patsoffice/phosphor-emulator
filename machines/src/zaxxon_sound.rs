@@ -1973,9 +1973,19 @@ struct ZaxxonInputs {
 /// 0.000 on the board while ours flattens at 0.022, so the corner **moves with
 /// the envelope**, which is what a current-steering VCA's rolloff pin does.
 ///
+/// **It has to be gain dependent.** The same ratio taken over each whole sample
+/// agrees within 20 % on the laser, the homing missile and the cannon, so a
+/// fixed corner applied board wide would move voices that already match. The
+/// four where this device reads the *darker* one are exactly the four clipped
+/// references (base missile 6.8 %, small explosion 0.8 %, engine A 14.5 %,
+/// engine B 6.8 %), and clipping manufactures the harmonics that put them
+/// there, so those four constrain nothing.
+///
 /// What is missing before this can be modeled is the `MB4391` datasheet's `RO`
 /// specification, because the resistance that 680 pF works against is inside
-/// the part. A 6 kHz corner fitted to the shot pays for most of what the
+/// the part. It is not on the open web: Fujitsu's linear data books do not
+/// carry it, and MAME had to guess the part too, so its netlist passes `RO`
+/// into the model and never uses it. A 6 kHz corner fitted to the shot pays for most of what the
 /// [`OPAMP_V_LOW`] split costs there, and fitting it is exactly what this
 /// comment exists to avoid. See `docs/schematics/zaxxon-discrete-sound.md`.
 fn mb4391_gain(b: &mut DiscreteCircuitBuilder, name: &str, control: NodeId) -> NodeId {
