@@ -540,21 +540,62 @@ impl DiscreteCircuitBuilder {
         )
     }
 
-    /// Square wave at a fixed frequency (Hz).
+    /// Square wave at a fixed frequency (Hz), symmetric.
     pub fn fixed_square(&mut self, name: &str, freq: f64) -> NodeId {
+        self.fixed_square_duty(name, freq, 0.5)
+    }
+
+    /// Square wave at a fixed frequency (Hz), high for `duty` of each period.
+    ///
+    /// **A duty other than 0.5 is not a detail, it is the even harmonics.** A
+    /// symmetric square has none at all; at duty `d` the `n`th harmonic's
+    /// amplitude goes as `|sin(n*pi*d)|/n`, so a 39 % square carries a second
+    /// harmonic only 9.4 dB below its fundamental. A board that sets a duty
+    /// with two resistors and gets modeled at 0.5 is missing a whole harmonic
+    /// series, which no amount of filtering downstream puts back.
+    ///
+    /// The magnitude spectrum is symmetric about 0.5, so `d` and `1 - d` sound
+    /// identical and only the DC offset's sign distinguishes them. Callers need
+    /// not work out which half of the cycle their board calls high.
+    pub fn fixed_square_duty(&mut self, name: &str, freq: f64, duty: f64) -> NodeId {
+        assert!(
+            (0.0..=1.0).contains(&duty),
+            "square {name:?} needs a duty in 0..=1, got {duty}"
+        );
         self.push_node(
             name,
-            NodeKind::FixedSquare { freq, phase: 0.0 },
+            NodeKind::FixedSquare {
+                freq,
+                duty,
+                phase: 0.0,
+            },
             ClockDomain::BoardCycle,
         )
     }
 
-    /// Square wave whose frequency (Hz) is read from `freq_src`.
+    /// Square wave whose frequency (Hz) is read from `freq_src`, symmetric.
     pub fn variable_square(&mut self, name: &str, freq_src: impl Into<NodeId>) -> NodeId {
+        self.variable_square_duty(name, freq_src, 0.5)
+    }
+
+    /// Square wave whose frequency (Hz) is read from `freq_src`, high for
+    /// `duty` of each period. See [`fixed_square_duty`](Self::fixed_square_duty)
+    /// for why the duty is worth carrying.
+    pub fn variable_square_duty(
+        &mut self,
+        name: &str,
+        freq_src: impl Into<NodeId>,
+        duty: f64,
+    ) -> NodeId {
+        assert!(
+            (0.0..=1.0).contains(&duty),
+            "square {name:?} needs a duty in 0..=1, got {duty}"
+        );
         self.push_node(
             name,
             NodeKind::VariableSquare {
                 freq_src: freq_src.into(),
+                duty,
                 phase: 0.0,
             },
             ClockDomain::BoardCycle,

@@ -711,6 +711,41 @@ Drop the amplifier's floor to **0.15 V** and the 555's duty collapses to about
 works against ground. `<V_555>` falls to 0.38 V, `A` to 0.093 V, and the tail
 lands at **310 Hz**.
 
+### Only the battleship's square is symmetric, and the device gave all three a half
+
+This came out of asking a different question than the metric asks: not "how far
+is each voice from its recording" but **"does the device match the sheet"**, one
+voice at a time. Three copies of the same oscillator, three duty cycles:
+
+| | integrator in | sink | duty |
+|---|---|---|---|
+| battleship | `R93` 30 kΩ | `R96` 15 kΩ | **0.500** |
+| shot | `R156` 33 kΩ | `R159` 15 kΩ | **0.545** |
+| laser | `R67` 120 kΩ | `R70` 47 kΩ | **0.608** |
+
+`1 - sink/integ_in` is a ratio of two read resistors and nothing else: the drive
+voltage, the capacitor and the Schmitt window all cancel between the two ramps.
+The device generated all three as **symmetric squares**, because the framework's
+square-wave source had no duty at all.
+
+**That is not a shading, it is the even harmonics.** A symmetric square has
+none. At duty `d` the `n`th harmonic goes as `|sin(n*pi*d)|/n`, so the second
+sits `20*log10(|cos(pi*d)|)` below the first: **9.4 dB** for the laser, 20.6 dB
+for the shot, and nowhere at all for a half. The laser was missing a harmonic
+series that no filter downstream could put back.
+
+Supplying the real duty took the laser's 400-1000 Hz band from 5.2 pp out to
+**1.1 pp** and its STFT distance from 1.51 to **1.31**; the shot's from 1.35 to
+1.32. The battleship came out **byte-identical**, which is the check that
+matters: its duty really is exactly a half, so the plumbing moved nothing it
+should not have, and the other nine voices are byte-identical too.
+
+One convenience worth recording, because it removes a decision nobody could
+have made from the drawing: the magnitude spectrum is symmetric about 0.5, so
+`d` and `1 - d` sound identical and differ only in the sign of a DC offset that
+`C55`, `C59` and `C93` all block. It does not matter which half of the cycle the
+board calls high.
+
 ### The op-amps are not symmetric, and one constant was doing three jobs
 
 **So the shot's tail is a direct read of the op-amp's output floor**, and that
@@ -1385,6 +1420,12 @@ sources.
   differs between them is the capacitor, the sink ratio, and whether the
   reference is a fixed divider (the battleship), a node driven by a 555 and an
   envelope (the shot), or a 555's capacitor directly (the laser).
+- **Each of those three carries a different duty cycle**, `1 - sink/integ_in`,
+  which is a ratio of two read resistors because the drive, the capacitor and
+  the Schmitt window all cancel between the two ramps: **0.500** for the
+  battleship (`R93`/`R96`), **0.545** for the shot (`R156`/`R159`) and **0.608**
+  for the laser (`R67`/`R70`). Only the first is symmetric. See
+  [what that cost](#only-the-battleships-square-is-symmetric-and-the-device-gave-all-three-a-half).
 - **The alarm stage is a comparator**, driven a hundred times past its rails,
   whose output is slew-limited by `C99` to 0.4 V per microsecond.
 - **`1QC` and `1QD` are corroborated by the two recordings**, which is the one
@@ -1939,8 +1980,8 @@ disasm audiodiff <samples>/NN.wav /tmp/ours.wav --range-b <start>:<end>
 |---|---|---|---|---|
 | homing missile | 0.0 % | 7.7 pp at 1-3 kHz | 1794 / 1950 Hz | **0.92** |
 | cannon | 0.0 % | 3.5 pp at 1-3 kHz | 2628 / 2486 Hz | 1.18 |
-| shot | 0.0 % | 17.4 pp at 3-8 kHz | 1385 / 2655 Hz | **1.35** (was 5.10) |
-| laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1444 Hz | 1.51 |
+| laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1451 Hz | **1.31** (was 1.51) |
+| shot | 0.0 % | 17.3 pp at 3-8 kHz | 1385 / 2655 Hz | **1.32** (was 5.10) |
 | battleship | 0.0 % | 14.7 pp at 0-150 Hz | 248 / 320 Hz | 1.79 |
 | alarm 3 | 0.0 % | 10.3 pp at 8 kHz+ | 4280 / 3360 Hz | 1.89 |
 | alarm 2 | 0.0 % | 9.9 pp at 8 kHz+ | 3360 / 1935 Hz | 1.91 |

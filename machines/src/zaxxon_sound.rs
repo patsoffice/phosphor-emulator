@@ -767,6 +767,32 @@ fn relaxation_hz(v_g: f64, integ_in: f64, sink: f64, c: f64, window: f64) -> f64
     1.0 / (window * c * (1.0 / i_charge + 1.0 / i_reverse))
 }
 
+/// The **duty cycle** the same two resistors set, `1 - sink/integ_in`, and the
+/// half of this circuit the device used to throw away.
+///
+/// Each ramp takes `window * C / i`, so the two halves are in the ratio of
+/// their currents and the drive voltage cancels along with everything else:
+/// this is a ratio of two read resistors and nothing more. The three copies of
+/// this oscillator come out at **0.500** (battleship, `R93`/`R96` 30 k against
+/// 15 k), **0.545** (shot, `R156`/`R159` 33 k against 15 k) and **0.608**
+/// (laser, `R67`/`R70` 120 k against 47 k).
+///
+/// **Only the battleship's is symmetric, and the device modeled all three as
+/// if they were.** A symmetric square has no even harmonics at all; at duty `d`
+/// the `n`th goes as `|sin(n*pi*d)|/n`, so the laser's 0.608 carries a second
+/// harmonic **9.4 dB** below its fundamental that a 0.5 square simply does not
+/// have. That is a whole harmonic series missing from a voice, and no filter
+/// downstream puts it back.
+///
+/// The magnitude spectrum is symmetric about 0.5, so it does not matter which
+/// half of the cycle the board calls high: 0.608 and 0.392 sound identical and
+/// differ only in the sign of a DC offset that `C55`, `C59` and `C93` all
+/// block. This returns the charging half and says so rather than pretending the
+/// choice was made.
+fn relaxation_duty(integ_in: f64, sink: f64) -> f64 {
+    1.0 - sink / integ_in
+}
+
 /// The slow stage, `U9(5,6,7)` and `U9(9,10,8)` around `Q4`: **3.02 Hz** at a
 /// 7.3 % duty cycle, a thump rather than a tone.
 ///
@@ -2249,7 +2275,8 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     // more second harmonic and it is below what a square-versus-square
     // comparison shows.
     let shot_freq = b.gain("SHOT_FREQ", shot_a, shot_hz_per_volt());
-    let shot_square = b.variable_square("U19_SHOT_OSC", shot_freq);
+    let shot_square =
+        b.variable_square_duty("U19_SHOT_OSC", shot_freq, relaxation_duty(R156, R159));
     let half = shot_out_v() / 2.0;
     let shot_tone = b.logic_levels("SHOT_TONE", shot_square, -half, half);
     let shot_voice = b.multiply("SHOT_OUT", shot_tone, shot_g);
@@ -2270,7 +2297,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     // which is not the same thing -- see the note on `resistor_mixer_switched`
     // in the framework -- but the board's legs are all 51k into a 10k load, so
     // opening one changes the others by under half a decibel.
-    let bs_square = b.fixed_square("U10_FAST_OSC", battleship_hz());
+    let bs_square = b.fixed_square_duty("U10_FAST_OSC", battleship_hz(), relaxation_duty(R93, R96));
     let half = battleship_swing_v() / 2.0;
     let bs_level = b.logic_levels("U10_HYSTERESIS_NODE", bs_square, -half, half);
     let bs_gated = b.multiply("BATTLESHIP_SW", bs_level, battleship);
@@ -2365,7 +2392,8 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         Box::new(Timer555::new(R65, R66, C53).tapping_the_cap()),
     );
     let laser_freq = b.gain("LASER_FREQ", laser_ramp, laser_hz_per_volt());
-    let laser_square = b.variable_square("U8_LASER_OSC", laser_freq);
+    let laser_square =
+        b.variable_square_duty("U8_LASER_OSC", laser_freq, relaxation_duty(R67, R70));
     // U8's output divided by R75/R76 before C55 and the 4016B. The 4016B is a
     // switch, so nothing here decays: the gate is the envelope.
     let half = opamp_span() * R76 / (R75 + R76) / 2.0;
@@ -3115,6 +3143,50 @@ mod tests {
         // so it is the one term the op-amp's span reaches.
         assert!((battleship_swing_v() - 3.5126).abs() < 1e-3);
         assert!((schmitt_window_v(R86, R88) - schmitt_window_v(R98, R99)).abs() < 1e-12);
+    }
+
+    /// Three copies of one oscillator, three different duty cycles, and only
+    /// one of them is the 50 % the device used to give all three.
+    ///
+    /// `1 - sink/integ_in` is a ratio of two read resistors: the drive voltage,
+    /// the capacitor and the Schmitt window all cancel between the two ramps.
+    /// So this is a reading, and getting it wrong is not a shading, it is the
+    /// **even harmonics**, which a symmetric square does not have at all.
+    ///
+    /// The laser is where it mattered. At 0.608 its second harmonic sits
+    /// `20*log10(cos(pi*d))` = **9.4 dB** below its fundamental; at 0.5 there is
+    /// no second harmonic to sit anywhere. Supplying the real duty took that
+    /// voice's 400-1000 Hz band from 5.2 pp out to 1.1 pp and its STFT distance
+    /// from 1.51 to 1.31, and left the battleship byte-identical, which is what
+    /// says the plumbing did not move anything it should not have.
+    #[test]
+    fn each_oscillator_carries_the_duty_its_two_resistors_set() {
+        let bs = relaxation_duty(R93, R96);
+        let shot = relaxation_duty(R156, R159);
+        let laser = relaxation_duty(R67, R70);
+        assert!((bs - 0.5).abs() < 1e-12, "battleship {bs}");
+        assert!((shot - 0.5455).abs() < 1e-3, "shot {shot}");
+        assert!((laser - 0.6083).abs() < 1e-3, "laser {laser}");
+
+        // Only the battleship's pair is exactly 2 to 1, and that is the whole
+        // reason its square is symmetric. The other two are not, and the file
+        // read them that way for six passes.
+        assert!((R93 / R96 - 2.0).abs() < 1e-12);
+        assert!((R156 / R159 - 2.0).abs() > 0.1);
+        assert!((R67 / R70 - 2.0).abs() > 0.1);
+
+        // The second harmonic each duty implies, relative to the fundamental:
+        // |sin(2*pi*d)/2| over |sin(pi*d)|, which is |cos(pi*d)|.
+        let second = |d: f64| (std::f64::consts::PI * d).cos().abs();
+        assert!(
+            second(bs) < 1e-12,
+            "a symmetric square has no second harmonic"
+        );
+        let db = 20.0 * second(laser).log10();
+        assert!(
+            (db + 9.4).abs() < 0.3,
+            "the laser's second harmonic: {db} dB"
+        );
     }
 
     /// `Q5` has to be a very good switch, and the fast stage stops dead if it

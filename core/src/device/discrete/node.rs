@@ -45,10 +45,15 @@ pub(crate) enum NodeKind {
     ExternalSource { value: f64 },
 
     // --- Sources ---
-    /// Square wave at a fixed frequency (Hz).
-    FixedSquare { freq: f64, phase: f64 },
-    /// Square wave whose frequency (Hz) comes from another node.
-    VariableSquare { freq_src: NodeId, phase: f64 },
+    /// Square wave at a fixed frequency (Hz), high for `duty` of each period.
+    FixedSquare { freq: f64, duty: f64, phase: f64 },
+    /// Square wave whose frequency (Hz) comes from another node, high for
+    /// `duty` of each period.
+    VariableSquare {
+        freq_src: NodeId,
+        duty: f64,
+        phase: f64,
+    },
     /// Triangle wave at a fixed frequency (Hz).
     FixedTriangle { freq: f64, phase: f64 },
     /// Triangle wave whose frequency (Hz) comes from another node.
@@ -544,16 +549,20 @@ impl NodeKind {
             NodeKind::ExternalSource { value } => *value,
             NodeKind::Constant { value } => *value,
 
-            NodeKind::FixedSquare { freq, phase } => {
+            NodeKind::FixedSquare { freq, duty, phase } => {
                 *phase += *freq * dt;
                 *phase -= phase.floor();
-                if *phase < 0.5 { 1.0 } else { -1.0 }
+                if *phase < *duty { 1.0 } else { -1.0 }
             }
-            NodeKind::VariableSquare { freq_src, phase } => {
+            NodeKind::VariableSquare {
+                freq_src,
+                duty,
+                phase,
+            } => {
                 let freq = values[freq_src.index()];
                 *phase += freq * dt;
                 *phase -= phase.floor();
-                if *phase < 0.5 { 1.0 } else { -1.0 }
+                if *phase < *duty { 1.0 } else { -1.0 }
             }
             NodeKind::FixedTriangle { freq, phase } => {
                 *phase += *freq * dt;
