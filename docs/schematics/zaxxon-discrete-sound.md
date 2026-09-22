@@ -265,8 +265,14 @@ is where the drawing puts it, and the stage is a low-pass.
 3.3 kΩ goes from their junction to **ground**, and `C32` 2.2 uF takes the
 junction to `U14` pin 1. That is a divider of **0.216**, or 13.3 dB, and it
 applies to these two voices and to nothing else on the board. The MB4391s' `RO`
-pins carry `C33` and `C42` 680 pF to ground, which is the part's own rolloff pin
-and not in the signal path.
+pins carry `C33` and `C42` 680 pF to ground.
+
+**This file used to end that sentence with "which is the part's own rolloff pin
+and not in the signal path", and the second half of that is wrong.** A pin the
+drawing labels `RO`, carrying a 680 pF capacitor to ground, is a rolloff: that
+is what the name says and what the part is for. Every MB4391 channel on these
+two sheets has one, and the device models none of them. See
+[the shot's slope](#the-slope-is-a-rolloff-that-moves-and-every-mb4391-has-the-part-for-it).
 
 `PLAYER SHIP C` and `D` reach `U32`, a 74LS139 with its enable grounded. Only
 `Y0` (pin 4) and `Y1` (pin 5) are connected; `Y2` and `Y3` go nowhere. Each
@@ -1017,6 +1023,102 @@ the board's and our tail, even at its best floor, is short of the board's
 1-3 kHz share by 20 pp. The next pass wants the question put that way, because
 "too bright at the head" and "too dark at the tail" are one fact and not two,
 and no end point fixes a slope.
+
+### The slope is a rolloff that moves, and every MB4391 has the part for it
+
+The section above left the residual as "the slope rather than its ends". This
+one measures the slope, and the first half of it turns out not to be pitch at
+all.
+
+**The instrument is a calibration rather than an argument.** Force the shot's
+oscillator to a fixed frequency, capture it through the real chain (VCA, leg,
+mix, output stage), and read its six band shares. That converts "how bright is
+this window" into a pitch, through the identical analysis, with no arithmetic
+about harmonic series in between:
+
+| forced `f0` | 0-150 | 150-400 | 400-1k | 1k-3k | 3k-8k | 8k+ |
+|---|---|---|---|---|---|---|
+| 250 Hz | 0.0 | 80.4 | 10.0 | 6.7 | 2.1 | 0.8 |
+| 400 Hz | 0.0 | 35.7 | 46.7 | 12.7 | 3.6 | 1.3 |
+| 650 Hz | 0.0 | 0.0 | 81.0 | 10.8 | 6.2 | 2.0 |
+| 1000 Hz | 0.0 | 0.0 | 44.5 | 43.6 | 8.6 | 3.3 |
+| 1600 Hz | 0.0 | 0.0 | 0.0 | 82.5 | 12.0 | 5.6 |
+| 2600 Hz | 0.0 | 0.0 | 0.0 | 84.1 | 9.6 | 6.2 |
+
+Now take the scale-invariant ratio **`r` = (everything above 3 kHz) / (150 Hz to
+3 kHz)**. For our square `r` is never below **0.030**, at any pitch in that
+table, and it reaches its floor when the fundamental sits low and only the
+harmonics are left. `r` for a *mixture* is a weighted average of its parts, so
+**no pitch trajectory whatsoever can put our voice below 0.030.**
+
+`23.wav`'s tail sits at **0.008**.
+
+That is a bound rather than a fit, and it settles a question this file has been
+answering by ear: the board's shot is not our waveform at the wrong pitch. Its
+top is missing. The same ratio through the voice, in 50 ms windows, says the
+rolloff is not fixed either:
+
+| window | 0.00 | 0.10 | 0.20 | 0.30 | 0.40 | 0.50 | 0.60 | 0.65 |
+|---|---|---|---|---|---|---|---|---|
+| `23.wav` | 0.153 | 0.094 | 0.052 | 0.096 | 0.029 | 0.011 | 0.002 | **0.000** |
+| ours | 0.460 | 4.591 | 0.670 | 0.058 | 0.017 | 0.021 | 0.023 | 0.022 |
+
+Ours falls to the square's own floor of about 0.022 and stays there, which is
+what a fixed waveform does. The board's keeps going, through two orders, to
+nothing. **A fixed filter cannot do that. A filter whose corner follows the
+envelope can.**
+
+**And the board has the part.** `U16` pin 14, the `RO` pin of the shot's
+MB4391, carries `C94` **680 pF** to ground. It is not in this file's transcription
+and it is not in the device. It is not special to the shot either: the drawing
+labels the MB4391's four pins `IN`, `CON`, `OUT` and `RO`, and **every channel on
+these two sheets has 680 pF on `RO`**, read at 400 dpi on `U15` ch B (`C75`) and
+`U13` ch B (`C77`) as well as `U16` ch A, with `C33` and `C42` already in this
+file on the engine pair. `C75` is 680 pF and not the 480 pF a 100 dpi pass reads.
+
+A VCA's rolloff pin sets its bandwidth, and in a current-steering VCA the
+resistance that capacitor works against moves with the control current. So the
+corner falls as the voice decays, which is exactly the shape of the table above.
+**The corner itself is a part property the drawing does not give**, so it is the
+`MB4391` datasheet's `RO` specification that would settle it, and that is the
+piece of paper this voice now needs.
+
+What it is worth, measured, with the floor from the section above at its 0.35 V:
+
+| | tail 3-8 kHz | tail 8 kHz+ | voice distance |
+|---|---|---|---|
+| today | 1.6 | 0.6 | **1.323** |
+| floor 0.35 V alone | 3.7 | 1.4 | 1.411 |
+| floor 0.35 V + a 6 kHz rolloff | 2.3 | 0.3 | **1.356** |
+| the board | 0.7 | 0.1 | |
+
+So the rolloff pays for most of what the floor costs, which is the shape rule 1
+describes: the floor was not wrong, it was half a pair. Neither is applied,
+because 6 kHz is fitted and the datasheet is what would make it a reading.
+
+**The head is still unexplained, and four more doors are now closed.** Our head
+reaches about 6600 Hz where the board's reaches about 1600. Node A's peak is
+`R153` against `R155`'s share of the 555's own output high,
+`0.2165 * 10.3 = 2.23 V`, and this pass swept everything that could hold it
+down:
+
+- the amplifier's **ceiling**, 10.5 V to 4.0 V: the head's bands move by 0.1 pp;
+- its **gain**, 5.89 down to 1.5: the head gets *brighter*, 41 % to 59 % in
+  3-8 kHz, because a smaller gain keeps the section off its floor;
+- its **floor**: the head is above it throughout and nothing moves;
+- **`C91`'s corner**, 18.2 Hz down to 2 Hz, which caps the peak through
+  `1 - e^(-T/tau)`: the head's 3-8 kHz stays between 36 and 42 % until the
+  corner is so low that the warble dies with it;
+- the **`RO` rolloff** itself, down to 1.4 kHz: 18 % is still above 3 kHz,
+  because what is up there is the fundamental and not a harmonic.
+
+Two things a next pass should not repeat. A **matched filter on STFT distance
+does not measure pitch here**: the distance is not level invariant, so every
+window of a decaying reference matches whichever calibration capture is nearest
+in level, and the track comes out constant at 260 Hz with distances of 2 to 3.
+And the band ratio `r` is only a rolloff measure **while the fundamental stays
+under 3 kHz**; at the head ours does not, so `r` there is measuring our pitch
+error and not a filter.
 
 ## The base missile, and the last block-level reading on the board
 

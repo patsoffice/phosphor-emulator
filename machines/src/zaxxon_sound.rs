@@ -1958,6 +1958,26 @@ struct ZaxxonInputs {
 
 /// An `MB4391`'s gain from its control voltage: the clamped ramp between
 /// [`mb4391_full_v`] and [`mb4391_mute_v`], squared.
+///
+/// **This models the part as a gain and nothing else, and the drawing gives it
+/// a bandwidth.** Every `MB4391` channel on these two sheets has **680 pF on
+/// its `RO` pin**, which the drawing labels alongside `IN`, `CON` and `OUT`:
+/// `C33` and `C42` on the engine pair, `C75` on `U15` ch B, `C77` on `U13` ch B,
+/// `C86`, and `C94` on `U16` ch A, which is the shot's. None of them is here.
+///
+/// It is not cosmetic. The shot's recording carries less energy above 3 kHz
+/// than this chain produces at **any** pitch, by a bound rather than a fit: the
+/// ratio of everything above 3 kHz to the 150 Hz-to-3 kHz body never goes below
+/// 0.030 for our square, a mixture cannot beat its own minimum, and `23.wav`'s
+/// tail sits at 0.008. The same ratio through that voice falls from 0.153 to
+/// 0.000 on the board while ours flattens at 0.022, so the corner **moves with
+/// the envelope**, which is what a current-steering VCA's rolloff pin does.
+///
+/// What is missing before this can be modeled is the `MB4391` datasheet's `RO`
+/// specification, because the resistance that 680 pF works against is inside
+/// the part. A 6 kHz corner fitted to the shot pays for most of what the
+/// [`OPAMP_V_LOW`] split costs there, and fitting it is exactly what this
+/// comment exists to avoid. See `docs/schematics/zaxxon-discrete-sound.md`.
 fn mb4391_gain(b: &mut DiscreteCircuitBuilder, name: &str, control: NodeId) -> NodeId {
     let span = mb4391_mute_v() - mb4391_full_v();
     let slope = b.gain(&format!("{name}_SLOPE"), control, -1.0 / span);
