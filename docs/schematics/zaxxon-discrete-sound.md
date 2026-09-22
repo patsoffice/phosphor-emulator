@@ -855,11 +855,13 @@ What is left is a head about twice too bright and a tail about 20 % too low:
 | 3000-8000 Hz | 4.99 % | **22.37 %** |
 | decay T20 | 0.519 s | 0.763 s |
 
-Both residuals are the new constants rather than the topology, and they are
-entangled through the span: lowering the ceiling also narrows the span, which
-speeds every oscillator up, so the head gets *brighter* rather than darker.
-Untangling that is the next pass's, and it wants the battleship and laser
-measured alongside, because they read the same span.
+This paragraph used to read "both residuals are the new constants rather than
+the topology, and they are entangled through the span". **Half of that is
+wrong**, and the half that is wrong is the head: the ceiling was swept alone
+from 10.5 V to 4.0 V and moved the head's brightest band by 0.1 pp. The tail
+really is a floor, and the floor turns out not to be a board-wide number at all.
+Both are measured in
+[the section below](#the-head-is-not-the-ceiling-and-the-residual-is-not-one-constant).
 
 ### What was tried before this and did not work alone
 
@@ -902,6 +904,119 @@ substitute for it: **go back to sheet 11.** What needs reading at 400 dpi is
 `R155`, and whether anything else lands on net 21 between the amplifier, `R154`
 and `U18` pin 5. A pass that re-derives from the node list above cannot find a
 wrong node in it, and three tries just demonstrated that again.
+
+### The head is not the ceiling, and the residual is not one constant
+
+The previous pass left the shot's residual as "head about twice too bright, tail
+about 20 % too low", called both of them [`OPAMP_V_LOW`] and [`OPAMP_V_HIGH`],
+and said the two were entangled through the span. **The tail half is right and
+the head half is wrong**, and the head half is wrong in a way that can be
+demonstrated rather than argued: the ceiling does not reach it.
+
+Three premises had to be established first, because two of them were being
+assumed and one of them is a trap.
+
+- **The capture carries 50 ms of silence before the trigger.** `shot.toml` fires
+  at 0.50 s and its analysis window opens at 0.45 s, so the WAV's `t = 0` is
+  50 ms *before* the voice starts. Every window comparison against `23.wav`
+  needs `--range-b` offset by `+0.05`, or each of our windows is read 50 ms
+  early. The whole-voice figures in the section above were taken with the
+  offset and are unaffected; a per-window table taken without it is not.
+- **The sample set is not band limited**, so the board's dullness at the head is
+  the board and not the recording chain. `20.wav` carries **13.8 %** of its
+  energy above 8 kHz and `08.wav` **29.1 %** in 3 to 8 kHz. Whatever recorded
+  this cabinet passed the top of the band.
+- **96 kHz is enough simulation rate to say so.** At 384 kHz the head's six band
+  shares move by under 0.7 pp and the voice's distance moves from 1.324 to
+  1.331, so our excess above 3 kHz is the model and not aliasing.
+
+**What the board does and the device does not is warble for the whole voice.**
+In 50 ms windows the board's 150-400 Hz share swings between 6 % and 38 % from
+one window to the next, all the way out to 650 ms; ours swings until 350 ms and
+is then flat at 76 to 80 % for the rest. The mechanism is visible in a node
+trace: `U19`(1,2,3) reaches its floor at 370 ms, which pins `U18`'s control at
+0.1 V, which collapses that 555 to a **1.2 % duty**, and a 0.28 ms pulse every
+23 ms is nothing once `C91`'s 8.8 ms has smoothed it. The board's tail is still
+moving between bands, so the board's control pin is not at 0.1 V.
+
+**The floor is load dependent, and this stage is the only loaded one.** A 555's
+pin 5 is the top tap of an internal three by 5 kOhm divider, so holding it at
+0.1 V means sinking `(12 - 0.1)/5k` = **2.37 mA**. That is the one place on
+these two sheets where an op-amp output has to sink milliamps: every other
+section drives an integrator, a Schmitt divider or another section's input. The
+`LM324` family's own sink specification is the tell, because it is quoted at two
+points and they are three orders apart: 12 uA minimum at `V_O` = 200 mV, and
+10 mA at `V_O` = 2 V. An output sinking 2.37 mA is not at 0.1 V.
+
+So `OPAMP_V_LOW` is not one number for the board, and the tail measures which
+number this stage wants. Band shares over 0.45 to 0.95 s, against the board's
+`0.1 / 28.7 / 37.4 / 33.0 / 0.7 / 0.1`:
+
+| floor | 0-150 | 150-400 | 400-1k | 1k-3k | 3k-8k | 8k+ | L1 |
+|---|---|---|---|---|---|---|---|
+| 0.1 V (today) | 1.5 | 80.7 | 9.9 | 5.6 | 1.6 | 0.6 | **109.7** |
+| 0.2 V | 0.5 | 64.6 | 24.2 | 7.5 | 2.3 | 0.9 | 77.4 |
+| 0.3 V | 0.3 | 35.0 | 50.5 | 9.4 | 3.5 | 1.3 | **47.2** |
+| 0.4 V | 0.1 | 25.3 | 56.2 | 12.5 | 4.3 | 1.6 | **47.8** |
+| 0.5 V | 0.1 | 13.8 | 58.5 | 20.9 | 5.0 | 1.8 | 54.1 |
+| 0.6 V | 0.1 | 6.0 | 58.5 | 27.6 | 5.7 | 2.1 | 56.2 |
+
+A floor near **0.35 V** more than halves the tail's band error and brings the
+warble back. It is not applied here, and the reason is the next paragraph: on
+its own it takes the voice's distance from 1.32 to 1.45, because the metric is
+almost entirely the head, and the head is wrong by an octave in a way this does
+not touch. This is the file's own rule about incomplete changes pointing the
+other way for once: the piece it needs has not been found, so it is recorded
+rather than landed.
+
+**And the head is not the ceiling.** Sweeping `U19`(1,2,3)'s ceiling alone, with
+the head measured over 50 to 300 ms of the voice against the board's
+`0.1 / 3.5 / 22.8 / 64.5 / 7.5 / 1.6`:
+
+| ceiling | 0-150 | 150-400 | 400-1k | 1k-3k | 3k-8k | 8k+ |
+|---|---|---|---|---|---|---|
+| 10.5 V | 0.0 | 0.0 | 1.9 | 47.8 | 41.2 | 9.1 |
+| 8.0 V | 0.0 | 0.0 | 1.9 | 47.6 | 41.3 | 9.1 |
+| 6.0 V | 0.0 | 0.0 | 1.9 | 47.7 | 41.3 | 9.1 |
+| 4.0 V | 0.0 | 0.0 | 1.9 | 47.8 | 41.2 | 9.1 |
+| 2.5 V | 0.0 | 0.0 | 2.5 | 57.1 | 32.7 | 7.7 |
+| 1.5 V | 0.0 | 0.0 | 25.7 | 54.5 | 14.8 | 5.0 |
+
+**Four volts of ceiling change moves the head's brightest band by 0.1 pp.** The
+reason is a bound that has nothing to do with the amplifier: node A's peak is
+`R153` against `R155`'s share of the 555's *own* output high, `0.2165 * 10.3` =
+**2.23 V**, reached in full whenever that 555's charge leg outlasts `C91`'s
+8.8 ms. 2.23 V at node A is **7150 Hz** at the oscillator, and the ceiling only
+begins to matter once it is low enough to shorten the charge leg below the
+smoothing, which needs a control pin under about 1.2 V. An op-amp on +12 V whose
+output stops at 1.5 V is not a part class, it is a fit.
+
+Lowering the amplifier's **gain** was tried in the same sweep and moves the head
+the wrong way: at `R150`/`R149` = 3.0 the head's 3-8 kHz share goes from 41 % to
+59 %, because a smaller gain keeps the amplifier off its floor, which keeps the
+555's duty up, which keeps node A up. The voice's distance rises monotonically,
+1.32 to 1.72 to 1.99, all the way down to a gain of 1.5.
+
+So the head is not the ceiling, not the floor, not the gain, and not the
+simulation rate. It is also not a misread. Everything the voice turns on was
+read again at 400 dpi for this pass, including **net 21, which every previous
+pass had by elimination**: `U19` pin 1 leaves its `R150` feedback, meets a
+junction dot, and runs right to a second junction dot where `U18` pin 5 drops
+onto it and `R154` leaves. `U18` pins 4 and 8 both go to +12 V, so that 555 is
+free running. `R153` 2.7 k, `R154` 8.2 k, `R155` 820 Ohm, `C90` 3.3 uF, `C91`
+15 uF, `R151`/`R152` 10 k, `R156`/`R157`/`R158` 33 k, `R159` 15 k, `C92`
+1000 pF, `R161` 33 k, `R162` 100 k on +6 V, `R164` 1 M, `R165` 220 k, `R145`
+270 k, `R146` 1 M, `R147` 1 M, `R149` 5.6 k, `R150` 33 k. `C88`'s label was
+re-cropped at 800 % and is `047UF` with no point anywhere and even spacing
+between all three digits, which settles it at 0.047 uF for the second time.
+
+**What is left is the shape of the sweep rather than its ends.** Ours moves node
+A over 36 to 1 across the voice and the board's moves it over about 9 to 1, and
+the error runs in both directions from the middle: our head is an octave above
+the board's and our tail, even at its best floor, is short of the board's
+1-3 kHz share by 20 pp. The next pass wants the question put that way, because
+"too bright at the head" and "too dark at the tail" are one fact and not two,
+and no end point fixes a slope.
 
 ## The base missile, and the last block-level reading on the board
 

@@ -1228,11 +1228,38 @@ const R76: f64 = 2_200.0;
 /// - the shot's tail pitch is a direct read of **[`OPAMP_V_LOW`] alone**,
 ///   because `U19`(1,2,3)'s low rail lands on `U18`'s control pin and sets that
 ///   555's duty cycle;
-/// - the shot's head is **[`OPAMP_V_HIGH`] alone**, for the same reason.
+/// - the shot's head is **not** [`OPAMP_V_HIGH`], which this comment used to
+///   claim. See below.
 ///
 /// This used to be a single symmetric `OPAMP_SWING` of 5.0, so the floor sat at
 /// 1.0 V, which kept `U18` running at 39 Hz and an 11 % duty and held the
 /// shot's pitch floor at 1182 Hz against the board's 276 to 300.
+///
+/// **Two corrections, both measured rather than argued.**
+///
+/// The ceiling does not reach the shot's head. Swept alone, `10.5` down to `4.0`
+/// moves that voice's brightest band by 0.1 pp, because node A's peak is bounded
+/// by `R153` against `R155`'s share of `U18`'s *own* output high,
+/// `0.2165 * 10.3` = 2.23 V, which is 7150 Hz at the oscillator and is reached
+/// in full whenever that 555's charge leg outlasts `C91`'s 8.8 ms. The ceiling
+/// only enters once it is low enough to shorten the charge leg, which takes a
+/// control pin under about 1.2 V, and an op-amp on +12 V whose output stops at
+/// 1.5 V is a fit rather than a part class.
+///
+/// And the floor is **load dependent**, so it is not one number for the board.
+/// `U19`(1,2,3) is the only section on these two sheets whose output has to sink
+/// milliamps: `U18`'s pin 5 is the top tap of an internal three by 5 kOhm
+/// divider, so holding it at 0.1 V means sinking `(12 - 0.1)/5k` = 2.37 mA,
+/// where every other section here drives an integrator, a Schmitt divider or
+/// another section's input. The `LM324` family quotes its sink at two points
+/// three orders apart, 12 uA at `V_O` = 200 mV and 10 mA at `V_O` = 2 V, so a
+/// section sinking 2.37 mA does not sit at 0.1 V. The shot's tail measures that
+/// section's floor at about **0.35 V**, which more than halves its band error
+/// and brings back a warble the board has for the whole voice and this device
+/// loses at 370 ms. It is **not applied**, because on its own it takes that
+/// voice from 1.32 to 1.45: the metric is almost all head, and the head is an
+/// octave out for a reason nobody has found. The table and the argument are in
+/// `docs/schematics/zaxxon-discrete-sound.md`.
 const OPAMP_V_LOW: f64 = 0.1;
 const OPAMP_V_HIGH: f64 = 10.5;
 
