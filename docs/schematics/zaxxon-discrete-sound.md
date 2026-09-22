@@ -711,19 +711,35 @@ Drop the amplifier's floor to **0.15 V** and the 555's duty collapses to about
 works against ground. `<V_555>` falls to 0.38 V, `A` to 0.093 V, and the tail
 lands at **310 Hz**.
 
+### The op-amps are not symmetric, and one constant was doing three jobs
+
 **So the shot's tail is a direct read of the op-amp's output floor**, and that
 is a different quantity from the one the battleship and the laser depend on.
 Their rates come from the Schmitt window, which is `R_in/(R_in+R_fb)` of the
 output's **span**, `V_OH - V_OL`. The shot's tail comes from `V_OL` alone, and
-its head from `V_OH` alone. `OPAMP_SWING` ties all three together by assuming
+its head from `V_OH` alone. `OPAMP_SWING` tied all three together by assuming
 the output swings symmetrically about the +6 V mid-rail, which is the one thing
 a single-supply op-amp reliably does not do.
 
-That is the next thing to try on this voice, and it is worth noting that it also
-touches the battleship and laser disagreement above: the laser wants a span
-implying a floor near 0.2 V, and the shot's tail independently wants 0.15 V.
-Two voices asking for the same floor is the first thing on this board that has
-pointed at that constant from two directions.
+Every op-amp on these two sheets is a **14-pin quad** (the sections are wired on
+pins 1/2/3, 5/6/7, 8/9/10 and 12/13/14) running from +12 V and ground, and the
+1982 part for that job is the `LM324` family. Its defining behavior is exactly
+this shape: an internal current sink pulls the output to within tens of
+millivolts of ground, while the source side stops about 1.5 V short of the
+positive rail. The drawing does not name the part, so **0.1 V and 10.5 V are a
+part-class inference**, in the same category as the 1.7 V this file already
+gives a bipolar 555's output. They replace a symmetric 1.0 and 11.0.
+
+What that costs everywhere else is small and was measured. The span goes 10.0 to
+10.4, so the battleship, the laser, the shot's oscillator and the homing
+missile's warble are all 4 % slower or wider; every voice's STFT distance moves
+by under 0.03, two of them for the better. `OUTPUT_GAIN` goes 4.4 to 4.3,
+because four voices got 4 % louder and `nothing_saturates` is the conservative
+all-voices bound that then trips.
+
+It does **not** touch the battleship and laser disagreement. The span moved 4 %,
+their errors went from -7 % and +16 % to -11 % and +10 %, and the 26 % between
+them is unchanged. That gap is still one cabinet's tolerances.
 
 ### The board sweeps this voice down over its whole length and the device does not
 
@@ -766,11 +782,56 @@ It also makes this file's own sentence about that stage wrong. `U19`(1,2,3) does
 low rail whenever X is within `OPAMP_SWING/5.89` of the mid-rail, which is
 whenever Y is below 2.79 V.
 
-### What was tried, and why none of it shipped
+### What fixed it, and the order the pieces had to go in
 
-Three changes, each one arithmetic on the node list above rather than a reading,
-and **every one made the voice measurably worse**. They are written down so the
-next pass does not spend the afternoon rediscovering them.
+Four changes together take this voice's STFT distance from **5.10 to 1.35**,
+from last place in the scoreboard to third, and move nothing else on the board
+by more than 0.02. Three are the sheet and one is the part.
+
+1. **`R147`'s share of node Y, coupled into node X** at `R145`/`R146` against
+   `R147`, a weight of 0.560, lagged by the same `C88` corner the step decays
+   with. This is the wire the device was built without.
+2. **`C88`'s corner is 26 ms, not 43 ms.** `shot_pitch_r` had `R147 + R148` in
+   the path, on the reading that those two are how X reaches ground. They are,
+   at DC. At the 4 Hz this corner describes, `C89` 680 nF holds Y to ground with
+   59 kΩ against `R148`'s 2.2 MΩ, so `R147` lands on an AC ground and `R148` is
+   not in it.
+3. **`C89`'s recovery is 760 ms, not 468 ms**, by the same argument the other
+   way: `C88` is 15 MΩ at 0.2 Hz and therefore open, so `R147` sees
+   `R145`/`R146`'s 1.27 MΩ in series rather than a ground. This is where "the
+   shot is 630 ms against the recording's 990" came from.
+4. **The op-amp's output floor**, which is [a different constant than it
+   looked](#the-op-amps-are-not-symmetric-and-one-constant-was-doing-three-jobs).
+
+**The order is the finding.** Each of the first three was tried alone in an
+earlier pass and each made the voice measurably worse; the floor alone, tried
+on its own, was worse still. They are not independent. Without `R147` the
+amplifier reaches its floor 40 ms into the voice, so lowering the floor drags
+the *whole* voice down instead of only its tail: 150-400 Hz went to 73 % where
+the board has 14 %. With `R147` the amplifier stays off its rails for hundreds
+of milliseconds, and then the low floor is what lets the tail arrive.
+
+What is left is a head about twice too bright and a tail about 20 % too low:
+
+| | the board | ours |
+|---|---|---|
+| centroid, whole voice | 1385 Hz | 2655 Hz |
+| 150-400 Hz | 14.05 % | 18.12 % |
+| 3000-8000 Hz | 4.99 % | **22.37 %** |
+| decay T20 | 0.519 s | 0.763 s |
+
+Both residuals are the new constants rather than the topology, and they are
+entangled through the span: lowering the ceiling also narrows the span, which
+speeds every oscillator up, so the head gets *brighter* rather than darker.
+Untangling that is the next pass's, and it wants the battleship and laser
+measured alongside, because they read the same span.
+
+### What was tried before this and did not work alone
+
+The same three sheet corrections, each applied by itself, and **every one made
+the voice measurably worse**. They are kept here because the reason is the
+useful part: the pieces are not separable, and a change that measures worse in
+isolation is not thereby wrong.
 
 - **Coupling Y into X** at `R145`/`R146` against `R147`, a weight of 0.560. The
   direction is right (X falls on a trigger, so the amplifier rises, so the
@@ -1876,18 +1937,18 @@ disasm audiodiff <samples>/NN.wav /tmp/ours.wav --range-b <start>:<end>
 
 | Voice | Reference clips | Worst band | Centroid, reference / ours | STFT distance |
 |---|---|---|---|---|
-| homing missile | 0.0 % | 7.7 pp at 1-3 kHz | 1794 / 1950 Hz | **0.90** |
-| cannon | 0.0 % | 3.5 pp at 1-3 kHz | 2628 / 2486 Hz | 1.17 |
-| laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1444 Hz | 1.52 |
+| homing missile | 0.0 % | 7.7 pp at 1-3 kHz | 1794 / 1950 Hz | **0.92** |
+| cannon | 0.0 % | 3.5 pp at 1-3 kHz | 2628 / 2486 Hz | 1.18 |
+| shot | 0.0 % | 17.4 pp at 3-8 kHz | 1385 / 2655 Hz | **1.35** (was 5.10) |
+| laser | 0.0 % | 7.0 pp at 150-400 Hz | 1239 / 1444 Hz | 1.51 |
 | battleship | 0.0 % | 14.7 pp at 0-150 Hz | 248 / 320 Hz | 1.79 |
-| alarm 3 | 0.0 % | 10.3 pp at 8 kHz+ | 4280 / 3360 Hz | 1.90 |
+| alarm 3 | 0.0 % | 10.3 pp at 8 kHz+ | 4280 / 3360 Hz | 1.89 |
 | alarm 2 | 0.0 % | 9.9 pp at 8 kHz+ | 3360 / 1935 Hz | 1.91 |
-| medium explosion, retriggered | **5.1 %** | 7.7 pp at 150-400 Hz | 201.5 / 198.6 Hz | 2.58 |
-| small explosion | 0.8 % | 8.2 pp at 150-400 Hz | 275.9 / 282.0 Hz | 3.32 |
-| base missile | **6.8 %** | 35.2 pp at 150-400 Hz | 398 / 333 Hz | 3.97 |
-| shot | 0.0 % | 13.7 pp at 150-400 Hz | 1385 / 2026 Hz | 5.10 |
-| engine tone B | **6.8 %** | 57.5 pp at 400-1000 Hz | 399 / 510 Hz | 5.52 |
-| engine tone A | **14.5 %** | 11.4 pp at 150-400 Hz | 759 / 555 Hz | 6.32 |
+| medium explosion, retriggered | **5.1 %** | 7.7 pp at 150-400 Hz | 201.5 / 198.6 Hz | 2.60 |
+| small explosion | 0.8 % | 8.2 pp at 150-400 Hz | 275.9 / 282.0 Hz | 3.34 |
+| base missile | **6.8 %** | 35.2 pp at 150-400 Hz | 398 / 333 Hz | 3.99 |
+| engine tone B | **6.8 %** | 57.5 pp at 400-1000 Hz | 399 / 510 Hz | 5.53 |
+| engine tone A | **14.5 %** | 11.4 pp at 150-400 Hz | 759 / 555 Hz | 6.33 |
 
 Read the clipping column first and the band column last, which is the order
 `audiodiff` prints them in and the opposite of the order four rounds of this
@@ -1917,9 +1978,15 @@ Three more things this table says that the octave one could not.
 - **The two explosions' centroids land within 1.5 %**, where the base missile's
   and the engine's do not. The centroid survives clipping better than the bands
   do, which is what makes that worth saying.
-- **The shot is the only unclipped row in the bottom third**, and it is the
-  only one whose error is not a shape at all. See its section: its pitch falls
-  by two octaves across the voice on the board and does not move in the device.
+- **The shot moved from last place to third**, 5.10 to 1.35, which is the
+  largest single correction this board has had. Its error was never a shape: on
+  the board its pitch falls by two octaves across the voice, and the device had
+  it holding still. Four changes together fixed that and none of them worked
+  alone; see its section.
+- **The bottom four rows are now exactly the four clipped references.** That was
+  not true before, and it is the cleanest statement of where this board stands:
+  every voice whose reference can be compared is compared, and the ones left at
+  the bottom are the ones whose references cannot be.
 
 ### The table this replaces
 

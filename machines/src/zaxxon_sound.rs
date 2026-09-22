@@ -33,8 +33,9 @@
 //!
 //! Three more rest on properties of parts rather than on the drawing, and are
 //! named where they are used rather than marked `INVENTED`, because each is a
-//! datasheet figure rather than a choice: [`OPAMP_SWING`], the 555s' output
-//! levels and control-pin impedance, and [`MM5837_HZ`].
+//! part-class figure rather than a choice: [`OPAMP_V_LOW`] and
+//! [`OPAMP_V_HIGH`], the 555s' output levels and control-pin impedance, and
+//! [`MM5837_HZ`].
 //!
 //! [`MM5837_SWING`] used to be the third of those, on the grounds that it sets
 //! a level and levels are what a read divider decides afterwards. **It is not
@@ -653,7 +654,7 @@ fn alarm_slew_v_per_s() -> f64 {
 }
 
 /// How far `U12`'s alarm section rises off its rest during a burst: the whole
-/// output swing, `2 * OPAMP_SWING`.
+/// output swing, [`opamp_span`].
 ///
 /// Expressed as a rise from rest rather than as two absolute voltages, which is
 /// this file's convention for every node that sits somewhere other than zero at
@@ -663,7 +664,7 @@ fn alarm_slew_v_per_s() -> f64 {
 /// through `C24` as a step at power-on, which is the thump the board's mute
 /// circuit exists to cover and which nothing here needs to reproduce.
 fn alarm_burst_v() -> f64 {
-    2.0 * OPAMP_SWING
+    opamp_span()
 }
 
 // ---------------------------------------------------------------------------
@@ -729,12 +730,12 @@ fn battleship_ref_v() -> f64 {
 /// `6 * R_fb/(R_in + R_fb) + Vout * R_in/(R_in + R_fb)`, so the window the
 /// integrator has to cross is `R_in/(R_in + R_fb)` of the output's full swing.
 ///
-/// With 51 k and 100 k that is 0.338 of 10 V, or **3.378 V**. This is the one
-/// term in the whole voice that rests on [`OPAMP_SWING`] rather than on a read
-/// value, and both stages' rates are inversely proportional to it: a wider
+/// With 51 k and 100 k that is 0.338 of [`opamp_span`], or **3.513 V**. This is
+/// the one term in the whole voice that rests on the op-amp rather than on a
+/// read value, and both stages' rates are inversely proportional to it: a wider
 /// output swing is a slower oscillator. It cancels exactly in their ratio.
 fn schmitt_window_v(schmitt_in: f64, schmitt_fb: f64) -> f64 {
-    schmitt_in / (schmitt_in + schmitt_fb) * 2.0 * OPAMP_SWING
+    schmitt_in / (schmitt_in + schmitt_fb) * opamp_span()
 }
 
 /// One integrator-and-Schmitt stage's rate, from its four resistors and its cap.
@@ -791,7 +792,7 @@ fn battleship_fast_src_v() -> f64 {
     battleship_ref_v() * R91 / (R90 + R91)
 }
 
-/// The fast stage, `U10(5,6,7)` and `U10(9,10,8)` around `Q5`: **122 Hz**, and
+/// The fast stage, `U10(5,6,7)` and `U10(9,10,8)` around `Q5`: **118 Hz**, and
 /// the only half of this voice that is audible.
 ///
 /// Its virtual ground is `R94` 51 k and `R95` 51 k halving
@@ -811,7 +812,7 @@ fn battleship_fast_src_v() -> f64 {
 ///
 /// This file previously carried an invented 62 Hz, then an invented 750 Hz
 /// fitted to a MAME recording, then a derived rate resting on an invented drive
-/// voltage. This one rests on nothing but the drawing and [`OPAMP_SWING`].
+/// voltage. This one rests on nothing but the drawing and [`opamp_span`].
 fn battleship_hz() -> f64 {
     relaxation_hz(
         battleship_fast_src_v() / 2.0,
@@ -822,7 +823,7 @@ fn battleship_hz() -> f64 {
     )
 }
 
-/// What the 4016B actually receives, peak to peak: **3.378 V**, not the op-amp's
+/// What the 4016B actually receives, peak to peak: **3.513 V**, not the op-amp's
 /// full swing.
 ///
 /// `U10(12,13,14)` is a unity follower and `C59` 2.2 uF takes its output
@@ -903,17 +904,55 @@ fn shot_pitch_rest_v() -> f64 {
     rest + (V12 - rest) / (R145_R146 + R147) * R147
 }
 
-/// How far `C88` carries the shaper node's step into node X, expressed as the
-/// high-pass corner `C88` makes against everything X is tied to.
+/// How much of node Y reaches node X, **0.560**: `R145`/`R146` up to +12 V
+/// against `R147` down to `Y`.
 ///
-/// `R145` and `R146` reach +12 V and `R147` and `R148` reach ground, so X sits on
-/// 0.91 MOhm and the step decays over 43 ms. `D10`'s state changes that by about
-/// a third while the trigger is low, which is inside what the op-amp's clipping
-/// hides.
+/// **`R147` 1 MOhm is on the sheet and this device was built without it**, and
+/// that is the whole of the shot's missing sweep. `Y` is the VCA's envelope,
+/// 4.1 V below its rest at the bottom of a trigger and back over hundreds of
+/// milliseconds; `X` is the oscillator's reference through `U19`'s buffer and
+/// inverting amplifier. `R147` joins them, so X slides from 8.42 V at rest to
+/// 6.12 V at the bottom of a trigger and back, and the amplifier sweeps with it
+/// instead of sitting on its floor from 40 ms onward.
+fn shot_pitch_from_y() -> f64 {
+    R145_R146 / (R145_R146 + R147)
+}
+
+/// The resistance `C88` works against at node X: `R145`/`R146` up to +12 V in
+/// parallel with `R147` down to node Y, **0.56 MOhm**, so the step decays over
+/// **26 ms**.
+///
+/// **`R148` is not in this and this file used to put it here**, on the reading
+/// that `R147` and `R148` are a path from X to ground. They are, at DC. At the
+/// frequencies this corner describes, `C89` 680 nF holds node Y to ground with
+/// an impedance of 59 kOhm, two orders below `R148`, so `R147` lands on an AC
+/// ground and `R148` is not in the path at all. Including it made this 0.91
+/// MOhm and 43 ms.
+///
+/// See [`shot_vca_release_r`], which is the same argument run the other way.
+/// The two poles this pair of capacitors makes are **26 ms and 760 ms**, and
+/// twenty-nine to one is what lets each be written as its own RC: each
+/// capacitor sees the other as a short or as an open, with nothing in between
+/// for the approximation to lose.
 fn shot_pitch_r() -> f64 {
-    let up = R145_R146;
-    let down = R147 + R148;
-    up * down / (up + down)
+    R145_R146 * R147 / (R145_R146 + R147)
+}
+
+/// The resistance `C89` recovers through at node Y: `R148` to ground in
+/// parallel with `R147` plus `R145`/`R146` up to +12 V, **1.12 MOhm**, so the
+/// VCA's envelope recovers over **760 ms**.
+///
+/// **`R145`/`R146` are in this and this file used to leave them out**, on the
+/// reading that `R147` lands on a node that is held. It is not held: node X
+/// sits on `R145`/`R146` to +12 V and on `C88` 47 nF to the shaper, and at the
+/// frequencies of this recovery `C88` is 15 MOhm, an order above
+/// `R145`/`R146`, so it is an open and `R147` sees 1.27 MOhm in series rather
+/// than a ground. Leaving them out made this 0.69 MOhm and 468 ms, which is
+/// where this file's "the shot is 630 ms against the recording's 990" came
+/// from.
+fn shot_vca_release_r() -> f64 {
+    let up = R147 + R145_R146;
+    R148 * up / (R148 + up)
 }
 
 /// Node A's weights: the 555's output through `R153`, and `U19`'s inverting
@@ -927,7 +966,7 @@ fn shot_node_a_weights() -> (f64, f64) {
     ((1.0 / R153) / sum, (1.0 / R154) / sum)
 }
 
-/// The oscillator's rate against node A, **3331 Hz per volt**.
+/// The oscillator's rate against node A, **3203 Hz per volt**.
 ///
 /// `R157` and `R158` are both 33 k, so the integrator's virtual ground is half
 /// of node A, and the rate is linear in it. Same helper as the battleship,
@@ -939,7 +978,7 @@ fn shot_hz_per_volt() -> f64 {
 /// What the oscillator's square is worth at the VCA: `R164` 1 M into `R165`
 /// 220 k, so 0.18 of the op-amp's swing.
 fn shot_out_v() -> f64 {
-    2.0 * OPAMP_SWING * R165 / (R164 + R165)
+    opamp_span() * R165 / (R164 + R165)
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,7 +1064,7 @@ fn homing_beta() -> f64 {
 ///
 /// `C43` charges toward whichever rail the output is on through `R44`, and
 /// trips at `+/- beta` of that rail, so each half period is
-/// `R44*C43 * ln((1 + beta)/(1 - beta))`. [`OPAMP_SWING`] appears in the
+/// `R44*C43 * ln((1 + beta)/(1 - beta))`. [`opamp_span`] appears in the
 /// numerator and the denominator of that log and **cancels exactly**, which is
 /// the same shape of argument as the battleship's 40.5:1 ratio: the rate is a
 /// reading even though the amplitude is not.
@@ -1142,14 +1181,40 @@ fn laser_hz_per_volt() -> f64 {
 const R75: f64 = 10_000.0;
 const R76: f64 = 2_200.0;
 
-/// The swing an op-amp on this board's single +12 V supply delivers about the
-/// +6 V mid-rail.
+/// What an op-amp output on this board actually reaches, low and high, on its
+/// single +12 V supply.
 ///
-/// Not a reading: the drawing dimensions no op-amp's output stage. It is the
-/// rail less the usual pair of volts of headroom, and it is the reference every
-/// voice whose own chain is read only at block level is expressed against, so
-/// that those voices are at least the right size relative to the ones that are
-/// derived end to end.
+/// **These are asymmetric about the +6 V mid-rail, and that asymmetry is the
+/// point.** Every op-amp on these two sheets is a **14-pin quad** (the sections
+/// are wired on pins 1/2/3, 5/6/7, 8/9/10 and 12/13/14) running from +12 V and
+/// ground, and the 1982 part for that job is the `LM324` family. Its defining
+/// behavior is exactly this shape: an internal current sink pulls the output to
+/// within tens of millivolts of ground, while the source side stops about 1.5 V
+/// short of the positive rail. The drawing does not name the part, so this is a
+/// **part-class inference** in the same category as the 1.7 V this file already
+/// gives a bipolar 555's output.
+///
+/// Three different things on this board read three different parts of it, which
+/// is why it had to stop being one number:
+///
+/// - the battleship's and laser's rates come from their Schmitt windows, which
+///   are `R_in/(R_in+R_fb)` of the **span**, [`opamp_span`];
+/// - the shot's tail pitch is a direct read of **[`OPAMP_V_LOW`] alone**,
+///   because `U19`(1,2,3)'s low rail lands on `U18`'s control pin and sets that
+///   555's duty cycle;
+/// - the shot's head is **[`OPAMP_V_HIGH`] alone**, for the same reason.
+///
+/// This used to be a single symmetric `OPAMP_SWING` of 5.0, so the floor sat at
+/// 1.0 V, which kept `U18` running at 39 Hz and an 11 % duty and held the
+/// shot's pitch floor at 1182 Hz against the board's 276 to 300.
+const OPAMP_V_LOW: f64 = 0.1;
+const OPAMP_V_HIGH: f64 = 10.5;
+
+/// The output's peak-to-peak span, which is what every Schmitt window and every
+/// oscillator amplitude on this board reads.
+///
+/// The span is the part of this that is *nearly* symmetric, and it is the only
+/// part the battleship, the laser and the homing missile's warble ever see.
 ///
 /// **The recordings cannot place it, and both chains have now been read twice
 /// to establish that.** The battleship's rate and the laser's are both
@@ -1193,29 +1258,12 @@ const R76: f64 = 2_200.0;
 /// which is the same answer the alarms' 12 % got. Left at 5.0, because fitting
 /// it to either voice would put the other one further out.
 ///
-/// # This constant is doing three jobs and a real op-amp does not
-///
-/// It stands for a **symmetric** swing about the +6 V mid-rail, and three
-/// different things on this board read three different parts of it:
-///
-/// - the battleship's and laser's rates come from the Schmitt window, which is
-///   `R_in/(R_in+R_fb)` of the output's **span**, `V_OH - V_OL`;
-/// - the shot's tail pitch is a direct read of **`V_OL` alone**, because
-///   `U19`(1,2,3)'s low rail lands on `U18`'s control pin and sets that 555's
-///   duty cycle;
-/// - the shot's head is **`V_OH` alone**, for the same reason.
-///
-/// A single-supply op-amp on +12 V does not sit symmetrically, so tying all
-/// three to one number is a modeling choice rather than a reading, and the
-/// shot's tail is where it shows: at `6 - 5.0` = 1.0 V the 555 keeps running at
-/// 39 Hz and an 11 % duty, holding our pitch floor at 1182 Hz against the
-/// board's 276 to 300. At a floor of 0.15 V the duty collapses to 2 % and the
-/// tail lands at 310 Hz. The transcription works that through.
-///
-/// Splitting this into a floor and a ceiling is the next thing to try, and two
-/// voices now point at the same floor from different directions: the laser's
-/// span implies about 0.2 V and the shot's tail wants 0.15 V.
-const OPAMP_SWING: f64 = 5.0;
+/// Splitting the floor off did not touch this: the span moved by 4 % and the
+/// two voices still want windows 26 % apart. See [`OPAMP_V_LOW`] for what the
+/// split *did* fix, which is a different voice entirely.
+fn opamp_span() -> f64 {
+    OPAMP_V_HIGH - OPAMP_V_LOW
+}
 
 // ---------------------------------------------------------------------------
 // The mix (sheet 11 p133, sheet 12 p135)
@@ -1293,7 +1341,7 @@ const C_BLOCK: f64 = 1e-6;
 /// source amplitude and its own leg give it. If a voice sounds wrong relative to
 /// its neighbors, this is not the constant that is wrong, and
 /// `voice_levels_follow_the_leg_table` is the test that speaks to that.
-const OUTPUT_GAIN: f64 = 4.4;
+const OUTPUT_GAIN: f64 = 4.3;
 
 /// How many legs meet at `SJ`. Eleven, because alarms 2 and 3 share one.
 const LEG_COUNT: usize = 11;
@@ -2142,34 +2190,37 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         "SHOT_ENV_DROP",
         shot_drop_tgt,
         C89 * (R143 * R144 / (R143 + R144)),
-        C89 * (R147 * R148 / (R147 + R148)),
+        C89 * shot_vca_release_r(),
     );
     let shot_drop_neg = b.gain("SHOT_ENV_NEG", shot_drop, -1.0);
     let shot_rest = b.constant("SHOT_ENV_REST", shot_vca_rest_v());
     let shot_ctrl = b.add("SHOT_VCA_CTRL", &[shot_drop_neg, shot_rest]);
     let shot_g = mb4391_gain(&mut b, "SHOT_VCA", shot_ctrl);
 
-    // --- The pitch shaper: node X, and the amplifier that clips on it --------
-    // `C88` carries the shaper node's step into X, which otherwise sits at 8.4 V
-    // on the divider from +12 V. `U19(12,13,14)` buffers X and `U19(1,2,3)`
-    // inverts it with a gain of -5.9 about the +6 V mid-rail, which for a step
-    // this size means the amplifier is not amplifying: it spends the whole voice
-    // pinned at one rail or the other, high while the trigger runs and low
-    // otherwise.
+    // --- The pitch shaper: node X, and the amplifier that sweeps on it -------
+    // `C88` carries the shaper node's step into X, which sits at 8.4 V on the
+    // divider from +12 V and `R147` down to node Y. `U19(12,13,14)` buffers X
+    // and `U19(1,2,3)` inverts it with a gain of -5.9 about the +6 V mid-rail.
+    //
+    // Node X is the sum of three things, and this device had only two of them:
+    // its DC operating point, `C88`'s step from the shaper, and **`R147`'s
+    // share of node Y**, which is the VCA envelope. `C88` holds X against a
+    // change in its DC as much as it carries one into it, so the sag arrives
+    // through the same 26 ms the step decays with: at the instant of a trigger
+    // X has moved only by what `C88` coupled into it, and it settles onto the
+    // divider from the new `Y` afterwards. Without that lag the two terms fire
+    // at once and X swings twice as far as the network allows.
     let shot_x_step = b.rc_high_pass("U19_NODE_X", shot_shaper, shot_pitch_r(), C88);
     let shot_x_rest = b.constant("U19_NODE_X_REST", shot_pitch_rest_v());
-    let shot_x = b.add("U19_NODE_X_SUM", &[shot_x_step, shot_x_rest]);
+    let shot_x_sag_dc = b.gain("U19_NODE_X_SAG_DC", shot_drop, -shot_pitch_from_y());
+    let shot_x_sag = b.rc_low_pass("U19_NODE_X_SAG", shot_x_sag_dc, shot_pitch_r(), C88);
+    let shot_x = b.add("U19_NODE_X_SUM", &[shot_x_step, shot_x_rest, shot_x_sag]);
     let shot_midrail_neg = b.constant("U19_MIDRAIL_NEG", -V6);
     let shot_x_dev = b.add("U19_NODE_X_DEV", &[shot_x, shot_midrail_neg]);
     let shot_amp_raw = b.gain("U19_SHOT_AMP", shot_x_dev, -R150 / R149);
     let shot_amp_ref = b.constant("U19_SHOT_AMP_REF", V6);
     let shot_amp_sum = b.add("U19_SHOT_AMP_SUM", &[shot_amp_raw, shot_amp_ref]);
-    let shot_amp = b.clamp(
-        "U19_SHOT_AMP_CLIP",
-        shot_amp_sum,
-        V6 - OPAMP_SWING,
-        V6 + OPAMP_SWING,
-    );
+    let shot_amp = b.clamp("U19_SHOT_AMP_CLIP", shot_amp_sum, OPAMP_V_LOW, OPAMP_V_HIGH);
 
     // --- U18's 555, and node A ----------------------------------------------
     // The amplifier drives the 555's control pin AND reaches node A through
@@ -2192,7 +2243,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     );
 
     // --- The oscillator ------------------------------------------------------
-    // 3331 Hz per volt at node A, from the same helper the battleship uses. Its
+    // 3203 Hz per volt at node A, from the same helper the battleship uses. Its
     // duty is 45.5 % rather than 50 %, because R156 against R159 is 2.2 to 1
     // where the battleship's pair is exactly 2 to 1; the difference is a little
     // more second harmonic and it is below what a square-versus-square
@@ -2250,7 +2301,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         Box::new(OpAmpRelaxation {
             beta: homing_beta(),
             tau: R44 * C43,
-            swing: OPAMP_SWING,
+            swing: opamp_span() / 2.0,
             cap: 0.0,
             high: true,
         }),
@@ -2317,7 +2368,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     let laser_square = b.variable_square("U8_LASER_OSC", laser_freq);
     // U8's output divided by R75/R76 before C55 and the 4016B. The 4016B is a
     // switch, so nothing here decays: the gate is the envelope.
-    let half = 2.0 * OPAMP_SWING * R76 / (R75 + R76) / 2.0;
+    let half = opamp_span() * R76 / (R75 + R76) / 2.0;
     let laser_level = b.logic_levels("LASER_LEVEL", laser_square, -half, half);
     let laser_gated = b.multiply("LASER_SW", laser_level, laser);
     let laser_leg = mix_leg(&mut b, "LASER_LEG", laser_gated, LEG_LASER);
@@ -3043,8 +3094,8 @@ mod tests {
         assert!(((v_g / R96 - v_g / R93) - v_g / R93).abs() < 1e-12);
 
         let (slow, fast) = (battleship_mod_hz(), battleship_hz());
-        assert!((slow - 3.02).abs() < 0.05, "U9 slow stage: {slow} Hz");
-        assert!((fast - 122.3).abs() < 0.5, "U10 fast stage: {fast} Hz");
+        assert!((slow - 2.907).abs() < 0.05, "U9 slow stage: {slow} Hz");
+        assert!((fast - 117.6).abs() < 0.5, "U10 fast stage: {fast} Hz");
 
         // The capacitors alone would say 165 to 1. They are not alone: the fast
         // stage works against a quarter of the reference where the slow one
@@ -3061,8 +3112,8 @@ mod tests {
         );
 
         // The Schmitt window cancels in the ratio and sets the absolute pitch,
-        // so it is the one term OPAMP_SWING reaches.
-        assert!((battleship_swing_v() - 3.3775).abs() < 1e-3);
+        // so it is the one term the op-amp's span reaches.
+        assert!((battleship_swing_v() - 3.5126).abs() < 1e-3);
         assert!((schmitt_window_v(R86, R88) - schmitt_window_v(R98, R99)).abs() < 1e-12);
     }
 
@@ -3082,7 +3133,7 @@ mod tests {
     /// convenient: at 50 mV the rate already falls from 122 Hz to 92 Hz, which
     /// is further from the board's 132 Hz, not nearer. That direction matters,
     /// because it means the one unknown this voice shares with the laser cannot
-    /// be blamed for the gap between them. See [`OPAMP_SWING`].
+    /// be blamed for the gap between them. See [`opamp_span`].
     ///
     /// The doc for [`relaxation_hz`] warns that arithmetic hypersensitive to an
     /// unknown is usually a misread topology. Here the topology is read twice
@@ -3119,10 +3170,10 @@ mod tests {
 
         // A perfect switch is the shipped figure, and any real saturation moves
         // the voice AWAY from the board's 132 Hz rather than toward it.
-        assert!((rate_with_sat(0.0) - 122.3).abs() < 0.5);
+        assert!((rate_with_sat(0.0) - 117.6).abs() < 0.5);
         let at_50mv = rate_with_sat(0.05);
         assert!(
-            (at_50mv - 91.6).abs() < 1.0,
+            (at_50mv - 87.9).abs() < 1.0,
             "at 50 mV of saturation: {at_50mv} Hz"
         );
         assert!(at_50mv < rate_with_sat(0.0), "saturation can only slow it");
@@ -3152,8 +3203,8 @@ mod tests {
         // What C99 does instead is limit the slew, and the edge it allows has to
         // stay short against a half period of the higher tone or the trapezoid
         // becomes a triangle and the harmonics go with it.
-        let edge_s = 2.0 * OPAMP_SWING / alarm_slew_v_per_s();
-        assert!((edge_s - 25e-6).abs() < 1e-6, "U12 edge {edge_s} s");
+        let edge_s = opamp_span() / alarm_slew_v_per_s();
+        assert!((edge_s - 26e-6).abs() < 1e-6, "U12 edge {edge_s} s");
         let half_period_s = 0.5 / (alarm_clock_hz() / 8.0);
         assert!(
             edge_s < half_period_s / 5.0,
@@ -3184,7 +3235,7 @@ mod tests {
         // Same helper as the battleship, because it is the same circuit: the
         // rate is linear in node A and nothing about it is a filter corner.
         let per_volt = shot_hz_per_volt();
-        assert!((per_volt - 3330.8).abs() < 1.0, "{per_volt} Hz/V");
+        assert!((per_volt - 3202.7).abs() < 1.0, "{per_volt} Hz/V");
         // What the old model used, from reading C92 and R156 as a filter.
         let as_a_filter = 1.0 / (std::f64::consts::TAU * R156 * C92);
         assert!(
@@ -3261,8 +3312,8 @@ mod tests {
             V12 / 3.0 * laser_hz_per_volt(),
             V12 * 2.0 / 3.0 * laser_hz_per_volt(),
         );
-        assert!((lo - 300.0).abs() < 5.0, "bottom of the sweep {lo} Hz");
-        assert!((hi - 600.0).abs() < 10.0, "top of the sweep {hi} Hz");
+        assert!((lo - 288.6).abs() < 5.0, "bottom of the sweep {lo} Hz");
+        assert!((hi - 577.3).abs() < 10.0, "top of the sweep {hi} Hz");
     }
 
     /// `U6`'s control pin is driven, so its rate is simulated rather than
@@ -3298,7 +3349,7 @@ mod tests {
     }
 
     /// `U5`(5,6,7) free-runs at 15.4 Hz, whether or not the voice is gated, and
-    /// the rate does not depend on [`OPAMP_SWING`].
+    /// the rate does not depend on [`opamp_span`].
     ///
     /// Both halves of that are worth pinning, because this file has now read
     /// this one stage three ways. It was an envelope driven by the gate level,
@@ -3335,7 +3386,7 @@ mod tests {
             }
             edges as f64 / 2.0 / 2.0
         };
-        let at_5 = rate_at(OPAMP_SWING);
+        let at_5 = rate_at(opamp_span() / 2.0);
         let at_2 = rate_at(2.0);
         assert!(
             (at_5 - homing_warble_hz()).abs() < 0.2,
@@ -3351,8 +3402,8 @@ mod tests {
         // The capacitor trips at beta of the swing either side of the mid-rail,
         // which is what sets how far the warble moves U6's control pin: 0.338 of
         // 5 V, then U4's -R47/R45.
-        let depth = beta * OPAMP_SWING * R47 / R45;
-        assert!((depth - 0.248).abs() < 0.005, "warble depth {depth} V");
+        let depth = beta * opamp_span() / 2.0 * R47 / R45;
+        assert!((depth - 0.2583).abs() < 0.005, "warble depth {depth} V");
         // And C46 passes it whole rather than differentiating it. At 2.2 uF,
         // which this file used to carry, the corner sat above the warble.
         let corner = 1.0 / (std::f64::consts::TAU * CV_PIN_R * C46);
@@ -3406,7 +3457,7 @@ mod tests {
             Box::new(OpAmpRelaxation {
                 beta: homing_beta(),
                 tau: R44 * C43,
-                swing: OPAMP_SWING,
+                swing: opamp_span() / 2.0,
                 cap: 0.0,
                 high: true,
             }),
@@ -3576,7 +3627,7 @@ mod tests {
     fn the_homing_missiles_low_band_is_the_duty_the_warble_moves() {
         // The warble reaches U6's control pin at beta of the op-amp's swing
         // through -R47/R45, either side of the part's own two thirds of +5 V.
-        let depth = homing_beta() * OPAMP_SWING * R47 / R45;
+        let depth = homing_beta() * opamp_span() / 2.0 * R47 / R45;
         let rest = V5 * 2.0 / 3.0;
         let (d_lo, d_hi) = (homing_duty_at(rest - depth), homing_duty_at(rest + depth));
         assert!((d_lo - 0.5905).abs() < 5e-3, "duty at the bottom {d_lo}");
@@ -3773,7 +3824,7 @@ mod tests {
     #[test]
     fn a_leg_probe_is_the_voices_share_of_the_mix() {
         assert!(
-            (leg_to_output() - 0.5093).abs() < 1e-3,
+            (leg_to_output() - 0.4977).abs() < 1e-3,
             "one leg volt reaches the output at {}",
             leg_to_output()
         );
