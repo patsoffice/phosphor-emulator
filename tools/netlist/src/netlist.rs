@@ -250,6 +250,19 @@ pub struct Part {
     pub kind: Kind,
     /// The value, in SI base units, or the part number.
     pub value: Value,
+    /// Other designators this one symbol also stands for.
+    ///
+    /// A standing schematic idiom: a board's bypass capacitors are drawn once
+    /// and labeled with the whole run they cover, `C139, 141-148, 150, 151,
+    /// 153-156`. Those are sixty-odd separate parts on the board sharing one
+    /// symbol, one value and one pair of nets.
+    ///
+    /// Writing each out would be hundreds of lines saying nothing, and
+    /// dropping them would leave real parts invisible, which is the failure
+    /// this design exists to stop. So the symbol is one entry and `also`
+    /// carries the rest of the run: they count as parts, the lints ask about
+    /// them, and the file stays readable.
+    pub also: Vec<String>,
     /// Set when the part number is inferred from the package and the era
     /// rather than printed on the drawing.
     ///
@@ -426,6 +439,12 @@ impl Netlist {
         self.nets
             .iter()
             .find(|n| n.on.iter().any(|e| e.part == designator && e.pin == pin))
+    }
+
+    /// How many parts the board has, counting the runs a single symbol stands
+    /// for. Larger than `parts.len()`, which counts symbols.
+    pub fn part_count(&self) -> usize {
+        self.parts.iter().map(|p| 1 + p.also.len()).sum()
     }
 
     /// Every group named by a part or one of its sections, in the order the
@@ -623,9 +642,15 @@ impl Netlist {
     /// decision 3, and it is what makes "you did not transcribe this" a
     /// question the file can be asked.
     fn check(&self, problems: &mut Vec<String>) {
+        // Every designator the file names, whether it has its own symbol or
+        // rides along on one via `also`. A run of bypass capacitors must not
+        // collide with a part drawn separately elsewhere.
         let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
         for part in &self.parts {
             *seen.entry(part.designator.as_str()).or_default() += 1;
+            for other in &part.also {
+                *seen.entry(other.as_str()).or_default() += 1;
+            }
         }
         for (designator, count) in &seen {
             if *count > 1 {
@@ -824,6 +849,8 @@ struct RawPart {
     kind: Kind,
     device: Option<String>,
     #[serde(default)]
+    also: Vec<String>,
+    #[serde(default)]
     device_inferred: bool,
 
     ohms: Option<f64>,
@@ -881,6 +908,7 @@ impl RawPart {
             designator: self.designator.clone(),
             kind: self.kind,
             value,
+            also: self.also.clone(),
             device_inferred: self.device_inferred,
             pins,
             outputs: self.out.clone(),

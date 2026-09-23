@@ -564,6 +564,7 @@ on = [
   "U44.10", "U44.11", "R166.b", "U46.2", "U46.3", "R167.b",
   "U50.14", "U50.4", "R168.a", "R170.a",
   "U23.26", "RP1.com", "RP2.com", "U5.3",
+  "C5.b", "C149.a",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -576,12 +577,12 @@ rail = true
 on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
   "U11.3", "PC1.cell1", "R30.a", "R33.a",
-  "R34.b", "R35.a", "C36.b", "C37.a", "R72.a",
+  "R72.a", "R1.b", "R2.a", "C3.b", "C4.a", "C140.a",
 ]
 note = """
-NOT A REGULATED RAIL. R34 and R35 are a plain 390 ohm divider across +12 V \
-with C36 and C37 on the midpoint, so this sits at 6 V behind 195 ohms and every \
-op-amp reference on both sheets shares it."""
+NOT A REGULATED RAIL. R1 and R2 are a plain 1k divider from +12 V to ground \
+with 470 uF across each half, and the drawing labels this midpoint +6 V. So \
+every op-amp reference on both sheets shares one node behind 500 ohms."""
 
 [[nets]]
 name = "+12V"
@@ -591,6 +592,7 @@ on = [
   "U2.4", "C64.a", "C65.a", "R171.a",
   "C7.a", "U1.10", "R10.a", "R11.a", "R13.a",
   "R34.a", "C36.a", "R65.a", "U7.8", "U7.4",
+  "C1.a", "R1.a", "C3.a", "C139.a",
 ]
 
 [[nets]]
@@ -612,6 +614,7 @@ on = [
   "U23.7", "U32.1", "R15.b", "C25.b", "R17.b",
   "R35.b", "C37.b", "C34.b", "C35.b",
   "U7.1", "C53.b", "C54.b", "R69.b", "R71.b", "Q3.e",
+  "C1.b", "R2.b", "C4.b", "C139.b", "C140.b", "C149.b", "C5.a",
 ]
 
 [[nets]]
@@ -3414,41 +3417,130 @@ name = "U4a in"
 on = ["R18.b", "R19.a", "U4.2"]
 
 # ===========================================================================
-# THE +6 V RAIL (sheet 12, left half).
+# THE SUPPLY (sheet 12, left half).
 #
-# Worth transcribing on its own because it is not a regulator. R34 and R35 are
-# a plain 390 ohm pair across +12 V with C36 and C37 decoupling the midpoint,
-# so +6 V has a source impedance of 195 ohms and every op-amp reference on both
-# sheets sits on it.
+# THE +6 V RAIL IS NOT REGULATED. R1 and R2 are a plain 1k pair from +12 V to
+# ground with 470 uF across each half, and the drawing labels that midpoint
+# +6 V. So the rail every op-amp reference on both sheets sits on has a source
+# impedance of 500 ohms and is shared by every stage at once.
+#
+# R34 and R35 are a SECOND 390 ohm divider, near the missiles, with C36 and
+# C37 across its halves. Its midpoint leaves to the right and where it goes is
+# NOT traced, so this file does not claim it is the same rail. An earlier pass
+# here did claim that, on the strength of the shape alone; the drawing labels
+# the R1/R2 midpoint and does not label this one.
 # ===========================================================================
+
+[[parts]]
+group = "supply"
+ref = "R1"
+kind = "R"
+kohms = 1
+block = "+6V divider"
+
+[[parts]]
+group = "supply"
+ref = "R2"
+kind = "R"
+kohms = 1
+block = "+6V divider"
+
+[[parts]]
+group = "supply"
+ref = "C3"
+kind = "C"
+uf = 470
+note = "Across the upper half of the +6 V divider, from +12 V down to the rail."
+
+[[parts]]
+group = "supply"
+ref = "C4"
+kind = "C"
+uf = 470
+note = "Across the lower half, from the +6 V rail to ground."
+
+[[parts]]
+group = "supply"
+ref = "C1"
+kind = "C"
+uf = 470
+also = ["C2"]
+note = "Two 470 uF on the +12 V input, drawn as one symbol."
+
+[[parts]]
+group = "supply"
+ref = "C5"
+kind = "C"
+uf = 470
+also = ["C6"]
+note = "Two 470 uF on the +5 V input, drawn as one symbol."
+
+[[parts]]
+group = "supply"
+ref = "C139"
+kind = "C"
+uf = 0.047
+also = [
+  "C141", "C142", "C143", "C144", "C145", "C146", "C147", "C148",
+  "C150", "C151", "C153", "C154", "C155", "C156",
+]
+note = """
+The +12 V bypass run, fifteen parts drawn as one symbol and labeled \
+`C139, 141-148, 150, 151, 153-156`."""
+
+[[parts]]
+group = "supply"
+ref = "C140"
+kind = "C"
+uf = 0.047
+also = ["C152"]
+note = "The +6 V bypass pair, drawn as one symbol."
+
+[[parts]]
+group = "supply"
+ref = "C149"
+kind = "C"
+uf = 0.047
+also = [
+  "C157", "C158", "C159", "C160", "C161", "C162", "C163", "C164", "C165",
+  "C166", "C167", "C168", "C169", "C170", "C171", "C172", "C173", "C174",
+  "C175", "C176", "C177", "C178", "C179", "C180", "C181", "C182", "C183",
+  "C184", "C185", "C186", "C187", "C188", "C189", "C190", "C191", "C192",
+  "C193", "C194", "C195", "C196", "C197", "C198", "C199", "C200", "C202",
+]
+note = """
+The +5 V bypass run, forty-six parts drawn as one symbol and labeled \
+`C149, 157-200, 202`. One per logic package, which is what a board this size \
+needs and what no audio model will ever care about: the clearest case on these \
+sheets of a part that is unmodeled and should be."""
 
 [[parts]]
 group = "supply"
 ref = "R34"
 kind = "R"
 ohms = 390
-block = "+6V divider"
+block = "second divider"
 
 [[parts]]
 group = "supply"
 ref = "R35"
 kind = "R"
 ohms = 390
-block = "+6V divider"
+block = "second divider"
 
 [[parts]]
 group = "supply"
 ref = "C36"
 kind = "C"
 uf = 100
-block = "+6V decoupling"
+block = "second divider decoupling"
 
 [[parts]]
 group = "supply"
 ref = "C37"
 kind = "C"
 uf = 100
-block = "+6V decoupling"
+block = "second divider decoupling"
 
 # ===========================================================================
 # THE TWO MISSILES (sheet 12, left half).
@@ -3533,6 +3625,14 @@ ref = "R33"
 kind = "R"
 kohms = 220
 block = "base missile reference"
+
+[[nets]]
+name = "R34/R35 midpoint"
+on = ["R34.b", "R35.a", "C36.b", "C37.a"]
+note = """
+The second divider's output, which leaves to the right on the sheet. WHERE IT \
+GOES IS NOT TRACED. The drawing does not label it, unlike the R1/R2 midpoint \
+it resembles, so this file does not claim the two are the same node."""
 
 [[nets]]
 name = "homing missile buffered"

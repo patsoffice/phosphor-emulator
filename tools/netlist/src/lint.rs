@@ -249,19 +249,34 @@ fn inferred_devices(netlist: &Netlist, findings: &mut Vec<Finding>) {
 /// this cannot tell which. Saying that the gap exists is the entire job.
 fn not_modeled(netlist: &Netlist, device: &DeviceParts, findings: &mut Vec<Finding>) {
     for part in &netlist.parts {
-        if !carries_a_quantity(part) || device.named.contains(&part.designator) {
+        if !carries_a_quantity(part) {
             continue;
         }
+        // A run drawn as one symbol is still a run of parts, so ask about
+        // every designator it carries and report the whole run in one line.
+        let unmodeled: Vec<&String> = std::iter::once(&part.designator)
+            .chain(part.also.iter())
+            .filter(|designator| !device.named.contains(*designator))
+            .collect();
+        if unmodeled.is_empty() {
+            continue;
+        }
+        let what = if part.also.is_empty() {
+            format!("{} is on the sheet", part.label())
+        } else {
+            format!(
+                "{} and {} more like it are on the sheet ({} of the run unmodeled)",
+                part.label(),
+                part.also.len(),
+                unmodeled.len()
+            )
+        };
         let detail = match &part.note {
             Some(note) => format!(
-                "{} is on the sheet and no device constant names it. The transcription says: {}",
-                part.label(),
+                "{what} and no device constant names them. The transcription says: {}",
                 first_sentence(note)
             ),
-            None => format!(
-                "{} is on the sheet and no device constant names it",
-                part.label()
-            ),
+            None => format!("{what} and no device constant names them"),
         };
         findings.push(Finding {
             lint: "not-modeled",
@@ -290,8 +305,15 @@ fn no_part(netlist: &Netlist, device: &DeviceParts, findings: &mut Vec<Finding>)
         });
         return;
     }
+    let on_sheet: BTreeSet<&str> = netlist
+        .parts
+        .iter()
+        .flat_map(|part| {
+            std::iter::once(part.designator.as_str()).chain(part.also.iter().map(String::as_str))
+        })
+        .collect();
     for designator in &device.named {
-        if netlist.part(designator).is_none() {
+        if !on_sheet.contains(designator.as_str()) {
             findings.push(Finding {
                 lint: "no-part",
                 severity: Severity::Problem,
@@ -372,6 +394,50 @@ mod tests {
 
     /// An IC has no value for a constant to be, so its absence says nothing
     /// about whether the device models it.
+    /// A board's bypass capacitors are drawn once and labeled with the whole
+    /// run. They are still separate parts, so the query has to ask about all
+    /// of them, and it has to say so in one line rather than sixty.
+    #[test]
+    fn a_run_drawn_as_one_symbol_is_asked_about_as_a_run() {
+        let netlist = "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"C139\"\nkind = \"C\"\nuf = 0.047\n\
+             also = [\"C141\", \"C142\", \"C143\"]\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"C139.a\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"C139.b\"]\n";
+        let findings = findings_for(netlist, Some("const C142: f64 = 1.0;\n"));
+        let flagged: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.lint == "not-modeled")
+            .collect();
+        assert_eq!(flagged.len(), 1, "one line, not four");
+        assert!(
+            flagged[0].detail.contains("3 more like it"),
+            "{:?}",
+            flagged[0]
+        );
+        assert!(
+            flagged[0].detail.contains("3 of the run unmodeled"),
+            "C142 is named by a constant, so only three of the four are: {:?}",
+            flagged[0]
+        );
+    }
+
+    /// The other direction: a designator riding along on a shared symbol still
+    /// counts as present, so the device naming it is not a missing part.
+    #[test]
+    fn a_designator_in_a_run_counts_as_being_on_the_sheet() {
+        let netlist = "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"C139\"\nkind = \"C\"\nuf = 0.047\n\
+             also = [\"C141\"]\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"C139.a\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"C139.b\"]\n";
+        let findings = findings_for(netlist, Some("const C141: f64 = 1.0;\n"));
+        assert!(
+            !findings.iter().any(|f| f.lint == "no-part"),
+            "{findings:?}"
+        );
+    }
+
     #[test]
     fn a_part_with_no_quantity_is_not_reported_as_unmodeled() {
         let netlist = "[board]\nname = \"t\"\n\n\

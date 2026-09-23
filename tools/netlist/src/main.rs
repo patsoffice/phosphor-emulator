@@ -200,7 +200,15 @@ fn show(netlist: &Netlist, list_parts: bool) {
     if let Some(prose) = &board.prose {
         println!("  argument: {prose}");
     }
-    println!("  parts:    {}", netlist.parts.len());
+    let symbols = netlist.parts.len();
+    let parts = netlist.part_count();
+    if parts == symbols {
+        println!("  parts:    {parts}");
+    } else {
+        // A run of bypass capacitors is drawn once and is still a run of
+        // parts, so say both numbers rather than letting either stand alone.
+        println!("  parts:    {parts} ({symbols} symbols; the rest share one)");
+    }
     println!("  nets:     {}", netlist.nets.len());
 
     if list_parts {
