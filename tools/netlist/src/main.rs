@@ -175,6 +175,20 @@ fn solve(netlist: &Netlist, group: Option<&str>, drive: &[String], rail: &[Strin
         let kind = if held.rail { "rail " } else { "drive" };
         println!("  {kind} {:<24} {:>9.4} V", held.net, held.volts);
     }
+    // Which switches are closed is part of the answer, not part of the setup:
+    // a switched network is a different network per scenario, and an answer
+    // that does not say which one it solved is not an answer.
+    if !network.switches.is_empty() {
+        println!("\nanalog switches:");
+        for switch in &network.switches {
+            let state = match (switch.closed, switch.ohms) {
+                (true, Some(ohms)) => format!("CLOSED at {ohms} ohms"),
+                (true, None) => "CLOSED".to_string(),
+                (false, _) => "open".to_string(),
+            };
+            println!("  {:<10} {:<22} {}", switch.section, state, switch.why);
+        }
+    }
     println!(
         "\nnetwork: {} unknown nodes, {} resistors, {} capacitors",
         network.free.len(),

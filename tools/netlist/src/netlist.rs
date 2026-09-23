@@ -214,6 +214,43 @@ pub struct Unread {
     pub why: String,
 }
 
+/// One section of an analog switch: the two pins it joins when closed, and the
+/// pin that decides.
+///
+/// **The one element whose topology is not fixed by the drawing**, and the
+/// reason it exists is Lunar Lander. Zaxxon's `4016B` gates were opaque parts
+/// the solver opened, and nothing downstream cared, because every question on
+/// that board was about a network that did not change. This board's whole
+/// question is what happens when three `4066` sections close in eight
+/// combinations: the same three resistors set the thrust volume *and* the
+/// noise low-pass corner, so a reading that treats them as a volume control is
+/// wrong about the spectrum at every setting but full.
+///
+/// A switch is not a `drive`. Holding the node at a voltage would throw away
+/// the thing being asked about, which is the resistance the closed leg puts in
+/// the network. It is a conductance that is present or absent, and which one
+/// is a fact about the scenario rather than about the board, so the control
+/// pin's *net* is what a scenario states and this only says which pins the
+/// control governs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Switch {
+    /// The section, as the part's `sections` name it where it has them.
+    pub name: String,
+    /// Exactly the two pins the section joins when closed.
+    pub pins: Vec<String>,
+    /// The pin that decides.
+    pub control: String,
+    /// On-resistance in ohms, where it is known.
+    ///
+    /// Optional, and usually absent, because it is a part property rather than
+    /// anything the drawing prints: a `4066` is drawn as a switch and its
+    /// on-resistance lives in a datasheet. A switch without one closes ideally
+    /// and every report says which of the two it did, so the reader can see
+    /// whether an answer rests on it.
+    pub ohms: Option<f64>,
+}
+
 /// One section of a multi-section part: one of an `LM324`'s four amplifiers,
 /// one of a `74123`'s two one-shots.
 ///
@@ -301,6 +338,10 @@ pub struct Part {
     pub drawing_says: Option<String>,
     /// How a multi-section part is drawn. Presentation.
     pub sections: Vec<Section>,
+    /// The analog-switch sections this part carries, if it is one. Unlike
+    /// `sections` this is electrical: a closed switch is a branch in the
+    /// network.
+    pub switches: Vec<Switch>,
     /// Which subcircuit this part belongs to: one of the board's voices, a
     /// power supply, a mix bus.
     ///
@@ -536,6 +577,19 @@ impl Netlist {
                     .filter(|u| inside(&part.designator, &u.pin))
                     .cloned()
                     .collect(),
+                // A switch survives the cut only whole. Half of one is not a
+                // weaker claim about the circuit, it is a different circuit.
+                switches: part
+                    .switches
+                    .iter()
+                    .filter(|s| {
+                        s.pins
+                            .iter()
+                            .chain(std::iter::once(&s.control))
+                            .all(|pin| inside(&part.designator, pin))
+                    })
+                    .cloned()
+                    .collect(),
                 ..part.clone()
             });
         }
@@ -764,6 +818,55 @@ impl Netlist {
                     sectioned.push(pin);
                 }
             }
+            // A switch names three pins and joins exactly two of them. Getting
+            // that wrong silently is a different circuit rather than a broken
+            // file, so it is checked rather than trusted.
+            let mut switched: Vec<&String> = Vec::new();
+            for switch in &part.switches {
+                if switch.pins.len() != 2 {
+                    problems.push(format!(
+                        "{}: switch {} joins {} pins. A switch section connects exactly two.",
+                        part.designator,
+                        switch.name,
+                        switch.pins.len()
+                    ));
+                }
+                for pin in switch.pins.iter().chain(std::iter::once(&switch.control)) {
+                    if !part.draws(pin) {
+                        problems.push(format!(
+                            "{}: switch {} names pin {pin}, which the symbol does not draw",
+                            part.designator, switch.name
+                        ));
+                    }
+                }
+                if switch.pins.first() == switch.pins.last() {
+                    problems.push(format!(
+                        "{}: switch {} joins a pin to itself",
+                        part.designator, switch.name
+                    ));
+                }
+                if switch.pins.contains(&switch.control) {
+                    problems.push(format!(
+                        "{}: switch {}'s control pin is also one of the pins it switches",
+                        part.designator, switch.name
+                    ));
+                }
+                if switch.ohms.is_some_and(|ohms| ohms <= 0.0) {
+                    problems.push(format!(
+                        "{}: switch {}'s on-resistance is not positive",
+                        part.designator, switch.name
+                    ));
+                }
+                for pin in &switch.pins {
+                    if switched.contains(&pin) {
+                        problems.push(format!(
+                            "{}.{pin}: in more than one switch section",
+                            part.designator
+                        ));
+                    }
+                    switched.push(pin);
+                }
+            }
             for unread in &part.unread {
                 if !part.draws(&unread.pin) {
                     problems.push(format!(
@@ -877,6 +980,8 @@ struct RawPart {
     drawing_says: Option<String>,
     #[serde(default)]
     sections: Vec<Section>,
+    #[serde(default)]
+    switches: Vec<Switch>,
     group: Option<String>,
     block: Option<String>,
     note: Option<String>,
@@ -923,6 +1028,7 @@ impl RawPart {
             },
             drawing_says: self.drawing_says.clone(),
             sections: self.sections.clone(),
+            switches: self.switches.clone(),
             group: self.group.clone(),
             block: self.block.clone(),
             note: self.note.clone(),

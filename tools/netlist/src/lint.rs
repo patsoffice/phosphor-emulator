@@ -389,6 +389,24 @@ fn inferred_devices(netlist: &Netlist, findings: &mut Vec<Finding>) {
 /// the device should model, or an approximation someone decided was fine, and
 /// this cannot tell which. Saying that the gap exists is the entire job.
 fn not_modeled(netlist: &Netlist, device: &DeviceParts, findings: &mut Vec<Finding>) {
+    // A device that names no part at all is a different statement from a
+    // device that misses ten, and the rows below cannot tell them apart: both
+    // come out as a list. Lunar Lander is the case that forced this. Its
+    // device holds eight constants, none named for a part, because it was
+    // built from a reference emulator's measured levels rather than from the
+    // drawing. Every row below is then true and the headline is that the
+    // device does not model this board's parts at all.
+    if device.named.is_empty() {
+        findings.push(Finding {
+            lint: "not-modeled",
+            severity: Severity::Observation,
+            subject: "(all)".to_string(),
+            detail: "the device names no designator in any constant, so it does not model \
+                     this board part by part at all. Every row below follows from that one \
+                     fact rather than being a separate gap"
+                .to_string(),
+        });
+    }
     for part in &netlist.parts {
         if !carries_a_quantity(part) {
             continue;

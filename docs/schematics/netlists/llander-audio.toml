@@ -1,0 +1,702 @@
+# Lunar Lander's audio output, DP-136 sheet 1 side B, at pin level.
+#
+# The second board transcribed in the format
+# `docs/designs/schematic-transcription.md` describes, and the first test of
+# whether any of it generalizes past the board it was built against. Filed as
+# `phosphor-emulator-kfby.3`.
+#
+# COMPLETE, which Zaxxon's file is not. Every part in the drawing's AUDIO
+# OUTPUT block is here, so `netlist lint --device` can run its fourth row, "a
+# device constant with no part behind it", for the first time. That check
+# declines against an excerpt because it would report every part of every
+# other voice.
+#
+# WHY THIS BOARD. `phosphor-emulator-b72s` has three open residuals and all
+# three are passive-network questions, and the first of them cannot be reached
+# any other way: the throttle's volume law is wrong in our model and wrong in
+# the reference netlist THE SAME WAY, so the two agree to 0.15 percentage
+# points at every setting and only the drawing disagrees. Zaxxon's node X was a
+# door the solver could close. This is one nothing else can open.
+#
+#   cargo run -p phosphor-netlist -- solve \
+#       docs/schematics/netlists/llander-audio.toml \
+#       --drive 'noise out=3.8' --drive AUD0=5 --drive AUD1=5 --drive AUD2=5
+#
+# WHERE THIS READING COMES FROM. Drafted from
+# `docs/schematics/llander-audio-output.md`, which carries the argument behind
+# each reading, then checked part by part against the scan. Everything the
+# prose established held. What it did not have is below.
+#
+# WHAT THE SCAN ADDED, none of which is in the prose:
+#
+#   - `C14` and `C28`, two supply bypass capacitors, are on the sheet and in
+#     none of the prose's tables. Neither is in the device either. They are
+#     electrically inert for the audio, both ends being held, and the solver
+#     says so rather than being silent about them, which is the difference
+#     this format exists for.
+#   - `R100`'s lead CROSSES the 6 kHz gate's output wire with no junction dot
+#     and lands on the 3 kHz gate's output. Settled at 600 percent: the two
+#     dots are unmistakable blobs and the crossing has none. Read the other
+#     way both pull-ups land on one gate and the other output floats.
+#   - `R7` pin 4 is +22 V and pin 11 is ground, and an `LM324` has one supply
+#     pair for all four sections. The prose lists "whether the LM324 sections
+#     share it" as not established; the package settles it, and the headroom
+#     argument that says this board does not clip depends on it.
+#   - `R7` section 1 on pins 1, 2 and 3 is NOT DRAWN. That is a statement about
+#     the drawing rather than an omission here, so those pins are absent from
+#     `pins` rather than listed as open.
+#
+# HOW TO READ THE SCAN, and this board is the opposite of Zaxxon's case. The
+# PDF's embedded image is 13500 x 8736 at 1 bit on a 2430 x 1572 pt page, which
+# is a genuine 400 dpi across a D-size sheet, and ten times Zaxxon's pixel
+# count. So "400 dpi" is real here where on Zaxxon it was a fiction. Extract
+# the image and magnify it rather than rendering the page, for the same reason
+# either way: rendering resamples what the file already holds.
+#
+#   pdfimages -png -f 1 -l 1 llander.pdf pg
+#   magick pg-000.png -crop WxH+X+Y +repage -filter point -resize 200% v.png
+#
+# WHAT IS NOT HERE. The address decode that makes `AUDIO` and `NOISERESET` is
+# on sheet 1 side A, which is missing from every scan of this manual. Those
+# arrive as ports. `R23` and connector `P` are named by a label on `N5` pin 1
+# and are drawn elsewhere on the sheet, so that pin is a port too.
+
+[board]
+name = "Lunar Lander audio"
+assembly = "034230-XX A"
+source = "arcade-museum.com/manuals-videogames/L/Lunar-Lander-DP136-3rd-Printing-Missing-Sheet-01-Side-A.pdf, DP-136 sheet 1 side B, PDF page 1. The embedded image is 13500 x 8736 at 1 bit per pixel on a 2430 x 1572 pt page, a true 400 dpi"
+sheets = "1B"
+dpi = 400
+prose = "docs/schematics/llander-audio-output.md"
+
+# ---------------------------------------------------------------------------
+# THE LATCH. One write address, six bits, four sounds.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "N5"
+kind = "U"
+device = "74LS174"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["2", "5", "7", "10", "12", "15"]
+note = """
+Hex D flip-flop. The drawing labels the D inputs 1D to 6D and the outputs 1Q to \
+6Q, and the bit order is not the pin order: DB0 arrives at 3D and leaves at 3Q, \
+DB5 arrives at 1D and leaves at 1Q. Supply pins 8 and 16 are not drawn."""
+
+[[parts]]
+ref = "R23"
+kind = "R"
+ohms = 1000
+device_inferred = false
+read = "partial"
+unread = [
+  { pin = "a", why = "named by the label `P, R23` on N5 pin 1 and drawn elsewhere on the sheet; the power-on reset was not traced" },
+  { pin = "b", why = "the other end of the same part, off this block" },
+]
+note = """
+NOT A READ VALUE. R23 is named by a cross-reference label beside N5's clear pin \
+and its own symbol is elsewhere on the sheet. It is here so that the pin is \
+placed and the part is visible as unread, rather than left out; the 1k is a \
+placeholder for a pull-up and nothing should compute from it."""
+
+# ---------------------------------------------------------------------------
+# THE NOISE SOURCE. Sixteen bits across two registers, XNOR feedback from taps
+# 6 and 14, output on 14.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "M6"
+kind = "U"
+device = "74LS164"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "4", "5", "6", "10", "11", "12", "13"]
+nc = [
+  { pin = "3", why = "QA is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "4", why = "QB is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "5", why = "QC is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "6", why = "QD is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "10", why = "QE is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "11", why = "QF is drawn with its pin number and a stub and reaches nothing" },
+]
+note = """
+The first eight bits. Supply pins 7 and 14 are not drawn. QG on pin 12 is the \
+low feedback tap, bit 6 counting from zero, and QH on pin 13 carries the chain \
+on to M7."""
+
+[[parts]]
+ref = "M7"
+kind = "U"
+device = "74LS164"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "4", "5", "6", "10", "11", "12", "13"]
+nc = [
+  { pin = "3", why = "QA is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "4", why = "QB is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "5", why = "QC is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "6", why = "QD is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "10", why = "QE is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "11", why = "QF is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "13", why = "QH is drawn with its pin number and a stub and reaches nothing. The register ends here: bit 15 exists and nothing reads it" },
+]
+note = """
+The second eight bits. QG on pin 12 is bit 14 counting from zero, and is both \
+the audio output and the high feedback tap. Supply pins 7 and 14 are not drawn."""
+
+[[parts]]
+ref = "M5"
+kind = "U"
+device = "74LS32"
+pins = ["11", "12", "13"]
+out = ["11"]
+note = """
+One OR section of a quad. The other three sections and the supply pins are not \
+drawn in this block."""
+
+[[parts]]
+ref = "N6"
+kind = "U"
+device = "74LS00"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "6", "8", "11"]
+note = """
+ALL FOUR SECTIONS USED, BY TWO DIFFERENT JOBS. Sections on 1/2/3 and 12/13/11 \
+build the noise feedback; sections on 4/5/6 and 9/10/8 gate the two tones.
+
+The feedback pair is an XNOR built from three gates, which is the one thing \
+here worth transcribing at pin level: a shift register with the wrong feedback \
+does not fail, it runs a different and usually much shorter polynomial. \
+Section 12/13/11 is drawn in De Morgan form, an OR body with bubbles on both \
+inputs, which is the same NAND as the others. Taking a = M7.QG and b = M6.QG, \
+the chain is NAND(OR(a,b), NAND(a,b)), whose truth table is 1, 0, 0, 1.
+
+Supply pins 7 and 14 are not drawn."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "feedback NAND"
+group = "noise"
+
+[[parts.sections]]
+name = "d"
+pins = ["11", "12", "13"]
+role = "feedback NAND, drawn in De Morgan form"
+group = "noise"
+
+[[parts.sections]]
+name = "b"
+pins = ["4", "5", "6"]
+role = "6 kHz gate"
+group = "tones"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "3 kHz gate"
+group = "tones"
+
+# ---------------------------------------------------------------------------
+# THE THROTTLE. Three switched resistors from the noise to one node, and C15
+# to an AC ground on the same node.
+#
+# THIS IS THE BOARD'S FINDING. The same three resistors set the volume and the
+# low-pass corner, so quieter thrust is darker thrust and the volume law is
+# compressed rather than linear. Both our model and the reference netlist have
+# a fixed corner and a linear multiply, which is why no comparison between
+# them can see it.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "P5"
+kind = "U"
+device = "4066"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+group = "throttle"
+note = """
+Quad analog switch, labeled `4066 x 4` on the drawing. Supply pins 7 and 14 \
+are not drawn.
+
+THE ON-RESISTANCE IS NOT ON THE DRAWING. A 4066 is drawn as a switch and its \
+on-resistance is a part property: about 80 ohms at a 5 V supply, which is \
+under 2 percent against the 3.9k of the smallest leg and over 0.5 percent \
+against the 15k of the largest. It is carried on each section so that a \
+reading can see it rather than having it silently absent, and it is an \
+inference in the same class as a part number nobody printed."""
+
+[[parts.switches]]
+name = "a"
+pins = ["1", "2"]
+control = "13"
+ohms = 80
+
+[[parts.switches]]
+name = "b"
+pins = ["4", "3"]
+control = "5"
+ohms = 80
+
+[[parts.switches]]
+name = "c"
+pins = ["8", "9"]
+control = "6"
+ohms = 80
+
+[[parts.switches]]
+name = "d"
+pins = ["11", "10"]
+control = "12"
+ohms = 80
+
+[[parts]]
+ref = "R18"
+kind = "R"
+kohms = 15
+group = "throttle"
+note = "the quietest throttle leg, switched by AUD0 through P5 section C."
+
+[[parts]]
+ref = "R20"
+kind = "R"
+kohms = 8.2
+group = "throttle"
+note = "switched by AUD1 through P5 section B."
+
+[[parts]]
+ref = "R19"
+kind = "R"
+kohms = 3.9
+group = "throttle"
+note = "the loudest throttle leg, switched by AUD2 through P5 section D."
+
+[[parts]]
+ref = "C15"
+kind = "C"
+uf = 1.0
+group = "throttle"
+note = """
+Drawn `1.0 TANT` with its positive plate on the +5 V side. +5 V is an AC \
+ground, so this and whichever throttle resistors are closed are a low-pass, \
+and that is the whole finding: the corner moves with the volume. The prose \
+lists a tantalum's actual value at this bias as not established, and it sets \
+the corner directly."""
+
+[[parts]]
+ref = "C14"
+kind = "C"
+uf = 0.1
+group = "throttle"
+note = """
+NOT IN THE PROSE AND NOT IN THE DEVICE. A supply bypass from +5 V to ground, \
+drawn beside C15 and carried here because a part on the sheet that nothing \
+models is exactly what this format exists to make askable. Both its ends are \
+held, so it has no voltage to vary and the solver reports it as carrying no \
+mode, which is the correct answer rather than a silence."""
+
+# ---------------------------------------------------------------------------
+# THE BAND-PASS, which is the rumble. Second order around one LM324 section.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R22"
+kind = "R"
+kohms = 47
+group = "band-pass"
+
+[[parts]]
+ref = "R26"
+kind = "R"
+kohms = 1.2
+group = "band-pass"
+note = "shunts the band-pass input node to +5 V, which is the reference the whole stage sits on."
+
+[[parts]]
+ref = "C20"
+kind = "C"
+uf = 0.1
+group = "band-pass"
+note = "drawn `.1 MYL`. Couples the input node into the inverting input."
+
+[[parts]]
+ref = "C21"
+kind = "C"
+uf = 0.1
+group = "band-pass"
+note = "drawn `.1 MYL`. From the same input node forward to the output."
+
+[[parts]]
+ref = "R27"
+kind = "R"
+kohms = 270
+group = "band-pass"
+note = "the feedback, R7 pin 6 to pin 7."
+
+# ---------------------------------------------------------------------------
+# THE MIXER. Two noise legs into an inverting summer, then a unity inverter
+# that the two tone legs also reach.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R28"
+kind = "R"
+kohms = 6.8
+group = "mixer"
+note = "the thrust leg, from the band-pass output to the summing node."
+
+[[parts]]
+ref = "R21"
+kind = "R"
+kohms = 1.5
+group = "mixer"
+note = """
+The explosion leg. Its switch takes the SAME common node the throttle \
+resistors drive, so the explosion's volume is the throttle: enabling it with \
+the throttle at zero is silence."""
+
+[[parts]]
+ref = "C91"
+kind = "C"
+uf = 0.047
+group = "mixer"
+note = "drawn `.047 MYL`. In series with R21, so the explosion leg is high-passed."
+
+[[parts]]
+ref = "R31"
+kind = "R"
+kohms = 10
+group = "mixer"
+note = "the summing amplifier's feedback, in parallel with C27."
+
+[[parts]]
+ref = "C27"
+kind = "C"
+uf = 0.1
+group = "mixer"
+note = "drawn `.1 MYL`, across R31."
+
+[[parts]]
+ref = "R33"
+kind = "R"
+kohms = 10
+group = "mixer"
+note = "AUDIO1 into the inverter's summing node."
+
+[[parts]]
+ref = "R34"
+kind = "R"
+kohms = 10
+group = "mixer"
+note = "the inverter's feedback. With R33 equal to it the stage is unity, which is what makes AUDIO2 the opposite phase of AUDIO1."
+
+[[parts]]
+ref = "R7"
+kind = "U"
+device = "LM324"
+pins = ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"]
+out = ["7", "8", "14"]
+group = "mixer"
+note = """
+THE PART NUMBER IS PRINTED, three times, beside each of the three sections \
+used. That is a difference from Zaxxon's board, where every op-amp was an \
+unlabeled quad and LM324 was an inference carrying the whole pitch range of a \
+voice.
+
+SECTION 1 ON PINS 1, 2 AND 3 IS NOT DRAWN. Those pins are absent from `pins` \
+rather than listed open, which is the format's other state: the symbol does \
+not draw them, as against drawing them and leaving them unconnected. What the \
+board does with the fourth amplifier was not read.
+
+PIN 4 IS +22 V AND PIN 11 IS GROUND, and an LM324 has one supply pair for all \
+four sections, so every section here runs from that pair. The prose lists \
+"whether the LM324 sections share it" as not established. The package settles \
+it, and the headroom argument that says this board does not clip rests on \
+it: about 11 V peak to peak differential against roughly 20 V available."""
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "band-pass"
+group = "band-pass"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "summing amplifier"
+group = "mixer"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "unity inverter"
+group = "mixer"
+
+[[parts]]
+ref = "C28"
+kind = "C"
+uf = 1.0
+group = "mixer"
+note = """
+NOT IN THE PROSE AND NOT IN THE DEVICE. Drawn `1.0` with a positive plate mark, \
+bypassing the +22 V rail to ground beside R7's pin 4. Like C14 it is inert for \
+the audio and is here because a part nobody models should be visible as one."""
+
+# ---------------------------------------------------------------------------
+# THE TONES. Two gates, two pull-ups and two 390k legs into the inverter.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R99"
+kind = "R"
+kohms = 1
+group = "tones"
+note = "pulls up N6 pin 6, the 6 kHz gate's output."
+
+[[parts]]
+ref = "R100"
+kind = "R"
+kohms = 1
+group = "tones"
+note = """
+Pulls up N6 pin 8, the 3 kHz gate's output. ITS LEAD CROSSES THE 6 kHz GATE'S \
+OUTPUT WIRE WITH NO JUNCTION DOT on the way down, which was settled at 600 \
+percent: the two real junctions are unmistakable blobs and the crossing has \
+none. Read as a junction, both pull-ups land on pin 6 and pin 8 floats."""
+
+[[parts]]
+ref = "R30"
+kind = "R"
+kohms = 390
+group = "tones"
+note = "the 6 kHz leg, from N6 pin 6 to the inverter's summing node."
+
+[[parts]]
+ref = "R29"
+kind = "R"
+kohms = 390
+group = "tones"
+note = """
+The 3 kHz leg, from N6 pin 8 to the inverter's summing node. Both tone legs \
+are single ended where the two noise legs are differential, so the tones sit \
+6 dB further down than a summed mix would put them."""
+
+# ---------------------------------------------------------------------------
+# NETS
+# ---------------------------------------------------------------------------
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["C14.a", "C15.b", "R26.a", "R99.a", "R100.a", "R7.5", "R7.10", "R7.12"]
+note = """
+Every LM324 section's non-inverting input sits here, which makes +5 V the \
+signal reference for the whole analog block on a single supply."""
+
+[[nets]]
+name = "+22V"
+rail = true
+on = ["R7.4", "C28.a"]
+note = "the LM324's positive supply, and the only rail on this block that is not +5 V."
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["C14.b", "C28.b", "R7.11"]
+
+[[nets]]
+name = "AUDIO strobe"
+port = "input"
+on = ["N5.9"]
+note = "from the address decoder on sheet 1 side A, which is missing from every scan of this manual."
+
+[[nets]]
+name = "P/R23"
+port = "input"
+on = ["N5.1"]
+note = """
+N5's active-low clear, labeled `P, R23` on the drawing: it reaches connector P \
+and R23, both drawn elsewhere on this sheet. Named for the label rather than \
+for a function, because what drives it was not traced."""
+
+[[nets]]
+name = "DB0"
+port = "input"
+on = ["N5.6"]
+
+[[nets]]
+name = "DB1"
+port = "input"
+on = ["N5.11"]
+
+[[nets]]
+name = "DB2"
+port = "input"
+on = ["N5.4"]
+
+[[nets]]
+name = "DB3"
+port = "input"
+on = ["N5.13"]
+
+[[nets]]
+name = "DB4"
+port = "input"
+on = ["N5.14"]
+
+[[nets]]
+name = "DB5"
+port = "input"
+on = ["N5.3"]
+
+[[nets]]
+name = "AUD0"
+on = ["N5.7", "P5.6"]
+note = "the quietest throttle bit, closing P5 section C onto R18 15k."
+
+[[nets]]
+name = "AUD1"
+on = ["N5.10", "P5.5"]
+
+[[nets]]
+name = "AUD2"
+on = ["N5.5", "P5.12"]
+
+[[nets]]
+name = "AUD3"
+on = ["N5.12", "P5.13"]
+note = "the explosion enable, closing P5 section A onto R21 from the throttle's own common node."
+
+[[nets]]
+name = "AUD4"
+on = ["N5.15", "N6.9"]
+
+[[nets]]
+name = "AUD5"
+on = ["N5.2", "N6.4"]
+
+[[nets]]
+name = "12KHZ"
+port = "input"
+on = ["M6.8", "M7.8"]
+
+[[nets]]
+name = "NOISERESET"
+port = "input"
+on = ["M6.9", "M7.9"]
+note = """
+The active-low clear on both registers, from the 0x3E00 strobe. Inactive \
+except during a write, so the register free-runs."""
+
+[[nets]]
+name = "M6 QG"
+on = ["M6.12", "M5.13", "N6.1"]
+note = "the low feedback tap, bit 6 of sixteen counting from zero."
+
+[[nets]]
+name = "register chain"
+on = ["M6.13", "M7.1", "M7.2"]
+note = "M6's QH into M7's A and B together, which is what makes the two registers one sixteen-bit shifter."
+
+[[nets]]
+name = "M5 out"
+on = ["M5.11", "N6.13"]
+
+[[nets]]
+name = "N6a out"
+on = ["N6.3", "N6.12"]
+
+[[nets]]
+name = "feedback"
+on = ["N6.11", "M6.1", "M6.2"]
+note = "the XNOR's output into M6's A and B together."
+
+[[nets]]
+name = "noise out"
+on = ["M7.12", "M5.12", "N6.2", "P5.11", "P5.4", "P5.8"]
+note = """
+Bit 14 does three jobs: it is the audio, it is the high feedback tap, and it \
+feeds all three throttle switches in parallel. The prose records the level as \
+taken on trust from the reference netlist's 3.8 V rather than measured, and it \
+sets the tone-to-noise balance directly."""
+
+[[nets]]
+name = "R19 leg"
+on = ["P5.10", "R19.a"]
+
+[[nets]]
+name = "R20 leg"
+on = ["P5.3", "R20.a"]
+
+[[nets]]
+name = "R18 leg"
+on = ["P5.9", "R18.a"]
+
+[[nets]]
+name = "common node"
+on = ["R18.b", "R19.b", "R20.b", "C15.a", "R22.a", "P5.1"]
+note = """
+EXACTLY THESE SIX, and the board's finding is in the list. The three throttle \
+resistors, the capacitor that makes them a filter, the band-pass input, and \
+the explosion switch. Because P5.1 is here rather than on the noise output, \
+the explosion is gated by the throttle as well as by AUD3."""
+
+[[nets]]
+name = "band-pass in"
+on = ["R22.b", "R26.b", "C20.a", "C21.a"]
+
+[[nets]]
+name = "R7b summing node"
+on = ["C20.b", "R27.a", "R7.6"]
+
+[[nets]]
+name = "band-pass out"
+on = ["R7.7", "C21.b", "R27.b", "R28.a"]
+
+[[nets]]
+name = "explosion leg"
+on = ["P5.2", "R21.a"]
+
+[[nets]]
+name = "R21/C91 junction"
+on = ["R21.b", "C91.a"]
+
+[[nets]]
+name = "R7c summing node"
+on = ["R28.b", "C91.b", "R31.a", "C27.a", "R7.9"]
+note = "the two noise legs and the feedback pair. Nothing else lands here."
+
+[[nets]]
+name = "AUDIO1"
+on = ["R7.8", "R31.b", "C27.b", "R33.a"]
+note = "the summing amplifier's output, and one of the two opposite-phase outputs the drawing describes."
+
+[[nets]]
+name = "6KHZ"
+port = "input"
+on = ["N6.5"]
+
+[[nets]]
+name = "3KHZ"
+port = "input"
+on = ["N6.10"]
+
+[[nets]]
+name = "6 kHz gate out"
+on = ["N6.6", "R99.b", "R30.a"]
+
+[[nets]]
+name = "3 kHz gate out"
+on = ["N6.8", "R100.b", "R29.a"]
+
+[[nets]]
+name = "R7d summing node"
+on = ["R33.b", "R29.b", "R30.b", "R34.a", "R7.13"]
+note = """
+Where the tones join the mix. AUDIO1 arrives through R33 and the two tone legs \
+through 390k each, so the tones are attenuated about 39 to 1 against the \
+inverted noise."""
+
+[[nets]]
+name = "AUDIO2"
+port = "output"
+on = ["R7.14", "R34.b"]
+note = "AUDIO1 inverted at unity, plus the two tones. The drawing's connector D."

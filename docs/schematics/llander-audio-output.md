@@ -106,6 +106,41 @@ resistors set the volume and the corner**. All three closed is 2247 ohms and a
 71 Hz corner; AUD0 alone is 15 k and a 10.6 Hz corner. On the board, quieter
 thrust is also darker thrust.
 
+> **Both corner figures in that sentence are low**, and the board is now
+> transcribed at
+> [`netlists/llander-audio.toml`](netlists/llander-audio.toml) so that the
+> network can be solved rather than estimated. Two things the arithmetic above
+> leaves out: the `4066`'s roughly 80 ohms of on-resistance in series with each
+> leg, and, much larger, `R22` and `R26`'s 48.2 kOhm path to +5 V loading the
+> same node. Solving all eight settings:
+>
+> | throttle | legs closed | corner, solved | corner, above |
+> |---|---|---|---|
+> | 1 | `R18` | **13.9 Hz** | 10.6 Hz |
+> | 2 | `R20` | 22.5 Hz | |
+> | 3 | `R18`, `R20` | 33.1 Hz | |
+> | 4 | `R19` | 43.3 Hz | |
+> | 5 | `R19`, `R18` | 53.8 Hz | |
+> | 6 | `R19`, `R20` | 62.5 Hz | |
+> | 7 | all three | **73.1 Hz** | 71 Hz |
+>
+> The error is 3 percent at full throttle and **31 percent at throttle 1**,
+> because the load matters more as the switched resistance rises. It runs the
+> same direction as the finding rather than against it: the spectrum moves with
+> the volume even more than this section says.
+>
+> **The volume law itself is confirmed.** Weighted at the band center from the
+> solved DC gain and corner, throttle 1 lands at **0.193** of full against the
+> 0.143 a linear control gives, where the paragraph below derives 0.192 by
+> hand. Two independent routes to the same number, one of them with no
+> arithmetic about which resistors are in parallel.
+>
+> ```bash
+> cargo run -p phosphor-netlist -- solve \
+>     docs/schematics/netlists/llander-audio.toml \
+>     --drive 'noise out=3.8' --drive AUD0=5 --drive AUD1=5 --drive AUD2=5
+> ```
+
 The parallel resistance of all three, 2247 ohms, is exactly the figure an
 independent netlist of this board uses for a *fixed* RC ahead of a *linear*
 volume multiply. That netlist is therefore correct at full throttle and wrong
@@ -218,17 +253,51 @@ each, pull the two gate outputs up.
   the corner the finding above is about.
 - **The +22 V rail's use.** Only section 3's supply pin was traced to it. What
   the rest of the board does with +22 V, and whether the LM324 sections share
-  it, was not read.
+  it, was not read. *Half of this is now settled: pin 4 is +22 V and pin 11 is
+  ground, and a quad has one supply pair, so all four sections share them. What
+  the rest of the board does with the rail is still unread.*
 - **What the game writes, and when.** No trace of the ROM's own use of `0x3C00`
   or `0x3E00` was taken, so how long a crash holds the explosion, and whether it
   holds full throttle while it does, are unknown. The scenarios assume it does
   because the circuit gives no alternative, not because anything was traced.
+
+## What the netlist added
+
+The board is transcribed at
+[`netlists/llander-audio.toml`](netlists/llander-audio.toml), complete rather
+than as an excerpt, and checking it part by part against the scan held
+everything above except the two corner figures corrected in place. Four things
+this document did not have:
+
+- **`C14` and `C28`**, two supply bypass capacitors, are on the sheet and in
+  none of the tables here. Neither is in the device. Both are inert for the
+  audio, which is the point: a part nobody models should be visible as one
+  rather than absent.
+- **`R100`'s lead crosses the 6 kHz gate's output wire with no junction dot**
+  and lands on the 3 kHz gate's output. Settled at 600 percent. The section
+  above says the two 1 k resistors "pull the two gate outputs up" without
+  saying which goes where, and read as a junction both would land on pin 6.
+- **`R7` pin 4 is +22 V and pin 11 is ground.** The list below says whether the
+  `LM324` sections share the rail was not read; the package answers it, because
+  a quad has one supply pair. The clipping argument depends on it.
+- **`R7` section 1, on pins 1, 2 and 3, is not drawn at all.** What the board
+  does with the fourth amplifier is still unread, but "not drawn" is now
+  recorded as a statement about the drawing rather than as a silence.
 
 ## Confidence
 
 A clean scan, read at 600 and 900 dpi. Every designator and value above was
 legible without guessing except the two feedback wires noted at the top, which
 needed the higher render.
+
+Those two numbers are magnification rather than resolution, and on this board
+that distinction is a footnote rather than the trap it was on Zaxxon. The PDF's
+embedded image is 13500 x 8736 at 1 bit on a 2430 x 1572 pt page, which is a
+genuine 400 dpi across a D-size sheet and ten times Zaxxon's pixel count. So
+rendering the page above 400 dpi resamples, and the reading still holds because
+what it needed was magnification of an image that already had the detail.
+Extract the image with `pdfimages` and magnify with `magick -filter point`
+rather than rendering, for the same reason either way.
 
 The strongest check on it is not the drawing: the band-pass's two derived
 figures, 89.5 Hz and Q 7.60, reproduce two literals in an independently written

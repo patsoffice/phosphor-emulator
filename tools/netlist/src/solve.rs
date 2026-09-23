@@ -44,7 +44,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// What the solver is told that the netlist cannot say: how many volts a rail
 /// carries, and what any part it does not model is holding its pins at.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Setup {
     /// Rail voltages by net name, overriding what the name itself implies.
     pub rails: BTreeMap<String, f64>,
@@ -52,6 +52,23 @@ pub struct Setup {
     /// logic output, a 555's pin 3. The netlist knows the junction and cannot
     /// know the voltage, so this is where a scenario is stated.
     pub drives: BTreeMap<String, f64>,
+    /// Volts above which an analog switch's control counts as closed.
+    ///
+    /// A `4066` on a 5 V supply driven from TTL, which is every switch this
+    /// has met, so half the logic rail is the default. It is a knob rather
+    /// than a constant because the number belongs to the scenario and not to
+    /// the drawing.
+    pub close_above: f64,
+}
+
+impl Default for Setup {
+    fn default() -> Setup {
+        Setup {
+            rails: BTreeMap::new(),
+            drives: BTreeMap::new(),
+            close_above: 2.5,
+        }
+    }
 }
 
 /// A voltage the solver was given rather than computed.
@@ -82,12 +99,42 @@ pub struct Mode {
     pub shape: Vec<(String, f64)>,
 }
 
+/// What the solver did with one analog-switch section, and why.
+///
+/// Always reported, closed or open. A switch is the one element whose presence
+/// in the network is a scenario's choice rather than the drawing's, so "which
+/// switches were closed" is part of the answer rather than part of the setup.
+#[derive(Debug, Clone)]
+pub struct SwitchState {
+    /// The part and section, as `P5.d`.
+    pub section: String,
+    /// The net its control pin is on.
+    pub control: String,
+    /// Whether the solver closed it.
+    pub closed: bool,
+    /// What it was closed with, in ohms, where it is closed.
+    pub ohms: Option<f64>,
+    /// The reason, in a few words.
+    pub why: String,
+}
+
+/// A closed switch whose part gives no on-resistance still has to be a number.
+///
+/// A milliohm rather than a zero, because merging two nodes is a different
+/// piece of machinery and this keeps a switch an ordinary branch. Against the
+/// kilohms these switches feed it is seven orders down, which is an ideal
+/// switch to any precision the drawing supports, and every report says when
+/// this stood in for a real figure.
+const IDEAL_SWITCH_OHMS: f64 = 1e-3;
+
 /// The passive network the solver extracted, and everything it assumed to get
 /// there.
 #[derive(Debug, Clone)]
 pub struct Network {
     /// Nets held at a voltage.
     pub held: Vec<Held>,
+    /// What each analog-switch section was set to.
+    pub switches: Vec<SwitchState>,
     /// The unknown nodes, in matrix order.
     pub free: Vec<String>,
     /// Every pin the solver treated as an open circuit, as `U19.12`, sorted.
@@ -172,11 +219,70 @@ impl Network {
             }
         }
 
+        // Analog switches, before anything else, because a closed one is a
+        // branch and therefore changes which nodes are reachable at all.
+        let mut switches: Vec<SwitchState> = Vec::new();
+        let mut closed_pins: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut switch_branches: Vec<(&str, [&str; 2], f64)> = Vec::new();
+        for part in &netlist.parts {
+            for switch in &part.switches {
+                let section = format!("{}.{}", part.designator, switch.name);
+                let control = netlist.net_of(&part.designator, &switch.control);
+                let held_at = control
+                    .and_then(|net| held_of.get(net.name.as_str()))
+                    .map(|i| held[*i].volts);
+                let control_name = control.map_or("(not on a net)", |net| net.name.as_str());
+                let (closed, why) = match held_at {
+                    Some(volts) if volts >= setup.close_above => {
+                        (true, format!("{control_name} is held at {volts} V"))
+                    }
+                    Some(volts) => (false, format!("{control_name} is held at {volts} V")),
+                    // Nobody said what the control is doing, so the honest
+                    // reading is that the switch state is not known. Open is
+                    // the safe default and the report says it was a default.
+                    None => (
+                        false,
+                        format!("nothing states {control_name}, so the state is unknown"),
+                    ),
+                };
+                let ohms = closed.then(|| switch.ohms.unwrap_or(IDEAL_SWITCH_OHMS));
+                if closed {
+                    let ends: Vec<&str> = switch
+                        .pins
+                        .iter()
+                        .filter_map(|pin| {
+                            closed_pins.insert((part.designator.as_str(), pin.as_str()));
+                            netlist
+                                .net_of(&part.designator, pin)
+                                .map(|net| net.name.as_str())
+                        })
+                        .collect();
+                    if let [a, b] = ends[..] {
+                        switch_branches.push((
+                            part.designator.as_str(),
+                            [a, b],
+                            1.0 / ohms.expect("closed switches carry a resistance"),
+                        ));
+                    }
+                }
+                switches.push(SwitchState {
+                    section,
+                    control: control_name.to_string(),
+                    closed,
+                    ohms,
+                    why,
+                });
+            }
+        }
+
         // Every pin of a part the solver does not model. Collected before the
         // branches, because a part is open as a whole: an `LM324` contributes
         // fourteen open pins and no branch.
         let mut opened: BTreeSet<String> = BTreeSet::new();
         let mut endpoints: Vec<(Kind, &str, [&str; 2], f64)> = Vec::new();
+        for (designator, nets, siemens) in switch_branches {
+            endpoints.push((Kind::R, designator, nets, siemens));
+        }
         for part in &netlist.parts {
             let quantity = part.value.quantity();
             let passive = matches!(part.kind, Kind::R | Kind::C | Kind::L)
@@ -184,6 +290,12 @@ impl Network {
                 && quantity.is_some_and(|q| q > 0.0);
             if !passive {
                 for pin in &part.pins {
+                    // A pin a closed switch is carrying is connected, not
+                    // open, and saying otherwise in the report would send a
+                    // reader looking for a fault that is not there.
+                    if closed_pins.contains(&(part.designator.as_str(), pin.as_str())) {
+                        continue;
+                    }
                     opened.insert(format!("{}.{pin}", part.designator));
                 }
                 if matches!(part.kind, Kind::R | Kind::C | Kind::L) {
@@ -363,6 +475,7 @@ impl Network {
         excluded.dedup();
         Ok(Network {
             held,
+            switches,
             free,
             opened: opened.into_iter().collect(),
             excluded,
@@ -1074,6 +1187,196 @@ on = ["R155.b"]
         let a = dc.iter().find(|(n, _)| n == "node A").unwrap().1;
         // 820 / (2700 + 820) of 10.3 V.
         assert!((a - 10.3 * 820.0 / 3520.0).abs() < 1e-9, "{a}");
+    }
+
+    /// Two legs switched onto one node by two sections of a `4066`, which is
+    /// Lunar Lander's throttle in miniature. The point is that the SAME
+    /// resistors set the divider and the corner, so closing a second one has
+    /// to move both.
+    const SWITCHED: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "P5"
+kind = "U"
+device = "4066"
+pins = ["3", "4", "5", "6", "8", "9"]
+
+[[parts.switches]]
+name = "b"
+pins = ["4", "3"]
+control = "5"
+ohms = 80
+
+[[parts.switches]]
+name = "c"
+pins = ["8", "9"]
+control = "6"
+ohms = 80
+
+[[parts]]
+ref = "R20"
+kind = "R"
+kohms = 8.2
+
+[[parts]]
+ref = "R18"
+kind = "R"
+kohms = 15
+
+[[parts]]
+ref = "C15"
+kind = "C"
+uf = 1.0
+
+[[nets]]
+name = "source"
+port = "input"
+on = ["P5.4", "P5.8"]
+
+[[nets]]
+name = "R20 leg"
+on = ["P5.3", "R20.a"]
+
+[[nets]]
+name = "R18 leg"
+on = ["P5.9", "R18.a"]
+
+[[nets]]
+name = "common node"
+on = ["R20.b", "R18.b", "C15.a"]
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["C15.b"]
+
+[[nets]]
+name = "AUD1"
+port = "input"
+on = ["P5.5"]
+
+[[nets]]
+name = "AUD0"
+port = "input"
+on = ["P5.6"]
+"#;
+
+    fn throttle(drives: &[(&str, f64)]) -> Network {
+        let setup = Setup {
+            drives: drives
+                .iter()
+                .map(|(net, v)| ((*net).to_string(), *v))
+                .collect(),
+            ..Setup::default()
+        };
+        network(SWITCHED, &setup)
+    }
+
+    /// The decision point this board was picked for. A switch is not a drive:
+    /// holding the node would throw away the resistance the closed leg puts in
+    /// the network, which is the whole question.
+    /// A closed switch is a branch and an open one is nothing, which is
+    /// counted rather than inferred from the node list. Both legs' nodes stay
+    /// reachable either way, because `R20` still joins its leg to the common
+    /// node whether or not anything drives it; what changes is how many
+    /// branches carry current.
+    #[test]
+    fn a_closed_switch_is_a_branch_in_the_network_and_an_open_one_is_not() {
+        let switches = |n: &Network| n.resistors().iter().filter(|r| *r == "P5").count();
+
+        let one = throttle(&[("source", 3.8), ("AUD0", 5.0), ("AUD1", 0.0)]);
+        assert_eq!(switches(&one), 1, "{:?}", one.resistors());
+
+        let both = throttle(&[("source", 3.8), ("AUD0", 5.0), ("AUD1", 5.0)]);
+        assert_eq!(switches(&both), 2, "{:?}", both.resistors());
+    }
+
+    /// With every switch open this fixture's legs reach no rail through any
+    /// resistor, so there is nothing to solve and the solver says so rather
+    /// than returning an empty answer. The real board does not do this, because
+    /// its common node also reaches +5 V through `R22` and `R26`; the fixture
+    /// leaves those out, which makes it the clean case for the rule.
+    #[test]
+    fn a_network_reachable_only_through_open_switches_has_nothing_to_solve() {
+        let netlist = Netlist::parse(SWITCHED).expect("should load");
+        let setup = Setup {
+            drives: BTreeMap::from([
+                ("source".to_string(), 3.8),
+                ("AUD0".to_string(), 0.0),
+                ("AUD1".to_string(), 0.0),
+            ]),
+            ..Setup::default()
+        };
+        let errors = Network::build(&netlist, &setup).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("no unknown nodes")),
+            "{errors:?}"
+        );
+    }
+
+    /// The finding itself: closing a second leg moves the corner **and** the
+    /// divider together, because they are the same resistors. A model with a
+    /// fixed corner and a linear volume is wrong about one or the other at
+    /// every setting but full.
+    #[test]
+    fn closing_a_second_leg_moves_the_corner_and_the_level_together() {
+        let quiet = throttle(&[("source", 3.8), ("AUD0", 5.0), ("AUD1", 0.0)]);
+        let loud = throttle(&[("source", 3.8), ("AUD0", 5.0), ("AUD1", 5.0)]);
+
+        let tau = |n: &Network| n.modes().expect("should solve")[0].tau;
+        let (slow, fast) = (tau(&quiet), tau(&loud));
+        // 15.08k * 1uF against (15.08k || 8.28k) * 1uF.
+        assert!((slow - 15.08e-3).abs() < 1e-5, "{slow}");
+        assert!((fast - 5.345e-3).abs() < 1e-5, "{fast}");
+        assert!(
+            slow / fast > 2.8,
+            "the corner moves by nearly three to one across one bit: {slow} vs {fast}"
+        );
+    }
+
+    /// Every switch is reported whichever way it went, because which ones were
+    /// closed is part of the answer rather than part of the setup.
+    #[test]
+    fn switch_states_are_reported_closed_or_open() {
+        let net = throttle(&[("source", 3.8), ("AUD0", 5.0), ("AUD1", 0.0)]);
+        assert_eq!(net.switches.len(), 2);
+        let closed = net.switches.iter().find(|s| s.section == "P5.c").unwrap();
+        assert!(closed.closed);
+        assert_eq!(closed.ohms, Some(80.0));
+        assert!(closed.why.contains("AUD0"), "{}", closed.why);
+        let open = net.switches.iter().find(|s| s.section == "P5.b").unwrap();
+        assert!(!open.closed);
+    }
+
+    /// A control nobody stated is not a closed switch and not silently an open
+    /// one either: it is an unknown, defaulted to open and said out loud.
+    #[test]
+    fn a_switch_whose_control_nothing_states_is_open_and_says_it_is_a_default() {
+        let net = throttle(&[("source", 3.8), ("AUD0", 5.0)]);
+        let unknown = net.switches.iter().find(|s| s.section == "P5.b").unwrap();
+        assert!(!unknown.closed);
+        assert!(unknown.why.contains("unknown"), "{}", unknown.why);
+    }
+
+    /// A pin a closed switch is carrying is connected, and reporting it open
+    /// would send a reader looking for a fault that is not there.
+    #[test]
+    fn a_closed_switchs_pins_are_not_reported_open() {
+        let net = throttle(&[("source", 3.8), ("AUD0", 5.0), ("AUD1", 0.0)]);
+        assert!(
+            !net.opened.contains(&"P5.8".to_string()),
+            "{:?}",
+            net.opened
+        );
+        assert!(
+            !net.opened.contains(&"P5.9".to_string()),
+            "{:?}",
+            net.opened
+        );
+        // The open section's pins still are.
+        assert!(net.opened.contains(&"P5.3".to_string()), "{:?}", net.opened);
     }
 
     #[test]

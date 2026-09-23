@@ -462,6 +462,84 @@ question and a part-property question is still blocking a board.
 > Nothing about this touches the runtime non-goal: source out, the tool run by
 > hand, nothing linked.
 
+## The second board
+
+Everything above was built against one schematic, so none of it was known to
+generalize. Lunar Lander's audio output is the first test, at
+`docs/schematics/netlists/llander-audio.toml`, and it was chosen because
+`phosphor-emulator-b72s` names three open residuals that are all
+passive-network questions and because the first of them **cannot be reached by
+comparison at all**: the throttle's volume law is wrong in our model and wrong
+in the reference netlist the same way, so the two agree to 0.15 percentage
+points at every setting and only the drawing disagrees.
+
+### The format needed one new concept, and it is not a `drive`
+
+Zaxxon never made the format express a **switched** element. Its `4016B` gates
+were opaque parts the solver opened and nothing downstream cared, because every
+question on that board was about a network that does not change. This board's
+whole question is what happens when three `4066` sections close in eight
+combinations, because the same three resistors set the thrust volume *and* the
+noise low-pass corner.
+
+So a part may now carry `switches`: a section naming the two pins it joins, the
+pin that controls it, and an optional on-resistance. A scenario states the
+control net's voltage the way it states any other, and the solver closes the
+switch above a threshold. **A switch is deliberately not a `drive`**: holding
+the node at a voltage would throw away the resistance the closed leg puts into
+the network, which is the thing being asked about. Which switches were closed
+prints with the answer rather than with the setup, because a switched network
+is a different network per scenario.
+
+### What it found, and the prose it was drafted from was mostly right
+
+The reading order that worked on Zaxxon worked again: draft from the prose,
+then check part by part against the scan. Everything
+`llander-audio-output.md` established held. What it did not have:
+
+- **`C14` and `C28` are on the sheet and in none of the prose and none of the
+  device.** Two supply bypass capacitors. Both are electrically inert for the
+  audio, and the solver says so ("both ends held, so it has no voltage to vary")
+  rather than being silent about them.
+- **`R100`'s lead crosses the 6 kHz gate's output with no junction dot** and
+  lands on the 3 kHz gate's. Settled at 600 percent, where the two real
+  junctions are unmistakable blobs and the crossing has none. Read the other
+  way, both pull-ups land on one gate and the other output floats. That is the
+  third board-topology crossing this project has found and the rule that
+  catches them is now two for two.
+- **`R7` pin 4 is +22 V and pin 11 is ground**, and an `LM324` has one supply
+  pair for all four sections. The prose lists "whether the `LM324` sections
+  share it" as not established; the package settles it, and the headroom
+  argument that says this board does not clip rests on it.
+- **The two corner figures in the prose are both low, and increasingly so as
+  the throttle falls.** The prose computes 71 Hz at full throttle and 10.6 Hz
+  at throttle 1 from the switched resistance alone. Solving the network gives
+  **73.1 Hz and 13.9 Hz**, because the hand calculation omits the `4066`'s
+  on-resistance and, far more, `R22` and `R26`'s 48.2 kOhm path to +5 V loading
+  the same node. The error is 3 percent at full throttle and **31 percent** at
+  throttle 1.
+- **And it confirms the finding the board was picked for.** From the netlist
+  alone, with no arithmetic about which resistors are in parallel, throttle 1
+  lands at **0.193** of full against the 0.143 a linear control would give. The
+  prose derived 0.192 and 2.6 dB by hand. That is decision 6's second row:
+  the reading is right and the approximation is wrong.
+
+### One thing does not generalize, and it is a result
+
+`lint --device` learns which parts a device models by reading its constants'
+*names*. On Zaxxon that is 125 designators and the check is the epic's headline.
+On Lunar Lander it returns **zero**: `llander_sound.rs` holds eight constants
+and not one is named for a part, because that device was built from a reference
+emulator's measured levels rather than from the drawing. Every part on the sheet
+comes back unmodeled, which is true and is one fact rather than 23.
+
+That is not a bug in the lint and it is not fixable by a better parser. It says
+the device-side half of the pipeline assumes a device built part by part from a
+schematic, and the fleet contains devices that are not. `not-modeled` now says
+so in one line when a device names nothing, so the twenty-three rows are read
+as the consequence they are. Any fleet migration has to expect both kinds, and
+for the second kind the netlist's value is the solver rather than the lints.
+
 ## Kill criterion
 
 **After rungs 2 and 3, check two things.** Do the lints flag `C94` and its
