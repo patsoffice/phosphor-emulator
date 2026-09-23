@@ -560,6 +560,7 @@ on = [
   "R142.a", "R143.a", "U21.2", "U21.3",
   "U21.10", "U21.11", "R107.a", "R108.a", "R109.a",
   "U22.2", "U22.3", "R102.a", "R103.a", "R104.a",
+  "U45.10", "U45.11", "R125.a", "R126.a",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -569,7 +570,7 @@ gate."""
 [[nets]]
 name = "+6V"
 rail = true
-on = ["U19.3", "R161.a", "R86.a", "R98.a", "U3.3"]
+on = ["U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a"]
 
 [[nets]]
 name = "+12V"
@@ -591,6 +592,7 @@ on = [
   "C75.b", "R195.b", "C77.b", "R198.b", "C86.b", "R201.b", "R207.b",
   "U2.1", "U2.2", "C64.b", "C65.b",
   "C61.b", "C63.b",
+  "C79.b", "R127.b", "R132.b", "Q6.e", "R133.b", "R141.b", "C85.b",
 ]
 
 [[nets]]
@@ -1669,10 +1671,11 @@ on = ["R111.b", "R112.b", "U3.2"]
 
 [[nets]]
 name = "NOISE 2"
-on = ["U3.1", "R112.a"]
+on = ["U3.1", "R112.a", "C80.a"]
 note = """
-Also crosses to sheet 12 and feeds the medium explosion's band-pass through \
-C68 on sheet 11 right. Neither is transcribed yet."""
+Feeds the cannon's band-pass through C80, and also crosses to sheet 12 and \
+reaches the medium explosion's band-pass through C68 on sheet 11 right. \
+Neither of those is transcribed yet."""
 
 # ===========================================================================
 # THE TWO EXPLOSIONS (sheet 11, left half).
@@ -1902,3 +1905,319 @@ on = ["U20.14", "U20.13", "U13.6"]
 note = """
 Driving U13 channel B's control pin. The mix table assigns that channel to the \
 medium explosion."""
+
+# ===========================================================================
+# THE CANNON (sheet 11, left half).
+#
+# The one voice on this board whose envelope runs the other way, and the one
+# whose pitch is swept by a transistor rather than a reference.
+#
+# ITS ONE-SHOT USES Q, NOT QBAR. Every other 74123 here drives its stage from
+# Qbar on the falling edge; U45's pin 5 is Q, R126 is Q's pull-up, and D9 is
+# turned around relative to D7 and D8. So the pulse CHARGES C79 rather than
+# discharging it, and the envelope rises on the trigger instead of dropping.
+#
+# The filter is a band-pass with a bridged-T in its feedback: C81 and C82 in
+# series from the inverting node to the output, with their midpoint pulled to
+# ground through R130 and R133. Q6 sits across R133, so the envelope moves the
+# resistance at that midpoint and with it the center frequency.
+# ===========================================================================
+
+[[parts]]
+group = "cannon"
+ref = "U45"
+kind = "U"
+device = "74123"
+pins = ["5", "6", "7", "9", "10", "11", "12"]
+out = ["5"]
+read = "partial"
+note = "Section B. Section A is not transcribed yet."
+nc = [
+  { pin = "12", why = "Qbar is drawn and connects to nothing. This is the one voice that takes Q instead, on pin 5, which is why its diode charges the envelope capacitor rather than discharging it." },
+]
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7", "9", "10", "11", "12"]
+role = "one-shot"
+group = "cannon"
+
+[[parts]]
+group = "cannon"
+ref = "C78"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "cannon"
+ref = "R125"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "cannon"
+ref = "R126"
+kind = "R"
+ohms = 330
+note = "Q's pull-up, and so the envelope's charge path."
+
+[[parts]]
+group = "cannon"
+ref = "D9"
+kind = "D"
+note = """
+Anode toward the one-shot's Q, cathode toward C79: the opposite way round from \
+D7 and D8, because this envelope charges on the trigger."""
+
+[[parts]]
+group = "cannon"
+ref = "C79"
+kind = "C"
+uf = 6.8
+
+[[parts]]
+group = "cannon"
+ref = "R127"
+kind = "R"
+kohms = 100
+note = "The envelope's decay to ground, 0.68 s against C79."
+
+[[parts]]
+ref = "U12"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10"]
+out = ["1", "7", "8"]
+read = "partial"
+note = """
+Three sections, all the cannon's: the band-pass, the envelope follower and a \
+gain stage. Section D is not transcribed yet. The part number is not printed; \
+see the note on U19."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "band-pass"
+group = "cannon"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "envelope follower"
+group = "cannon"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "gain"
+group = "cannon"
+
+[[parts]]
+group = "cannon"
+ref = "C80"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "cannon"
+ref = "R128"
+kind = "R"
+kohms = 10
+note = "The band-pass input resistor."
+
+[[parts]]
+group = "cannon"
+ref = "R129"
+kind = "R"
+kohms = 47
+drawing_says = "this resistor is labeled R127, the same designator as the envelope's 100k decay resistor"
+note = """
+THE DRAWING USES ONE DESIGNATOR TWICE. Two different parts on this sheet are \
+both labeled R127: the 100k decay from C79 to ground, and this 47k around U12 \
+section A. R129 is missing from the sequence R125 to R137 and appears nowhere \
+else, and the device's own constants already call this one R129, so R129 is \
+what the 47k should have been called. Recorded as R129 here, which is also \
+what lets the file load at all: the loader refuses a duplicate designator."""
+
+[[parts]]
+group = "cannon"
+ref = "C81"
+kind = "C"
+uf = 0.01
+block = "bridged-T"
+
+[[parts]]
+group = "cannon"
+ref = "C82"
+kind = "C"
+uf = 0.01
+block = "bridged-T"
+
+[[parts]]
+group = "cannon"
+ref = "R130"
+kind = "R"
+ohms = 100
+note = "From the bridged-T's midpoint down to Q6 and R133: the tuning leg."
+
+[[parts]]
+group = "cannon"
+ref = "R133"
+kind = "R"
+kohms = 1.5
+note = "In parallel with Q6, so the tuning leg is 1.6k with the transistor off."
+
+[[parts]]
+group = "cannon"
+ref = "Q6"
+kind = "Q"
+device = "C1684"
+out = ["c"]
+note = """
+Drawn rotated like the others. Across R133, driven from the envelope through \
+R131, so the envelope moves the band-pass's center frequency."""
+
+[[parts]]
+group = "cannon"
+ref = "R131"
+kind = "R"
+kohms = 15
+block = "Q6 base network"
+
+[[parts]]
+group = "cannon"
+ref = "R132"
+kind = "R"
+kohms = 3.3
+block = "Q6 base network"
+
+[[parts]]
+group = "cannon"
+ref = "C83"
+kind = "C"
+uf = 10
+
+[[parts]]
+group = "cannon"
+ref = "R134"
+kind = "R"
+kohms = 100
+unread = [
+  { pin = "b", why = "leaves upward and to the right across the sheet; where the band-pass output goes on to its VCA is not traced yet" },
+]
+
+[[parts]]
+group = "cannon"
+ref = "R136"
+kind = "R"
+kohms = 51
+block = "cannon gain"
+unread = [
+  { pin = "a", why = "the gain stage's input, arriving from the left along a horizontal that is not traced yet" },
+]
+
+[[parts]]
+group = "cannon"
+ref = "R137"
+kind = "R"
+kohms = 51
+block = "cannon gain"
+note = "Feedback around U12 section C, equal to R136, so a gain of -1."
+
+[[parts]]
+group = "cannon"
+ref = "R139"
+kind = "R"
+kohms = 33
+block = "gain stage bias"
+
+[[parts]]
+group = "cannon"
+ref = "R141"
+kind = "R"
+kohms = 22
+block = "gain stage bias"
+
+[[parts]]
+group = "cannon"
+ref = "C85"
+kind = "C"
+uf = 47
+note = "Smoothing on the gain stage's reference, which sits at 6 V x 22/55 = 2.4 V."
+
+# --- cannon nets ---
+
+[[nets]]
+name = "CANNON"
+port = "input"
+on = ["U45.9"]
+note = "from the PPI on sheet 12, active low."
+
+[[nets]]
+name = "U45 Cext"
+on = ["C78.a", "U45.6"]
+
+[[nets]]
+name = "U45 timing"
+on = ["R125.b", "C78.b", "U45.7"]
+
+[[nets]]
+name = "cannon Q"
+on = ["U45.5", "R126.b", "D9.a"]
+
+[[nets]]
+name = "cannon envelope"
+on = ["D9.k", "C79.a", "R127.a", "U12.5"]
+
+[[nets]]
+name = "U12b out"
+on = ["U12.7", "U12.6", "R131.a"]
+note = "strapped output to inverting input: a follower of the envelope."
+
+[[nets]]
+name = "Q6 base"
+on = ["R131.b", "R132.a", "Q6.b"]
+
+[[nets]]
+name = "cannon band-pass in"
+on = ["C80.b", "R128.a"]
+
+[[nets]]
+name = "U12a summing node"
+on = ["R128.b", "R129.a", "C81.a", "U12.2"]
+
+[[nets]]
+name = "U12a out"
+on = ["U12.1", "R129.b", "C82.b", "C83.a"]
+
+[[nets]]
+name = "cannon tuning node"
+on = ["C81.b", "C82.a", "R130.a"]
+note = """
+The bridged-T's midpoint, and what sets the band-pass's center frequency. It \
+reaches ground through R130 in series with R133, and Q6 sits across R133."""
+
+[[nets]]
+name = "Q6 collector"
+on = ["R130.b", "Q6.c", "R133.a"]
+
+[[nets]]
+name = "C83/R134 junction"
+on = ["C83.b", "R134.a"]
+
+[[nets]]
+name = "cannon gain in"
+on = ["R136.b", "R137.a", "U12.9"]
+
+[[nets]]
+name = "cannon gain bias"
+on = ["R139.b", "R141.a", "C85.a", "U12.10"]
+
+[[nets]]
+name = "cannon gain out"
+on = ["U12.8", "R137.b"]
+note = """
+Where this goes next is not traced. It should be U13 channel A's control pin, \
+which is still marked unread on that part, but the wire has not been \
+followed."""
