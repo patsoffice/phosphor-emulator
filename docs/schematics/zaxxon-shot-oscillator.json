@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: so far: the shot voice (PC0), sheet 11, shot": {
+    "Zaxxon sound: so far: the shot voice (PC0) and the battleship (PB7), both on sheet 11, shot": {
       "ports": {
         "PC0": {
           "direction": "input",
@@ -8,10 +8,10 @@
             2
           ]
         },
-        "shot leg": {
-          "direction": "output",
+        "SJ": {
+          "direction": "input",
           "bits": [
-            30
+            31
           ]
         }
       },
@@ -676,6 +676,38 @@
             ],
             "shot leg": [
               30
+            ]
+          },
+          "attributes": {}
+        },
+        "c23": {
+          "type": "C23 1uF",
+          "port_directions": {
+            "shot leg": "input",
+            "C23/R205 junction": "output"
+          },
+          "connections": {
+            "shot leg": [
+              30
+            ],
+            "C23/R205 junction": [
+              32
+            ]
+          },
+          "attributes": {}
+        },
+        "r205": {
+          "type": "R205 51k",
+          "port_directions": {
+            "SJ": "output",
+            "C23/R205 junction": "input"
+          },
+          "connections": {
+            "SJ": [
+              31
+            ],
+            "C23/R205 junction": [
+              32
             ]
           },
           "attributes": {}

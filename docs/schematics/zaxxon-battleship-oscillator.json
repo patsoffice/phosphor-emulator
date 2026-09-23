@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: so far: the shot voice (PC0), sheet 11, battleship": {
+    "Zaxxon sound: so far: the shot voice (PC0) and the battleship (PB7), both on sheet 11, battleship": {
       "ports": {
         "BATTLESHIP": {
           "direction": "input",
@@ -9,7 +9,7 @@
           ]
         },
         "SJ": {
-          "direction": "output",
+          "direction": "input",
           "bits": [
             31
           ]

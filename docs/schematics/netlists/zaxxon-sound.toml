@@ -69,7 +69,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "so far: the shot voice (PC0) and the battleship (PB7), both on sheet 11"
+excerpt = "so far, all on sheet 11: the shot and the battleship in full, and the four MB4391 VCA channels with their mix legs (small explosion, medium explosion, cannon, shot) plus the alarms' shared leg"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -555,6 +555,7 @@ on = [
   "R81.b", "R84.b", "R87.b", "Q4.e",
   "R91.b", "R95.b", "R97.b", "Q5.e",
   "R190.b", "R192.b",
+  "C75.b", "R195.b", "C77.b", "R198.b", "C86.b", "R201.b", "R207.b",
 ]
 
 [[nets]]
@@ -691,9 +692,7 @@ on = ["U16.15", "R203.a"]
 
 [[nets]]
 name = "shot leg"
-port = "output"
-on = ["R203.b", "R204.a"]
-note = "on to C23 and the 51k summing leg R205, which are outside this excerpt."
+on = ["R203.b", "R204.a", "C23.a"]
 
 # ===========================================================================
 # THE BATTLESHIP (sheet 11, left half into right half).
@@ -1219,8 +1218,332 @@ on = ["C19.b", "R193.a"]
 [[nets]]
 name = "SJ"
 port = "output"
-on = ["R193.b"]
+on = ["R193.b", "R196.b", "R199.b", "R202.b", "R205.b", "R208.b"]
 note = """
-The board's one summing junction, where all eleven legs meet. Only the \
-battleship's is transcribed so far, so this reads as a port; it becomes an \
-interior net once the mix is in."""
+The board's one summing junction, where all eleven legs meet. Every leg is \
+51k, so the legs are equally weighted and the whole balance of the board is \
+the series/shunt pair ahead of each one. Six of the eleven are transcribed so \
+far. It stays a port until the output stage is in: SJ is a passive node loaded \
+by R209 into U11, not a virtual ground."""
+
+# ===========================================================================
+# THE MB4391 VCA CHANNELS AND THEIR MIX LEGS (sheet 11, right half).
+#
+# Four channels across three packages, and the reason this group was
+# transcribed early: EVERY ONE OF THEM HAS 680 pF ON THE PIN THE DRAWING
+# LABELS `RO`, and none of the four is in the device. C94 was found by
+# accident; C75, C77 and C86 are its siblings, and they are here so that the
+# parts-not-modeled query names all four without being told the class exists.
+#
+# The package spans voices, which is why sections carry their own group: U13
+# runs the medium explosion on channel B and the cannon on channel A. Channel A
+# is pins 1 (IN), 2 (CON), 14 (RO), 15 (OUT); channel B is 5, 6, 10, 11.
+#
+# Every leg is the same shape: a series resistor, a shunt to ground, a 1 uF
+# block and a 51k common into SJ.
+# ===========================================================================
+
+[[parts]]
+ref = "U15"
+kind = "U"
+device = "MB4391"
+pins = ["5", "6", "10", "11"]
+out = ["11"]
+read = "partial"
+note = """
+Channel B only; channel A is elsewhere on the sheet and is not transcribed \
+yet. The MB4391 has no datasheet on the open web and no SPICE model, so what \
+RO does quantitatively is a genuine unknown rather than an unread fact."""
+unread = [
+  { pin = "6", why = "CON, the control pin, driven by the small explosion's envelope follower on sheet 11 left; that voice is not transcribed yet" },
+]
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "10", "11"]
+role = "VCA"
+group = "small explosion"
+
+[[parts]]
+ref = "U13"
+kind = "U"
+device = "MB4391"
+pins = ["1", "2", "5", "6", "10", "11", "14", "15"]
+out = ["11", "15"]
+read = "partial"
+note = """
+Both channels used, by two different voices. This is why a drawing is cut \
+along a section rather than a part."""
+unread = [
+  { pin = "2", why = "CON for channel A, driven by the cannon's envelope on sheet 11 left; not transcribed yet" },
+  { pin = "6", why = "CON for channel B, driven by the medium explosion's envelope on sheet 11 left; not transcribed yet" },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "14", "15"]
+role = "VCA"
+group = "cannon"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "10", "11"]
+role = "VCA"
+group = "medium explosion"
+
+# --- small explosion: U15 channel B ---
+
+[[parts]]
+group = "small explosion"
+ref = "C74"
+kind = "C"
+uf = 2.2
+unread = [
+  { pin = "a", why = "the small explosion's source on sheet 11 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "small explosion"
+ref = "C75"
+kind = "C"
+pf = 680
+note = "680 pF on U15 pin 10, the RO pin, to ground. C94's sibling, and not in the device."
+
+[[parts]]
+group = "small explosion"
+ref = "R194"
+kind = "R"
+kohms = 15
+block = "small explosion leg"
+
+[[parts]]
+group = "small explosion"
+ref = "R195"
+kind = "R"
+kohms = 8.2
+block = "small explosion leg"
+
+[[parts]]
+group = "small explosion"
+ref = "C20"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "small explosion"
+ref = "R196"
+kind = "R"
+kohms = 51
+
+# --- medium explosion: U13 channel B ---
+
+[[parts]]
+group = "medium explosion"
+ref = "C76"
+kind = "C"
+uf = 2.2
+unread = [
+  { pin = "a", why = "the medium explosion's source on sheet 11 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "medium explosion"
+ref = "C77"
+kind = "C"
+pf = 680
+note = """
+680 pF on U13 pin 10, the RO pin, to ground. C94's sibling. Read as 680 pF at \
+magnification; a 100 dpi pass reads this one as 480 pF."""
+
+[[parts]]
+group = "medium explosion"
+ref = "R197"
+kind = "R"
+kohms = 8.2
+block = "medium explosion leg"
+
+[[parts]]
+group = "medium explosion"
+ref = "R198"
+kind = "R"
+kohms = 47
+block = "medium explosion leg"
+
+[[parts]]
+group = "medium explosion"
+ref = "C21"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "medium explosion"
+ref = "R199"
+kind = "R"
+kohms = 51
+note = "The loudest leg on the board, at an attenuation of 0.851."
+
+# --- cannon: U13 channel A ---
+
+[[parts]]
+group = "cannon"
+ref = "C84"
+kind = "C"
+uf = 4.7
+unread = [
+  { pin = "a", why = "the cannon's source on sheet 11 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "cannon"
+ref = "C86"
+kind = "C"
+pf = 680
+note = "680 pF on U13 pin 14, the RO pin, to ground. C94's sibling."
+
+[[parts]]
+group = "cannon"
+ref = "R200"
+kind = "R"
+kohms = 47
+block = "cannon leg"
+
+[[parts]]
+group = "cannon"
+ref = "R201"
+kind = "R"
+kohms = 3.9
+block = "cannon leg"
+
+[[parts]]
+group = "cannon"
+ref = "C22"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "cannon"
+ref = "R202"
+kind = "R"
+kohms = 51
+
+# --- the shot's leg, completing what the shot group already has ---
+
+[[parts]]
+group = "shot"
+ref = "C23"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "shot"
+ref = "R205"
+kind = "R"
+kohms = 51
+
+# --- alarms 2 and 3 share one leg ---
+
+[[parts]]
+group = "alarms"
+ref = "R206"
+kind = "R"
+kohms = 68
+block = "alarms leg"
+unread = [
+  { pin = "a", why = "the alarm stage on sheet 11 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "alarms"
+ref = "R207"
+kind = "R"
+ohms = 1000
+block = "alarms leg"
+
+[[parts]]
+group = "alarms"
+ref = "C24"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "alarms"
+ref = "R208"
+kind = "R"
+kohms = 51
+note = """
+The quietest leg at 0.0145, which looks absurd until you notice the stage \
+ahead of it saturates rail to rail."""
+
+# --- VCA and leg nets ---
+
+[[nets]]
+name = "U15 in"
+on = ["C74.b", "U15.5"]
+
+[[nets]]
+name = "U15 RO"
+on = ["U15.10", "C75.a"]
+
+[[nets]]
+name = "small explosion out"
+on = ["U15.11", "R194.a"]
+
+[[nets]]
+name = "small explosion attenuated"
+on = ["R194.b", "R195.a", "C20.a"]
+
+[[nets]]
+name = "C20/R196 junction"
+on = ["C20.b", "R196.a"]
+
+[[nets]]
+name = "U13 ch B in"
+on = ["C76.b", "U13.5"]
+
+[[nets]]
+name = "U13 ch B RO"
+on = ["U13.10", "C77.a"]
+
+[[nets]]
+name = "medium explosion out"
+on = ["U13.11", "R197.a"]
+
+[[nets]]
+name = "medium explosion attenuated"
+on = ["R197.b", "R198.a", "C21.a"]
+
+[[nets]]
+name = "C21/R199 junction"
+on = ["C21.b", "R199.a"]
+
+[[nets]]
+name = "U13 ch A in"
+on = ["C84.b", "U13.1"]
+
+[[nets]]
+name = "U13 ch A RO"
+on = ["U13.14", "C86.a"]
+
+[[nets]]
+name = "cannon out"
+on = ["U13.15", "R200.a"]
+
+[[nets]]
+name = "cannon attenuated"
+on = ["R200.b", "R201.a", "C22.a"]
+
+[[nets]]
+name = "C22/R202 junction"
+on = ["C22.b", "R202.a"]
+
+[[nets]]
+name = "C23/R205 junction"
+on = ["C23.b", "R205.a"]
+
+[[nets]]
+name = "alarms attenuated"
+on = ["R206.b", "R207.a", "C24.a"]
+
+[[nets]]
+name = "C24/R208 junction"
+on = ["C24.b", "R208.a"]

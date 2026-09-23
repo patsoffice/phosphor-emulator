@@ -230,6 +230,15 @@ pub struct Section {
     pub pins: Vec<String>,
     /// What the section does, for the label: `integrator`, `Schmitt`.
     pub role: Option<String>,
+    /// Which subcircuit this section belongs to, where the package spans
+    /// several.
+    ///
+    /// Shared packages are the norm on this board rather than the exception:
+    /// one `MB4391` runs the medium explosion on one channel and the cannon on
+    /// the other, one `74123` is the medium explosion and the shot, one
+    /// `4016B` gates four different voices. So the unit a drawing is cut along
+    /// is the section and not the part. Falls back to the part's own `group`.
+    pub group: Option<String>,
 }
 
 /// One part on the sheet.
@@ -419,17 +428,42 @@ impl Netlist {
             .find(|n| n.on.iter().any(|e| e.part == designator && e.pin == pin))
     }
 
-    /// Every group named by a part, in the order the file first mentions them.
+    /// Every group named by a part or one of its sections, in the order the
+    /// file first mentions them.
     pub fn groups(&self) -> Vec<&str> {
         let mut seen: Vec<&str> = Vec::new();
-        for part in &self.parts {
-            if let Some(group) = part.group.as_deref()
-                && !seen.contains(&group)
-            {
+        let named = self.parts.iter().flat_map(|part| {
+            std::iter::once(part.group.as_deref())
+                .chain(part.sections.iter().map(|s| s.group.as_deref()))
+        });
+        for group in named.flatten() {
+            if !seen.contains(&group) {
                 seen.push(group);
             }
         }
         seen
+    }
+
+    /// The pins this group owns: every pin of a part in it, plus the pins of
+    /// any section in it on a part that is not.
+    fn pins_in(&self, group: &str) -> Vec<(String, String)> {
+        let mut pins = Vec::new();
+        for part in &self.parts {
+            if part.group.as_deref() == Some(group) {
+                for pin in &part.pins {
+                    pins.push((part.designator.clone(), pin.clone()));
+                }
+                continue;
+            }
+            for section in &part.sections {
+                if section.group.as_deref() == Some(group) {
+                    for pin in &section.pins {
+                        pins.push((part.designator.clone(), pin.clone()));
+                    }
+                }
+            }
+        }
+        pins
     }
 
     /// Cut one subcircuit out of a whole-board transcription, as its own
@@ -444,17 +478,57 @@ impl Netlist {
     /// Endpoints outside the group are dropped from each net, so the excerpt
     /// never names a part it does not contain.
     pub fn subset(&self, group: &str) -> Netlist {
-        let parts: Vec<Part> = self
-            .parts
-            .iter()
-            .filter(|part| part.group.as_deref() == Some(group))
-            .cloned()
-            .collect();
-        let inside = |designator: &str| parts.iter().any(|p| p.designator == designator);
+        let owned = self.pins_in(group);
+        let inside =
+            |designator: &str, pin: &str| owned.iter().any(|(d, p)| d == designator && p == pin);
+
+        // A part joins the excerpt if any of its pins does, and brings only
+        // those. A package shared between two voices appears in both drawings,
+        // each time as the section that belongs there.
+        let mut parts: Vec<Part> = Vec::new();
+        for part in &self.parts {
+            let whole = part.group.as_deref() == Some(group);
+            let pins: Vec<String> = part
+                .pins
+                .iter()
+                .filter(|pin| inside(&part.designator, pin))
+                .cloned()
+                .collect();
+            if pins.is_empty() {
+                continue;
+            }
+            parts.push(Part {
+                pins,
+                sections: part
+                    .sections
+                    .iter()
+                    .filter(|s| whole || s.group.as_deref() == Some(group))
+                    .cloned()
+                    .collect(),
+                nc: part
+                    .nc
+                    .iter()
+                    .filter(|nc| inside(&part.designator, &nc.pin))
+                    .cloned()
+                    .collect(),
+                unread: part
+                    .unread
+                    .iter()
+                    .filter(|u| inside(&part.designator, &u.pin))
+                    .cloned()
+                    .collect(),
+                ..part.clone()
+            });
+        }
 
         let mut nets = Vec::new();
         for net in &self.nets {
-            let kept: Vec<Endpoint> = net.on.iter().filter(|e| inside(&e.part)).cloned().collect();
+            let kept: Vec<Endpoint> = net
+                .on
+                .iter()
+                .filter(|e| inside(&e.part, &e.pin))
+                .cloned()
+                .collect();
             if kept.is_empty() {
                 continue;
             }
@@ -1381,6 +1455,110 @@ on = ["R2.b", "R3.a"]
         let out = oscillator.nets.iter().find(|n| n.name == "U1 out").unwrap();
         assert_eq!(out.port, None);
         assert_eq!(out.on.len(), 2);
+    }
+
+    /// One `MB4391` runs the medium explosion on one channel and the cannon
+    /// on the other, so the unit a drawing is cut along is the section rather
+    /// than the part. The package appears in both drawings, each time as the
+    /// half that belongs there.
+    const SHARED_PACKAGE: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "U13"
+kind = "U"
+device = "MB4391"
+pins = ["1", "2", "5", "6"]
+out = ["1", "5"]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2"]
+role = "VCA"
+group = "cannon"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6"]
+role = "VCA"
+group = "medium explosion"
+
+[[parts]]
+ref = "R200"
+kind = "R"
+kohms = 47
+group = "cannon"
+
+[[parts]]
+ref = "R197"
+kind = "R"
+kohms = 8.2
+group = "medium explosion"
+
+[[nets]]
+name = "cannon in"
+port = "input"
+on = ["U13.2"]
+
+[[nets]]
+name = "cannon out"
+on = ["U13.1", "R200.a"]
+
+[[nets]]
+name = "medium in"
+port = "input"
+on = ["U13.6"]
+
+[[nets]]
+name = "medium out"
+on = ["U13.5", "R197.a"]
+
+[[nets]]
+name = "SJ"
+port = "output"
+on = ["R200.b", "R197.b"]
+"#;
+
+    #[test]
+    fn a_package_shared_between_voices_appears_in_both_with_only_its_own_half() {
+        let netlist = Netlist::parse(SHARED_PACKAGE).expect("should load");
+
+        let cannon = netlist.subset("cannon");
+        let u13 = cannon.part("U13").expect("the package is in the cannon");
+        assert_eq!(u13.pins, vec!["1", "2"], "only channel A's pins");
+        assert_eq!(u13.sections.len(), 1);
+        assert_eq!(u13.sections[0].name, "a");
+        assert!(
+            cannon.part("R197").is_none(),
+            "the other voice's leg is not here"
+        );
+
+        let medium = netlist.subset("medium explosion");
+        let u13 = medium.part("U13").expect("and in the medium explosion");
+        assert_eq!(u13.pins, vec!["5", "6"], "only channel B's pins");
+        assert_eq!(u13.sections[0].name, "b");
+
+        // Neither excerpt may name a pin it does not contain.
+        for subset in [&cannon, &medium] {
+            for net in &subset.nets {
+                for endpoint in &net.on {
+                    let part = subset.part(&endpoint.part).expect("part is present");
+                    assert!(
+                        part.draws(&endpoint.pin),
+                        "excerpt names {endpoint}, which its copy of the part does not draw"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_section_group_is_listed_alongside_a_part_group() {
+        let netlist = Netlist::parse(SHARED_PACKAGE).expect("should load");
+        let groups = netlist.groups();
+        assert!(groups.contains(&"cannon"), "{groups:?}");
+        assert!(groups.contains(&"medium explosion"), "{groups:?}");
     }
 
     #[test]
