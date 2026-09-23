@@ -11,7 +11,7 @@
         "shot leg": {
           "direction": "output",
           "bits": [
-            29
+            30
           ]
         }
       },
@@ -20,6 +20,7 @@
           "type": "U21a one-shot",
           "port_directions": {
             "PC0 (1)": "input",
+            "+5V (2,3)": "input",
             "U21 Cext (14)": "output",
             "U21 timing (15)": "output",
             "Qbar (4)": "output"
@@ -27,6 +28,9 @@
           "connections": {
             "PC0 (1)": [
               2
+            ],
+            "+5V (2,3)": [
+              "1"
             ],
             "U21 Cext (14)": [
               3
@@ -299,7 +303,7 @@
         "u18": {
           "type": "U18 555",
           "port_directions": {
-            "+12V (8)": "input",
+            "+12V (8,4)": "input",
             "GND (1)": "input",
             "net 21 (5)": "input",
             "U18 discharge (7)": "output",
@@ -307,7 +311,7 @@
             "U18 out (3)": "output"
           },
           "connections": {
-            "+12V (8)": [
+            "+12V (8,4)": [
               "1"
             ],
             "GND (1)": [
@@ -487,7 +491,7 @@
               19
             ],
             "Q7 collector": [
-              24
+              25
             ]
           },
           "attributes": {}
@@ -516,14 +520,30 @@
           "type": "R163 10k",
           "port_directions": {
             "Schmitt out": "input",
-            "Q7 base drive": "output"
+            "R163/D11 junction": "output"
           },
           "connections": {
             "Schmitt out": [
               22
             ],
-            "Q7 base drive": [
+            "R163/D11 junction": [
               23
+            ]
+          },
+          "attributes": {}
+        },
+        "d11": {
+          "type": "D11",
+          "port_directions": {
+            "R163/D11 junction": "input",
+            "Q7 base": "output"
+          },
+          "connections": {
+            "R163/D11 junction": [
+              23
+            ],
+            "Q7 base": [
+              24
             ]
           },
           "attributes": {}
@@ -531,14 +551,34 @@
         "q7": {
           "type": "Q7 C1684",
           "port_directions": {
-            "Q7 base drive (b)": "input",
+            "GND (e)": "input",
+            "Q7 base (b)": "input",
             "Q7 collector (c)": "output"
           },
           "connections": {
-            "Q7 base drive (b)": [
-              23
+            "GND (e)": [
+              "0"
+            ],
+            "Q7 base (b)": [
+              24
             ],
             "Q7 collector (c)": [
+              25
+            ]
+          },
+          "attributes": {}
+        },
+        "r160": {
+          "type": "R160 2.2k",
+          "port_directions": {
+            "GND": "input",
+            "Q7 base": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "Q7 base": [
               24
             ]
           },
@@ -559,7 +599,7 @@
               22
             ],
             "x0.18": [
-              25
+              26
             ]
           },
           "attributes": {}
@@ -572,10 +612,10 @@
           },
           "connections": {
             "x0.18": [
-              25
+              26
             ],
             "U16 in": [
-              26
+              27
             ]
           },
           "attributes": {}
@@ -593,13 +633,13 @@
               10
             ],
             "U16 in (1)": [
-              26
-            ],
-            "U16 RO (14)": [
               27
             ],
-            "U16 out (15)": [
+            "U16 RO (14)": [
               28
+            ],
+            "U16 out (15)": [
+              29
             ]
           },
           "attributes": {}
@@ -615,7 +655,7 @@
               "0"
             ],
             "U16 RO": [
-              27
+              28
             ]
           },
           "attributes": {}
@@ -632,10 +672,10 @@
               "0"
             ],
             "U16 out": [
-              28
+              29
             ],
             "shot leg": [
-              29
+              30
             ]
           },
           "attributes": {}

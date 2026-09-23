@@ -10,14 +10,26 @@
 #         -o docs/schematics/zaxxon-shot-oscillator.json
 #     ./docs/schematics/render.sh
 #
-# WHERE THIS READING COMES FROM. Not from the scan directly: from
-# `zaxxon-discrete-sound.md`, which carries the argument behind every junction
-# here and records that the shaper half and the oscillator half were each
-# re-read at 400 dpi. That makes this a fourth reading of an already settled
-# circuit rather than a first reading of a drawing, which is the right risk for
-# a format probe and the wrong one for a board nobody has read. The parts whose
-# junctions that prose does not establish are marked `unread` rather than
-# guessed, and `netlist show` counts them.
+# WHERE THIS READING COMES FROM. Drafted from `zaxxon-discrete-sound.md`, which
+# carries the argument behind every junction, and then checked part by part
+# against the scan itself. Everything the prose established held. The four
+# things it did not establish are now read and are no longer `unread`: `D11` is
+# in series with `R163` rather than a clamp, `R160` pulls `Q7`'s base down,
+# `Q7`'s emitter is grounded, and `U18` pin 4 sits on +12 V with pin 8.
+#
+# HOW TO READ THE SCAN, because "400 dpi" is not achievable and the number
+# misled a previous pass. The manual's pages are 202 x 261 pt (2.81 x 3.63 in)
+# and each embedded image is 1264 x 1633, 1 bit per pixel. Rendering the page
+# at 400 dpi gives 1124 px across, which is *less* than the image already has,
+# so it throws detail away. Extract the image instead and magnify that:
+#
+#     pdfimages -png -f 132 -l 135 Zaxxon.pdf pg
+#     magick pg-000.png -crop WxH+X+Y +repage -filter point -resize 500% v.png
+#
+# `-filter point` matters: a smooth filter turns a 1-bit scan's glyphs into
+# gray mush at exactly the magnification where a decimal point is the question.
+# What earlier passes called reading "at 400 dpi" or "at 600 percent" is this
+# magnification, not resolution the file does not contain.
 #
 # TWO PLACES THIS DISAGREES WITH THE JSON IT REPLACES, both because the prose's
 # node table is finer than a block diagram can be:
@@ -35,9 +47,13 @@
 [board]
 name = "Zaxxon sound"
 assembly = "834-0214"
-source = "arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf, IC Board A, sheets 11 and 12"
-sheets = "11-12"
-dpi = 400
+source = "arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf, IC Board A 834-0214, sheet 11 of 16, PDF pages 132 (left half) and 133 (right half)"
+sheets = "11"
+# The scan's own resolution, as the PDF declares it. The embedded image is
+# 1264 x 1633 and 1 bit per pixel, which is the ceiling on what any reading of
+# this drawing can recover. See the note at the top of this file: rendering the
+# page at a higher number does not add detail, it only resamples.
+dpi = 150
 excerpt = "the shot voice (PC0): a one-shot, a shaper, a 555-swept relaxation oscillator and a VCA"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
@@ -57,15 +73,13 @@ pins = ["1", "2", "3", "4", "13", "14", "15"]
 out = ["4"]
 read = "partial"
 note = """
-Section A only. The prose establishes pin 1 as the trigger, pin 4 as Qbar, \
-pin 13 as Q, and the timing network on pins 14 and 15. The B and clear inputs \
-on pins 2 and 3 are on the drawing and have not been read."""
+Section A only, and the package is shared: section B on pins 5 to 12 is the \
+medium explosion's one-shot, elsewhere on this sheet and outside this excerpt. \
+Pin 1 (A) and pin 3 (CLR) are drawn with inversion bubbles, so the trigger is \
+active low, which is what the twelve PPI gates on this board all are. Pins 2 \
+and 3 are both strapped to +5 V, so the part is armed and never cleared."""
 nc = [
-  { pin = "13", why = "Q is drawn and connects to nothing. Qbar on pin 4 is what drives R144, and reading Q as the driver inverts the whole voice: the shaper node would rest low, holding node Y below the MB4391's mute point, and the voice would scream at power-on instead of resting silent." },
-]
-unread = [
-  { pin = "2", why = "the one-shot's B input; not established by the prose, needs the sheet at 400 dpi" },
-  { pin = "3", why = "the one-shot's clear; not established by the prose, needs the sheet at 400 dpi" },
+  { pin = "13", why = "Q is drawn on the symbol and has neither a pin number nor a wire; 13 is the package's pin for it rather than something the drawing says. Qbar on pin 4 is what drives R144, and reading Q as the driver inverts the whole voice: the shaper node would rest low, holding node Y below the MB4391's mute point, and the voice would scream at power-on instead of resting silent." },
 ]
 
 [[parts.sections]]
@@ -238,10 +252,8 @@ note = """
 An astable on +12 V that would run at 14.5 Hz alone, but pin 5 is live: it \
 carries U19 section A's output, so the part runs near 39 Hz at 11 percent duty \
 with that amplifier low and near 7 Hz at 84 percent with it high. The duty is \
-what the board is using."""
-unread = [
-  { pin = "4", why = "reset; almost certainly tied to the supply, but the prose does not read it and a 555's reset is worth reading rather than assuming" },
-]
+what the board is using. Pin 4 (reset) is on +12 V with pin 8, so the part \
+free-runs and the gate is entirely upstream."""
 
 [[parts]]
 ref = "R151"
@@ -343,40 +355,33 @@ kohms = 10
 [[parts]]
 ref = "D11"
 kind = "D"
-read = "partial"
 note = """
-In the path from the Schmitt's output to Q7's base. Whether it sits in series \
-with R163 or clamps the base is not established by the prose, and the two are \
-a different circuit, so both of its pins are unread rather than guessed."""
-unread = [
-  { pin = "a", why = "in the R163-to-Q7-base path; series or clamp is not established" },
-  { pin = "k", why = "in the R163-to-Q7-base path; series or clamp is not established" },
-]
+In series with R163 and not a clamp, anode toward R163 and cathode on Q7's \
+base. So the Schmitt's output drives base current through R163 when it is high, \
+and when it goes low the diode blocks reverse base drive while R160 pulls the \
+base to ground. The two readings are a different circuit and the prose settled \
+neither; the drawing settles it."""
 
 [[parts]]
 ref = "Q7"
 kind = "Q"
 device = "C1684"
 out = ["c"]
-unread = [
-  { pin = "e", why = "the emitter's return is not established by the prose; the drawing lumps Q7 with R160 into one block and states only base and collector" },
-]
+note = """
+Drawn rotated, which is how these are drawn throughout this set: the horizontal \
+lead is the base, the top lead is the collector and the bottom one is the \
+emitter. The emitter is grounded, so this is a plain switch pulling the \
+integrator's summing node through R159."""
 
 [[parts]]
 ref = "R160"
 kind = "R"
 kohms = 2.2
-read = "partial"
 note = """
-Known to exist and associated with Q7: the drawing this was transcribed from \
-lumps the two into one block labeled `Q7 C1684 / R160 2k2` and states only the \
-block's base and collector. Neither end of R160 is placed. The same 2.2k \
-appears beside the battleship's Q4 and Q5 as R87 and R97, so settling one \
-settles three."""
-unread = [
-  { pin = "a", why = "not placed; the block diagram it came from states only Q7's base and collector" },
-  { pin = "b", why = "not placed; the block diagram it came from states only Q7's base and collector" },
-]
+Q7's base pulldown, from the D11 cathode junction to ground. It is what holds \
+the transistor off between half cycles, since D11 cannot pull the base down. \
+The same 2.2k sits beside the battleship's Q4 and Q5 as R87 and R97, drawn the \
+same way, so this reading settles those two as well."""
 
 # ---------------------------------------------------------------------------
 # Out through the VCA. C94 is the part this whole design exists to make
@@ -459,7 +464,8 @@ on = ["U21.1"]
 [[nets]]
 name = "+5V"
 rail = true
-on = ["R142.a", "R143.a"]
+on = ["R142.a", "R143.a", "U21.2", "U21.3"]
+note = "U21's B and clear are both strapped high, so the one-shot is armed and never cleared."
 
 [[nets]]
 name = "+6V"
@@ -469,23 +475,20 @@ on = ["U19.3", "R161.a"]
 [[nets]]
 name = "+12V"
 rail = true
-on = ["R145.a", "R151.a", "U18.8"]
+on = ["R145.a", "R151.a", "U18.8", "U18.4"]
 
 [[nets]]
 name = "GND"
 rail = true
 on = [
   "R148.b", "C89.b", "U18.1", "C90.b", "R155.b", "C91.b",
-  "R158.b", "R165.b", "C94.b", "R204.b",
+  "R158.b", "Q7.e", "R160.b", "R165.b", "C94.b", "R204.b",
 ]
 
 [[nets]]
 name = "U21 Cext"
 on = ["C87.a", "U21.14"]
-note = """
-C87 spans pins 14 and 15, which is this part's timing configuration and is how \
-the prose reads it. Which end the electrolytic's positive terminal sits on is \
-not stated."""
+note = "C87 spans pins 14 and 15, with its positive plate on the pin 15 side."
 
 [[nets]]
 name = "U21 timing"
@@ -578,13 +581,16 @@ name = "Schmitt out"
 on = ["U19.8", "R162.a", "R163.a", "R164.a"]
 
 [[nets]]
-name = "Q7 base drive"
-on = ["R163.b", "Q7.b"]
+name = "R163/D11 junction"
+on = ["R163.b", "D11.a"]
+
+[[nets]]
+name = "Q7 base"
+on = ["D11.k", "Q7.b", "R160.a"]
 note = """
-D11 is in this path and its placement is unread, so this net is the topology \
-as far as the prose establishes it and not as far as the drawing goes. If D11 \
-is in series rather than a clamp, R163 does not reach the base directly and \
-this net splits in two."""
+The three that meet at the base. R163 and D11 deliver drive from the Schmitt's \
+output and R160 removes it. An earlier reading had D11 as a possible clamp \
+across this node, which would have made R163 reach the base directly."""
 
 [[nets]]
 name = "Q7 collector"
