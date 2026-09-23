@@ -9,5 +9,6 @@
 //! This is a library with a thin binary on top, rather than a binary alone,
 //! because those later consumers live outside it.
 
+pub mod lint;
 pub mod netlist;
 pub mod svg;

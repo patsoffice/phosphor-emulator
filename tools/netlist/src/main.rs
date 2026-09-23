@@ -5,6 +5,7 @@
 //! JSON beside the prose is a build product of this tool.
 
 use clap::{Parser, Subcommand};
+use phosphor_netlist::lint as lints;
 use phosphor_netlist::netlist::{self, Netlist};
 use phosphor_netlist::svg;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,16 @@ enum Command {
         #[arg(short, long)]
         parts: bool,
     },
+    /// Check a transcription, and ask which parts the device does not model.
+    Lint {
+        /// The `.toml` transcription.
+        file: PathBuf,
+        /// The device source whose constant names declare which parts it
+        /// models, such as `machines/src/zaxxon_sound.rs`. Without it the
+        /// checks that compare the two cannot run.
+        #[arg(short, long)]
+        device: Option<PathBuf>,
+    },
     /// Generate netlistsvg input. `docs/schematics/render.sh` turns that into
     /// the SVG a document embeds.
     Svg {
@@ -41,7 +52,7 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let path = match &cli.command {
-        Command::Show { file, .. } | Command::Svg { file, .. } => file,
+        Command::Show { file, .. } | Command::Svg { file, .. } | Command::Lint { file, .. } => file,
     };
     let netlist = match Netlist::load(path) {
         Ok(netlist) => netlist,
@@ -60,6 +71,70 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Svg { out, .. } => write_svg(&netlist, out.as_deref()),
+        Command::Lint { device, .. } => lint(&netlist, device.as_deref()),
+    }
+}
+
+/// Run the lints and report. Exits non-zero when something is a problem, so
+/// this can gate a change; the parts-not-modeled list is a question rather
+/// than a defect and does not fail the run.
+fn lint(netlist: &Netlist, device: Option<&Path>) -> ExitCode {
+    let parts = match device {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(source) => Some(lints::DeviceParts::from_source(&source)),
+            Err(e) => {
+                eprintln!("{}: cannot read device source: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    if let Some(parts) = &parts {
+        println!(
+            "device declares {} designators, from the names of its constants",
+            parts.named.len()
+        );
+    } else {
+        println!(
+            "no device source given, so the two checks that compare a sheet against a \
+             device are skipped. Pass --device."
+        );
+    }
+    println!(
+        "loader-enforced, so not re-checked here: a drawn pin is wired, nc or unread; \
+         no duplicate designator; no pin on two nets."
+    );
+
+    let findings = lints::run(netlist, parts.as_ref());
+    if findings.is_empty() {
+        println!("\nnothing to report.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut problems = 0;
+    let mut last: Option<&str> = None;
+    for finding in &findings {
+        if last != Some(finding.lint) {
+            println!("\n{}:", finding.lint);
+            last = Some(finding.lint);
+        }
+        println!(
+            "  {} {:<8} {}",
+            finding.severity.tag(),
+            finding.subject,
+            finding.detail
+        );
+        if finding.severity == lints::Severity::Problem {
+            problems += 1;
+        }
+    }
+
+    println!("\n{} findings, {problems} of them problems", findings.len());
+    if problems == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
