@@ -1,14 +1,29 @@
-# Zaxxon's shot voice (PC0), at pin level.
+# Zaxxon's sound board, IC Board A 834-0214 sheets 11 and 12, at pin level.
 #
-# The first transcription in the format `docs/designs/schematic-transcription.md`
-# describes, and the probe for whether that format can carry what these sheets
-# contain. It replaces `docs/schematics/zaxxon-shot-oscillator.json`, which is
-# now generated from this file:
+# The transcription in the format `docs/designs/schematic-transcription.md`
+# describes. One file for the whole board, because a rail, the mix bus and the
+# noise sources all span voices and no per-voice file could say what is on
+# them.
+#
+# IN PROGRESS. `group` says which voice each part belongs to, and `board.excerpt`
+# below names what is covered so far. Until it covers both sheets in full the
+# file declares itself an excerpt, which is what makes `netlist lint`'s
+# "a constant with no part behind it" check decline to run: against a partial
+# board it would report every part not yet typed in.
+#
+# Each voice is drawn on its own by cutting its group out, and a net crossing
+# the group's edge becomes a port of that drawing:
 #
 #     cargo run -p phosphor-netlist -- svg \
-#         docs/schematics/netlists/zaxxon-shot-oscillator.toml \
+#         docs/schematics/netlists/zaxxon-sound.toml --group shot \
 #         -o docs/schematics/zaxxon-shot-oscillator.json
-#     ./docs/schematics/render.sh
+#     ./docs/schematics/render.sh zaxxon-shot-oscillator.json
+#
+# And what the device does not model:
+#
+#     cargo run -p phosphor-netlist -- lint \
+#         docs/schematics/netlists/zaxxon-sound.toml \
+#         --device machines/src/zaxxon_sound.rs
 #
 # WHERE THIS READING COMES FROM. Drafted from `zaxxon-discrete-sound.md`, which
 # carries the argument behind every junction, and then checked part by part
@@ -47,14 +62,14 @@
 [board]
 name = "Zaxxon sound"
 assembly = "834-0214"
-source = "arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf, IC Board A 834-0214, sheet 11 of 16, PDF pages 132 (left half) and 133 (right half)"
-sheets = "11"
+source = "arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf, IC Board A 834-0214, sheets 11 and 12 of 16, PDF pages 132 to 135, each sheet as a left half then a right half"
+sheets = "11-12"
 # The scan's own resolution, as the PDF declares it. The embedded image is
 # 1264 x 1633 and 1 bit per pixel, which is the ceiling on what any reading of
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "the shot voice (PC0): a one-shot, a shaper, a 555-swept relaxation oscillator and a VCA"
+excerpt = "so far: the shot voice (PC0), sheet 11"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -66,6 +81,7 @@ prose = "docs/schematics/zaxxon-discrete-sound.md"
 # ---------------------------------------------------------------------------
 
 [[parts]]
+group = "shot"
 ref = "U21"
 kind = "U"
 device = "74123"
@@ -88,29 +104,34 @@ pins = ["1", "2", "3", "4", "13", "14", "15"]
 role = "one-shot"
 
 [[parts]]
+group = "shot"
 ref = "C87"
 kind = "C"
 uf = 2.2
 note = "the one-shot's timing capacitor, on U21 pins 14 and 15."
 
 [[parts]]
+group = "shot"
 ref = "R142"
 kind = "R"
 kohms = 18
 
 [[parts]]
+group = "shot"
 ref = "R143"
 kind = "R"
 kohms = 3.3
 block = "shaper"
 
 [[parts]]
+group = "shot"
 ref = "R144"
 kind = "R"
 ohms = 560
 block = "shaper"
 
 [[parts]]
+group = "shot"
 ref = "D10"
 kind = "D"
 note = """
@@ -120,6 +141,7 @@ above the MB4391's 4.76 V mute point, and the trigger drags Y down to 1.50 V \
 to open the VCA."""
 
 [[parts]]
+group = "shot"
 ref = "C88"
 kind = "C"
 uf = 0.047
@@ -137,29 +159,34 @@ need. The distinction is worth 10x on node X's time constant, 26 ms against \
 # ---------------------------------------------------------------------------
 
 [[parts]]
+group = "shot"
 ref = "R145"
 kind = "R"
 kohms = 270
 block = "node X pullup"
 
 [[parts]]
+group = "shot"
 ref = "R146"
 kind = "R"
 mohms = 1
 block = "node X pullup"
 
 [[parts]]
+group = "shot"
 ref = "R147"
 kind = "R"
 mohms = 1
 
 [[parts]]
+group = "shot"
 ref = "R148"
 kind = "R"
 mohms = 2.2
 block = "node Y tail"
 
 [[parts]]
+group = "shot"
 ref = "C89"
 kind = "C"
 uf = 0.68
@@ -170,6 +197,7 @@ crosses back above the mute point at about 630 ms. That is the shot's length; \
 the reference recording of this voice is 990 ms."""
 
 [[parts]]
+group = "shot"
 ref = "U20"
 kind = "U"
 device = "LM324"
@@ -195,6 +223,7 @@ role = "follower"
 # ---------------------------------------------------------------------------
 
 [[parts]]
+group = "shot"
 ref = "U19"
 kind = "U"
 device = "LM324"
@@ -228,11 +257,13 @@ pins = ["8", "9", "10"]
 role = "Schmitt"
 
 [[parts]]
+group = "shot"
 ref = "R149"
 kind = "R"
 kohms = 5.6
 
 [[parts]]
+group = "shot"
 ref = "R150"
 kind = "R"
 kohms = 33
@@ -243,6 +274,7 @@ note = "feedback around U19 section A: -R150/R149 = -5.89 about the +6 V on pin 
 # ---------------------------------------------------------------------------
 
 [[parts]]
+group = "shot"
 ref = "U18"
 kind = "U"
 device = "555"
@@ -256,31 +288,37 @@ what the board is using. Pin 4 (reset) is on +12 V with pin 8, so the part \
 free-runs and the gate is entirely upstream."""
 
 [[parts]]
+group = "shot"
 ref = "R151"
 kind = "R"
 kohms = 10
 
 [[parts]]
+group = "shot"
 ref = "R152"
 kind = "R"
 kohms = 10
 
 [[parts]]
+group = "shot"
 ref = "C90"
 kind = "C"
 uf = 3.3
 
 [[parts]]
+group = "shot"
 ref = "R153"
 kind = "R"
 kohms = 2.7
 
 [[parts]]
+group = "shot"
 ref = "R154"
 kind = "R"
 kohms = 8.2
 
 [[parts]]
+group = "shot"
 ref = "R155"
 kind = "R"
 ohms = 820
@@ -291,6 +329,7 @@ either source alone would give, which is what keeps the oscillator's reference \
 in the range where it sounds like a shot."""
 
 [[parts]]
+group = "shot"
 ref = "C91"
 kind = "C"
 uf = 15
@@ -305,28 +344,33 @@ block = "node A load"
 # ---------------------------------------------------------------------------
 
 [[parts]]
+group = "shot"
 ref = "R156"
 kind = "R"
 kohms = 33
 
 [[parts]]
+group = "shot"
 ref = "R157"
 kind = "R"
 kohms = 33
 block = "reference divider"
 
 [[parts]]
+group = "shot"
 ref = "R158"
 kind = "R"
 kohms = 33
 block = "reference divider"
 
 [[parts]]
+group = "shot"
 ref = "C92"
 kind = "C"
 pf = 1000
 
 [[parts]]
+group = "shot"
 ref = "R159"
 kind = "R"
 kohms = 15
@@ -336,23 +380,27 @@ that crosses that vertical with no dot. The same shape appears on the \
 battleship and reading it wrong moves the voice by a factor of four."""
 
 [[parts]]
+group = "shot"
 ref = "R161"
 kind = "R"
 kohms = 33
 block = "Schmitt window"
 
 [[parts]]
+group = "shot"
 ref = "R162"
 kind = "R"
 kohms = 100
 block = "Schmitt window"
 
 [[parts]]
+group = "shot"
 ref = "R163"
 kind = "R"
 kohms = 10
 
 [[parts]]
+group = "shot"
 ref = "D11"
 kind = "D"
 note = """
@@ -363,6 +411,7 @@ base to ground. The two readings are a different circuit and the prose settled \
 neither; the drawing settles it."""
 
 [[parts]]
+group = "shot"
 ref = "Q7"
 kind = "Q"
 device = "C1684"
@@ -374,6 +423,7 @@ emitter. The emitter is grounded, so this is a plain switch pulling the \
 integrator's summing node through R159."""
 
 [[parts]]
+group = "shot"
 ref = "R160"
 kind = "R"
 kohms = 2.2
@@ -390,23 +440,27 @@ same way, so this reading settles those two as well."""
 # ---------------------------------------------------------------------------
 
 [[parts]]
+group = "shot"
 ref = "R164"
 kind = "R"
 mohms = 1
 block = "x0.18 divider"
 
 [[parts]]
+group = "shot"
 ref = "R165"
 kind = "R"
 kohms = 220
 block = "x0.18 divider"
 
 [[parts]]
+group = "shot"
 ref = "C93"
 kind = "C"
 uf = 2.2
 
 [[parts]]
+group = "shot"
 ref = "U16"
 kind = "U"
 device = "MB4391"
@@ -425,6 +479,7 @@ pins = ["1", "2", "14", "15"]
 role = "VCA"
 
 [[parts]]
+group = "shot"
 ref = "C94"
 kind = "C"
 pf = 680
@@ -439,12 +494,14 @@ missed it, which is the whole argument for transcribing parts the device does \
 not model."""
 
 [[parts]]
+group = "shot"
 ref = "R203"
 kind = "R"
 kohms = 39
 block = "mix leg"
 
 [[parts]]
+group = "shot"
 ref = "R204"
 kind = "R"
 kohms = 8.2

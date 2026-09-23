@@ -39,9 +39,10 @@ to the way it was and these files stay excerpts.
     instead of paraphrasing it.
 
     **One of these is now generated rather than written.**
-    [`netlists/zaxxon-shot-oscillator.toml`](netlists/zaxxon-shot-oscillator.toml)
-    is a pin-level transcription with typed values, and its `.json` is a build
-    product of `cargo run -p phosphor-netlist -- svg`. See
+    [`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml) is a pin-level
+    transcription of a whole board with typed values, and the `.json` for each
+    of its voices is a build product of
+    `cargo run -p phosphor-netlist -- svg --group <voice>`. See
     [the design](../designs/schematic-transcription.md); the rest of the
     `.json` files here are still hand-built, and moving them is a later rung
     that has not been taken.
@@ -89,7 +90,7 @@ Considered and rejected:
   consumer that appeared is not the emulator but the transcription itself:
   "which parts on this sheet does the device not model" is a question worth
   asking, six passes over Zaxxon's board could not ask it, and `C94` is what
-  that cost. `netlists/zaxxon-shot-oscillator.toml` is the probe. The rejection
+  that cost. `netlists/zaxxon-sound.toml` is the probe. The rejection
   above still stands everywhere the drawing is an excerpt nobody computes from,
   which is most of this directory.
 - **Mermaid alone** cannot carry pin numbers legibly, which is what the

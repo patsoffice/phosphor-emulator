@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: the shot voice (PC0): a one-shot, a shaper, a 555-swept relaxation oscillator and a VCA": {
+    "Zaxxon sound: so far: the shot voice (PC0), sheet 11, shot": {
       "ports": {
         "PC0": {
           "direction": "input",

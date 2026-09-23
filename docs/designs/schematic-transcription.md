@@ -231,7 +231,7 @@ building. Small. The decision point: if the format cannot express something the
 Zaxxon sheets contain, better to find out before 200 parts are typed into it.
 
 > **Done.** `tools/netlist`, with
-> `docs/schematics/netlists/zaxxon-shot-oscillator.toml` as the probe: 42
+> `docs/schematics/netlists/zaxxon-sound.toml` as the probe: 42
 > parts, 32 nets, and `docs/schematics/zaxxon-shot-oscillator.json` generated
 > from it. Four things the decision point turned up, which is what it was for.
 >

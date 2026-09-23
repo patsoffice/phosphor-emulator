@@ -605,8 +605,8 @@ the pitch is swept. Everything else on the voice exists to work out by how much.
 
 ![zaxxon shot oscillator](zaxxon-shot-oscillator.svg)
 
-[`netlists/zaxxon-shot-oscillator.toml`](netlists/zaxxon-shot-oscillator.toml)
-is this voice at pin level, and it is the first file in the format
+[`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml) carries this voice
+at pin level, as its `shot` group, and it is the transcription in the format
 [`docs/designs/schematic-transcription.md`](../designs/schematic-transcription.md)
 describes. The `.json` beside the `.svg` is generated from it now and is no
 longer edited by hand. Two things that file says and this one could not:
