@@ -563,7 +563,7 @@ on = [
   "U45.10", "U45.11", "R125.a", "R126.a",
   "U44.10", "U44.11", "R166.b", "U46.2", "U46.3", "R167.b",
   "U50.14", "U50.4", "R168.a", "R170.a",
-  "U23.26", "RP1.com", "RP2.com",
+  "U23.26", "RP1.com", "RP2.com", "U5.3",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -575,7 +575,7 @@ name = "+6V"
 rail = true
 on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
-  "U11.3",
+  "U11.3", "PC1.cell1",
 ]
 
 [[nets]]
@@ -584,7 +584,7 @@ rail = true
 on = [
   "R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a",
   "U2.4", "C64.a", "C65.a", "R171.a",
-  "C7.a", "U1.10",
+  "C7.a", "U1.10", "R10.a", "R11.a", "R13.a",
 ]
 
 [[nets]]
@@ -603,7 +603,7 @@ on = [
   "C97.b", "C98.b", "U50.7", "U49.2", "U49.12",
   "R175.b", "R178.b", "R181.b", "R184.b", "R187.b",
   "U11.11", "VR1.1", "C7.b", "C12.b", "R4.b", "U1.8", "R5.b", "R6.b",
-  "U23.7", "U32.1",
+  "U23.7", "U32.1", "R15.b", "C25.b", "R17.b",
 ]
 
 [[nets]]
@@ -1056,10 +1056,6 @@ note = """
 Three inverters of a hex open-collector part, serving three different voices. \
 Open collector is why each one needs a pull-up. Its other sections are \
 elsewhere on sheet 12 and are not transcribed yet."""
-unread = [
-  { pin = "10", why = "player ship A's inverted gate, into the level ladder on this sheet; not transcribed yet" },
-  { pin = "12", why = "player ship B's inverted gate, into the level ladder on this sheet; not transcribed yet" },
-]
 
 [[parts.sections]]
 name = "c"
@@ -1682,10 +1678,11 @@ group = "noise"
 
 [[nets]]
 name = "NOISE 1"
-on = ["U2.3", "C66.a"]
+on = ["U2.3", "C66.a", "R18.a"]
 note = """
-The raw generator output. It also crosses to sheet 12, where several voices \
-read it; those endpoints join this net as those voices are transcribed."""
+The raw generator output, feeding the noise amplifier on sheet 11 and crossing \
+to sheet 12, where the engine's input stage reads it through R18. Other voices \
+on sheet 12 read it too; those endpoints join as they are transcribed."""
 
 [[nets]]
 name = "C66/R111 junction"
@@ -3141,3 +3138,276 @@ note = "On to the base missile on this sheet, which is not transcribed yet."
 name = "LASER"
 on = ["U23.38", "RP1.7"]
 note = "On to the laser on this sheet, which is not transcribed yet."
+
+# ===========================================================================
+# THE PLAYER SHIP LEVEL (sheet 12, left half).
+#
+# Not a gate but a two-bit LEVEL, and the one place on this board where a
+# plausible reading is wrong in a way nothing downstream would catch.
+#
+# R10 AND R11 ARE NOT IN THE LADDER. They are pull-ups on the two
+# open-collector inverters, and on the drawing R11's vertical CROSSES node A's
+# horizontal with no junction dot before landing on node B. That crossing is
+# what makes the 2.2k pair look like ladder legs. The ladder proper is R12 from
+# node A and R16 from node B, with R13 and R15 setting the range at node X and
+# R14 coupling X down to Y.
+# ===========================================================================
+
+[[parts]]
+group = "player ship level"
+ref = "R10"
+kind = "R"
+kohms = 2.2
+note = "Pull-up on U30 section E, not a ladder leg."
+
+[[parts]]
+group = "player ship level"
+ref = "R11"
+kind = "R"
+kohms = 2.2
+note = """
+Pull-up on U30 section F, not a ladder leg. Its vertical crosses node A's \
+horizontal with no junction dot on the way to node B, which is exactly how it \
+gets misread into the ladder."""
+
+[[parts]]
+group = "player ship level"
+ref = "R12"
+kind = "R"
+kohms = 6.8
+note = "Node A's ladder leg."
+
+[[parts]]
+group = "player ship level"
+ref = "R13"
+kind = "R"
+kohms = 82
+block = "node X range"
+
+[[parts]]
+group = "player ship level"
+ref = "R15"
+kind = "R"
+kohms = 56
+block = "node X range"
+
+[[parts]]
+group = "player ship level"
+ref = "R14"
+kind = "R"
+kohms = 36
+note = "Couples node X down to node Y."
+
+[[parts]]
+group = "player ship level"
+ref = "R16"
+kind = "R"
+kohms = 100
+note = "Node B's ladder leg, and fifteen times node A's, which is why PA0 is the more significant bit."
+
+[[parts]]
+group = "player ship level"
+ref = "C25"
+kind = "C"
+uf = 15
+note = "Smooths node Y, so the level glides between steps rather than stepping."
+
+[[parts]]
+ref = "U8"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["12", "13", "14"]
+out = ["14"]
+read = "partial"
+note = """
+Section D, a follower of node Y driving the opto's LED. Its other sections are \
+elsewhere on sheet 12 and are not transcribed yet. The part number is not \
+printed; see the note on U19."""
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "level follower"
+group = "player ship level"
+
+[[nets]]
+name = "player ship node A"
+on = ["U30.10", "R10.b", "R12.a"]
+
+[[nets]]
+name = "player ship node B"
+on = ["U30.12", "R11.b", "R16.a"]
+
+[[nets]]
+name = "player ship node X"
+on = ["R12.b", "R13.b", "R14.a", "R15.a"]
+
+[[nets]]
+name = "player ship node Y"
+on = ["R14.b", "R16.b", "C25.a", "U8.12"]
+note = "The control level itself, which the follower passes to the opto's LED."
+
+# ===========================================================================
+# THE PLAYER SHIP ENGINE (sheet 12, left half).
+#
+# The one voice whose tuning element is not a resistor or a transistor but a
+# light bulb. PC1 is an opto-coupler: the level ladder drives its LED through
+# R17, and its photo-resistor sits on the midpoint of a bridged-T around U5,
+# so the resonator's frequency follows how hard the LED is lit. That is how a
+# two-bit PPI level becomes a continuously sliding engine note.
+# ===========================================================================
+
+[[parts]]
+group = "engine"
+ref = "R17"
+kind = "R"
+ohms = 390
+note = "Sets the LED current, and so how far the engine's note slides."
+
+[[parts]]
+group = "engine"
+ref = "PC1"
+kind = "U"
+device = "MCD-725H"
+pins = ["led+", "led-", "cell1", "cell2"]
+note = """
+An opto-coupler drawn as two halves inside dashed outlines: an LED and a \
+photo-resistor. THE DRAWING DOES NOT NUMBER ITS PINS, so these four names are \
+this file's own. The part's resistance-against-current curve is not published, \
+which makes it the second component on this board whose behavior is a genuine \
+unknown rather than an unread fact."""
+
+[[parts]]
+ref = "U5"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3"]
+out = ["1"]
+read = "partial"
+note = """
+Section A, the engine's resonator. Its other sections are on the right half of \
+this sheet and are not transcribed yet. The part number is not printed; see \
+the note on U19."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "resonator"
+group = "engine"
+
+[[parts]]
+group = "engine"
+ref = "R21"
+kind = "R"
+kohms = 470
+note = "Bridges the T, from U5 section A's inverting input to its output."
+
+[[parts]]
+group = "engine"
+ref = "C26"
+kind = "C"
+uf = 0.01
+block = "engine bridged-T"
+
+[[parts]]
+group = "engine"
+ref = "C27"
+kind = "C"
+uf = 0.01
+block = "engine bridged-T"
+
+[[parts]]
+group = "engine"
+ref = "R20"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "engine"
+ref = "C28"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "engine"
+ref = "R19"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "engine"
+ref = "R18"
+kind = "R"
+kohms = 200
+note = "NOISE 1 into the engine's input stage."
+
+[[parts]]
+ref = "U4"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3"]
+out = ["1"]
+read = "partial"
+note = """
+Section A, the engine's input stage. Its other sections are elsewhere on this \
+sheet and are not transcribed yet. The part number is not printed; see the \
+note on U19."""
+unread = [
+  { pin = "3", why = "the non-inverting reference; every other stage here sits on +6 V but this one is not traced" },
+  { pin = "1", why = "the output, leaving downward; not traced" },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "engine input"
+group = "engine"
+
+[[parts]]
+group = "engine"
+ref = "C29"
+kind = "C"
+uf = 2.2
+unread = [
+  { pin = "b", why = "crosses to the right half of this sheet; not traced" },
+]
+
+[[nets]]
+name = "U8d out"
+on = ["U8.14", "U8.13", "PC1.led+"]
+note = "strapped output to inverting input: a follower of the level, driving the LED."
+
+[[nets]]
+name = "PC1 LED return"
+on = ["PC1.led-", "R17.a"]
+
+[[nets]]
+name = "engine tuning node"
+on = ["PC1.cell2", "C26.b", "C27.a", "R20.a"]
+note = """
+The bridged-T's midpoint, pulled toward +6 V through the photo-resistor. This \
+is where the light does its work: the brighter the LED, the lower that \
+resistance and the higher the resonator sits."""
+
+[[nets]]
+name = "U5a in"
+on = ["U5.2", "R21.a", "C26.a"]
+
+[[nets]]
+name = "U5a out"
+on = ["U5.1", "R21.b", "C27.b", "C29.a"]
+
+[[nets]]
+name = "R20/C28 junction"
+on = ["R20.b", "C28.b"]
+
+[[nets]]
+name = "R19/C28 junction"
+on = ["C28.a", "R19.b"]
+
+[[nets]]
+name = "U4a in"
+on = ["R18.b", "R19.a", "U4.2"]
