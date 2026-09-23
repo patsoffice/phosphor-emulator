@@ -1,6 +1,7 @@
 # Design: Schematic Transcription
 
-> **Status: proposed.** Make a board's transcription a single piece of data
+> **Status: rung 1 done, rungs 2 and 3 open.** Make a board's transcription a
+> single piece of data
 > rather than three prose copies of itself: a pin-level netlist per board, lints
 > over it, generated Rust constants, and an offline solver that can tell a
 > misreading from a modeling approximation. Scoped to a probe on one board with
@@ -42,6 +43,11 @@ talked itself out of the class: it called them "the part's own rolloff pin and
 not in the signal path". The capacitor was found by cropping that region of the
 sheet for an unrelated reason. **There is no artifact against which "you did not
 transcribe this part" is a question anyone can ask.**
+
+The reading itself is since corroborated on a second board: another Sega sound
+board of the same era carries an `MB4391` with 680 pF from its `RO` pin to
+ground, the same part on the same pin. So the kill criterion below tests the
+lint rather than the capacitor.
 
 **Copies drift.** The battleship and laser rates appeared in the prose and again
 in a doc comment as 122.5, 322.6 and 579.4 Hz. Each is its current value times
@@ -115,6 +121,16 @@ difference that makes the file computable and is why the existing netlistsvg
 JSON cannot simply be adopted.
 
 ### 3. Pins that go nowhere are declared, not absent
+
+> **Amended by rung 1, which found a third state rather than two.** A drawn pin
+> is also allowed to be `unread`, with a reason, and that makes its part
+> partial. The two-state rule is right for a *finished* transcription and
+> unreachable during one: the shot voice has `R160`, `D11` and `Q7`'s emitter
+> whose junctions the prose never established, and the only alternatives to
+> saying so were to guess them or to leave the parts out. Leaving parts out is
+> the exact failure this design exists to stop. So `unread` is a to-do item
+> that every report counts, not a suppression, and "we did not check" stays
+> separable from "we genuinely do not know" the way decision 7 asks.
 
 The drawing has several, and they are load-bearing facts rather than omissions:
 `U18`'s `Q` on pin 13 is drawn and connects to nothing, and reading it as the
@@ -201,6 +217,28 @@ Schema, a loader, and the round trip to netlistsvg so the existing SVGs keep
 building. Small. The decision point: if the format cannot express something the
 Zaxxon sheets contain, better to find out before 200 parts are typed into it.
 
+> **Done.** `tools/netlist`, with
+> `docs/schematics/netlists/zaxxon-shot-oscillator.toml` as the probe: 42
+> parts, 32 nets, and `docs/schematics/zaxxon-shot-oscillator.json` generated
+> from it. Four things the decision point turned up, which is what it was for.
+>
+> - **Multi-section parts needed an answer and got one.** An `LM324` is one
+>   part with one set of pin numbers and four boxes on the drawing. Sections
+>   are presentation beside `block`, so `U19.6` stays the fact and `U19b` stays
+>   the picture.
+> - **A third pin state exists.** See the amendment to decision 3.
+> - **"Same SVG out" is the wrong target and the round trip is still good.**
+>   The generated drawing has the same parts, values and pin numbers and is
+>   busier, because the hand-built file bought its legibility by lumping parts
+>   into blocks. Two of those lumps were *wrong*: `R148`/`C89` and `R155`/`C91`
+>   were drawn in series where the prose's own node table has each pair going
+>   to ground. A drawing that cannot be held against the table is how that
+>   survived, so an exact match would have been a bad outcome.
+> - **The value keys carry their unit** (`pf`, `kohms`, `uf`), so `C88` is
+>   written `uf = 0.047` the way the drawing prints it and read back as farads.
+>   The unit is in the key rather than in a string, which is decision 2 without
+>   making the file unreadable.
+
 ### 2. Transcribe Zaxxon sheets 11 and 12
 
 About 200 parts, at pin level, including parts the device does not model. That
@@ -240,6 +278,26 @@ superposition.
 
 The expensive rung, and optional. Only worth starting if rung 5 answers its
 question and a part-property question is still blocking a board.
+
+> **Cheaper than costed, and the target should change.** Decision 6 prices this
+> rung as "`74123`, `74LS139` and `4016B` have to become behavioral sources",
+> which is true of ngspice and not of `nltool`, the offline netlist runner that
+> ships with the reference emulator this project already reads. Its device
+> library has all three as parts, and an `LM324` built on a real op-amp
+> macromodel, which is exactly what decision 6 wanted in order to make
+> `OPAMP_V_LOW` an output rather than a part-class inference. Its source format
+> is parts and nets at pin level, so emitting it from a transcription is
+> mechanical: `RES(R133, RES_K(51))`, `CAP(C26, CAP_P(680))`,
+> `NET_C(IC20.14, C26.1)`, and an explicit `NC_()` for a drawn-and-open pin
+> that independently arrives at decision 3.
+>
+> Two limits. Conversion only runs inward, from SPICE and EDA formats, so this
+> means we emit rather than that anything reads ours. And the `MB4391` is a
+> guessed substitution there too, so the part with no datasheet stays the part
+> with no datasheet.
+>
+> Nothing about this touches the runtime non-goal: source out, the tool run by
+> hand, nothing linked.
 
 ## Kill criterion
 

@@ -605,8 +605,24 @@ the pitch is swept. Everything else on the voice exists to work out by how much.
 
 ![zaxxon shot oscillator](zaxxon-shot-oscillator.svg)
 
-[`zaxxon-shot-oscillator.json`](zaxxon-shot-oscillator.json). Two pin-level
-facts carry the voice, and both are invisible in a part list. `R159` arrives at
+[`netlists/zaxxon-shot-oscillator.toml`](netlists/zaxxon-shot-oscillator.toml)
+is this voice at pin level, and it is the first file in the format
+[`docs/designs/schematic-transcription.md`](../designs/schematic-transcription.md)
+describes. The `.json` beside the `.svg` is generated from it now and is no
+longer edited by hand. Two things that file says and this one could not:
+
+- **`R148`/`C89` and `R155`/`C91` are each a pair to ground, not a series
+  pair.** The hand-built drawing lumped both into series blocks, which put
+  node Y one block away from `U20` pin 3 and node A one block away from the
+  divider. The node tables below always said otherwise. Same parts, different
+  circuit, and a block diagram had no way to be held against the table.
+- **`R160`, `D11` and `Q7`'s emitter are not placed by this file**, and the
+  netlist records that rather than guessing: `D11` sits between the Schmitt's
+  output and `Q7`'s base, and whether it is in series with `R163` or clamps the
+  base is a different circuit. `netlist show` lists them.
+
+Two pin-level facts carry the voice, and both are invisible in a part list.
+`R159` arrives at
 `U19b`'s **pin 6**, the same summing-node junction the battleship's `R85` and
 `R96` make, which is what says this is an oscillator and not a filter. And the
 one-shot's **`Qbar`** on pin 4 is what drives the shaper, while `Q` on pin 13 is

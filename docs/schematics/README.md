@@ -37,6 +37,14 @@ to the way it was and these files stay excerpts.
     so the source is nets and never coordinates, and every port is labeled with
     both its pin number and its net. The drawing then states the net table
     instead of paraphrasing it.
+
+    **One of these is now generated rather than written.**
+    [`netlists/zaxxon-shot-oscillator.toml`](netlists/zaxxon-shot-oscillator.toml)
+    is a pin-level transcription with typed values, and its `.json` is a build
+    product of `cargo run -p phosphor-netlist -- svg`. See
+    [the design](../designs/schematic-transcription.md); the rest of the
+    `.json` files here are still hand-built, and moving them is a later rung
+    that has not been taken.
   - **A mermaid diagram** when it is not, which is most of them. An architecture
     shared across boards has no pin numbers by design; grouped blocks need
     subgraphs, which netlistsvg has no concept of. Mermaid also follows the
@@ -72,11 +80,18 @@ Considered and rejected:
   project rather than a note. Nothing here needs a netlist that can be
   simulated or fabricated either, which is the half KiCad would be earning.
 - **A parallel machine-readable file** (TOML beside the prose) was the first
-  instinct and is not here, because there is no consumer. Nothing can check a
-  transcription against the emulator automatically: the emulator models
+  instinct and was rejected here, because there was no consumer. Nothing could
+  check a transcription against the emulator automatically: the emulator models
   behaviour, not gates. A file format with no reader is machinery, and this
-  repository has enough of that already. If a consumer ever appears, the net
-  tables are regular enough to lift.
+  repository has enough of that already.
+
+  **That argument has been overtaken for one file and not for the rest.** The
+  consumer that appeared is not the emulator but the transcription itself:
+  "which parts on this sheet does the device not model" is a question worth
+  asking, six passes over Zaxxon's board could not ask it, and `C94` is what
+  that cost. `netlists/zaxxon-shot-oscillator.toml` is the probe. The rejection
+  above still stands everywhere the drawing is an excerpt nobody computes from,
+  which is most of this directory.
 - **Mermaid alone** cannot carry pin numbers legibly, which is what the
   netlists are for. Where one is used the net table is still the record, and
   the two are not checked against each other: both are written by hand from the
