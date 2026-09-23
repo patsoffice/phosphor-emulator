@@ -575,8 +575,13 @@ name = "+6V"
 rail = true
 on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
-  "U11.3", "PC1.cell1",
+  "U11.3", "PC1.cell1", "R30.a", "R33.a",
+  "R34.b", "R35.a", "C36.b", "C37.a",
 ]
+note = """
+NOT A REGULATED RAIL. R34 and R35 are a plain 390 ohm divider across +12 V \
+with C36 and C37 on the midpoint, so this sits at 6 V behind 195 ohms and every \
+op-amp reference on both sheets shares it."""
 
 [[nets]]
 name = "+12V"
@@ -585,6 +590,7 @@ on = [
   "R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a",
   "U2.4", "C64.a", "C65.a", "R171.a",
   "C7.a", "U1.10", "R10.a", "R11.a", "R13.a",
+  "R34.a", "C36.a",
 ]
 
 [[nets]]
@@ -604,6 +610,7 @@ on = [
   "R175.b", "R178.b", "R181.b", "R184.b", "R187.b",
   "U11.11", "VR1.1", "C7.b", "C12.b", "R4.b", "U1.8", "R5.b", "R6.b",
   "U23.7", "U32.1", "R15.b", "C25.b", "R17.b",
+  "R35.b", "C37.b", "C34.b", "C35.b",
 ]
 
 [[nets]]
@@ -2706,8 +2713,8 @@ ref = "U11"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3", "11"]
-out = ["1"]
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "11"]
+out = ["1", "7", "8"]
 read = "partial"
 note = """
 Section A, an inverting stage of -R210/R209 = -8.2 about the +6 V on pin 3.
@@ -2724,6 +2731,18 @@ name = "a"
 pins = ["1", "2", "3"]
 role = "mix amp"
 group = "output"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "envelope follower"
+group = "base missile"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "envelope follower"
+group = "homing missile"
 
 [[parts]]
 group = "output"
@@ -3126,13 +3145,13 @@ on = ["U23.1", "RP1.4", "U32.3"]
 
 [[nets]]
 name = "HOMING MISSILE"
-on = ["U23.40", "RP1.5"]
-note = "On to the homing missile on this sheet, which is not transcribed yet."
+on = ["U23.40", "RP1.5", "U31.1"]
+note = "PA4, pulled up and active low, into its open-collector buffer."
 
 [[nets]]
 name = "BASE MISSILE"
-on = ["U23.39", "RP1.6"]
-note = "On to the base missile on this sheet, which is not transcribed yet."
+on = ["U23.39", "RP1.6", "U31.3"]
+note = "PA5, pulled up and active low, into its open-collector buffer."
 
 [[nets]]
 name = "LASER"
@@ -3411,3 +3430,164 @@ on = ["C28.a", "R19.b"]
 [[nets]]
 name = "U4a in"
 on = ["R18.b", "R19.a", "U4.2"]
+
+# ===========================================================================
+# THE +6 V RAIL (sheet 12, left half).
+#
+# Worth transcribing on its own because it is not a regulator. R34 and R35 are
+# a plain 390 ohm pair across +12 V with C36 and C37 decoupling the midpoint,
+# so +6 V has a source impedance of 195 ohms and every op-amp reference on both
+# sheets sits on it.
+# ===========================================================================
+
+[[parts]]
+group = "supply"
+ref = "R34"
+kind = "R"
+ohms = 390
+block = "+6V divider"
+
+[[parts]]
+group = "supply"
+ref = "R35"
+kind = "R"
+ohms = 390
+block = "+6V divider"
+
+[[parts]]
+group = "supply"
+ref = "C36"
+kind = "C"
+uf = 100
+block = "+6V decoupling"
+
+[[parts]]
+group = "supply"
+ref = "C37"
+kind = "C"
+uf = 100
+block = "+6V decoupling"
+
+# ===========================================================================
+# THE TWO MISSILES (sheet 12, left half).
+#
+# The same envelope twice and the simplest on the board: a 7417 open-collector
+# buffer charges a capacitor through 1k, the capacitor decays, and a 220k pair
+# lifts the result halfway to +6 V before a follower passes it on. Same
+# midpoint-tap shape as the two explosions, for the same reason.
+# ===========================================================================
+
+[[parts]]
+ref = "U31"
+kind = "U"
+device = "7417"
+pins = ["1", "2", "3", "4"]
+out = ["2", "4"]
+read = "partial"
+note = """
+Two sections of a hex open-collector buffer, non-inverting. Its other sections \
+are elsewhere on this sheet and are not transcribed yet."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2"]
+role = "gate buffer"
+group = "homing missile"
+
+[[parts.sections]]
+name = "b"
+pins = ["3", "4"]
+role = "gate buffer"
+group = "base missile"
+
+[[parts]]
+group = "homing missile"
+ref = "R28"
+kind = "R"
+kohms = 1
+
+[[parts]]
+group = "homing missile"
+ref = "C34"
+kind = "C"
+uf = 0.68
+
+[[parts]]
+group = "homing missile"
+ref = "R29"
+kind = "R"
+kohms = 220
+block = "homing missile reference"
+
+[[parts]]
+group = "homing missile"
+ref = "R30"
+kind = "R"
+kohms = 220
+block = "homing missile reference"
+
+[[parts]]
+group = "base missile"
+ref = "R31"
+kind = "R"
+kohms = 1
+
+[[parts]]
+group = "base missile"
+ref = "C35"
+kind = "C"
+uf = 0.68
+
+[[parts]]
+group = "base missile"
+ref = "R32"
+kind = "R"
+kohms = 220
+block = "base missile reference"
+
+[[parts]]
+group = "base missile"
+ref = "R33"
+kind = "R"
+kohms = 220
+block = "base missile reference"
+
+[[nets]]
+name = "homing missile buffered"
+on = ["U31.2", "R28.a"]
+
+[[nets]]
+name = "homing missile envelope"
+on = ["R28.b", "C34.a", "R29.a"]
+
+[[nets]]
+name = "homing missile reference"
+on = ["R29.b", "R30.b", "U11.10"]
+note = """
+Halfway between the envelope and +6 V, which is the same midpoint shape the two \
+explosions use."""
+
+[[nets]]
+name = "homing missile CON"
+on = ["U11.8", "U11.9"]
+note = """
+The follower's output, strapped to its own inverting input. It leaves upward on \
+the sheet and where it goes is NOT TRACED, so this net is the strap only and \
+is certainly incomplete."""
+
+[[nets]]
+name = "base missile buffered"
+on = ["U31.4", "R31.a"]
+
+[[nets]]
+name = "base missile envelope"
+on = ["R31.b", "C35.a", "R32.a"]
+
+[[nets]]
+name = "base missile reference"
+on = ["R32.b", "R33.b", "U11.5"]
+
+[[nets]]
+name = "base missile CON"
+on = ["U11.7", "U11.6"]
+note = "As with the homing missile's: the strap only, the destination not traced."
