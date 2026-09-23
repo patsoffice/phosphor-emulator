@@ -1,0 +1,22 @@
+[package]
+name = "phosphor-netlist"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "phosphor_netlist"
+path = "src/lib.rs"
+
+[[bin]]
+name = "netlist"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps the emitted netlistsvg JSON in the order the
+# transcription lists its parts, which is roughly signal order and is what
+# makes the generated file readable as a diff. It pulls in indexmap, which
+# egui already puts in the tree.
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "1"

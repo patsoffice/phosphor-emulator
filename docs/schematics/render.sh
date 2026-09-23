@@ -3,7 +3,13 @@
 # Render every netlist in this directory to the SVG committed beside it.
 # Run from the nix dev shell, which provides netlistsvg:
 #
-#     ./docs/schematics/render.sh
+#     ./docs/schematics/render.sh                              # all of them
+#     ./docs/schematics/render.sh zaxxon-shot-oscillator.json  # just this one
+#
+# Naming files renders only those, which is worth doing when one drawing
+# changed: netlistsvg's output is not byte-stable across versions, so a full
+# run rewrites SVGs whose pixels are identical and buries the one real change
+# in the diff.
 #
 # netlistsvg auto-places and auto-routes through ELK, so nothing here places a
 # symbol or routes a wire. It does emit an SVG that needs two fixes before it
@@ -28,7 +34,10 @@ set -eu
 cd "$(dirname "$0")"
 PAD="${PAD:-40}"
 
-for json in *.json; do
+# Arguments are file names in this directory; with none, every netlist here.
+[ "$#" -gt 0 ] || set -- *.json
+
+for json in "$@"; do
   svg="${json%.json}.svg"
   netlistsvg "$json" -o "$svg.tmp"
   awk -v pad="$PAD" '

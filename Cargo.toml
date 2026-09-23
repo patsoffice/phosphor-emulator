@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "macros", "machines", "cpu-validation", "frontend", "harness", "tools/bench", "tools/disasm", "tools/script", "tools/sound-compare"]
+members = ["core", "macros", "machines", "cpu-validation", "frontend", "harness", "tools/bench", "tools/disasm", "tools/netlist", "tools/script", "tools/sound-compare"]
 default-members = ["core", "machines", "frontend"]
 # `tools/marty-probe` links a foreign 8088 core and is built on its own. It is
 # excluded rather than a member so that nothing shipped can depend on it and so
