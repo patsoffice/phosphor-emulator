@@ -576,7 +576,7 @@ rail = true
 on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
   "U11.3", "PC1.cell1", "R30.a", "R33.a",
-  "R34.b", "R35.a", "C36.b", "C37.a",
+  "R34.b", "R35.a", "C36.b", "C37.a", "R72.a",
 ]
 note = """
 NOT A REGULATED RAIL. R34 and R35 are a plain 390 ohm divider across +12 V \
@@ -590,7 +590,7 @@ on = [
   "R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a",
   "U2.4", "C64.a", "C65.a", "R171.a",
   "C7.a", "U1.10", "R10.a", "R11.a", "R13.a",
-  "R34.a", "C36.a",
+  "R34.a", "C36.a", "R65.a", "U7.8", "U7.4",
 ]
 
 [[nets]]
@@ -611,6 +611,7 @@ on = [
   "U11.11", "VR1.1", "C7.b", "C12.b", "R4.b", "U1.8", "R5.b", "R6.b",
   "U23.7", "U32.1", "R15.b", "C25.b", "R17.b",
   "R35.b", "C37.b", "C34.b", "C35.b",
+  "U7.1", "C53.b", "C54.b", "R69.b", "R71.b", "Q3.e",
 ]
 
 [[nets]]
@@ -3231,25 +3232,6 @@ kind = "C"
 uf = 15
 note = "Smooths node Y, so the level glides between steps rather than stepping."
 
-[[parts]]
-ref = "U8"
-kind = "U"
-device = "LM324"
-device_inferred = true
-pins = ["12", "13", "14"]
-out = ["14"]
-read = "partial"
-note = """
-Section D, a follower of node Y driving the opto's LED. Its other sections are \
-elsewhere on sheet 12 and are not transcribed yet. The part number is not \
-printed; see the note on U19."""
-
-[[parts.sections]]
-name = "d"
-pins = ["12", "13", "14"]
-role = "level follower"
-group = "player ship level"
-
 [[nets]]
 name = "player ship node A"
 on = ["U30.10", "R10.b", "R12.a"]
@@ -3591,3 +3573,229 @@ on = ["R32.b", "R33.b", "U11.5"]
 name = "base missile CON"
 on = ["U11.7", "U11.6"]
 note = "As with the homing missile's: the strap only, the destination not traced."
+
+# ===========================================================================
+# THE LASER (sheet 12, left half).
+#
+# The integrator-and-Schmitt oscillator for the FOURTH time on this board,
+# built on U8 exactly as the battleship's two are on U9 and U10 and the shot's
+# is on U19. Only the reference changes: here it is swept by a 555's timing
+# capacitor rather than by a divider or a second 555's output.
+#
+# U7'S OUTPUT PIN IS NOT ON THE DRAWING. The symbol draws pins 1, 2, 4, 5, 6,
+# 7 and 8 and simply does not draw pin 3, which is the whole reason this voice
+# sweeps: the board reads the capacitor's ramp instead of the square. With pin
+# 5 carrying C54 to ground the ramp runs a third to two thirds of the supply.
+# ===========================================================================
+
+[[parts]]
+group = "laser"
+ref = "U7"
+kind = "U"
+device = "555"
+pins = ["1", "2", "4", "5", "6", "7", "8"]
+note = """
+PIN 3, THE OUTPUT, IS ABSENT FROM THE SYMBOL. That is a claim about the \
+drawing and not an omission here: the board never uses this part's square \
+wave, only the ramp on its timing capacitor, which is what U8 section A \
+follows. Reset on pin 4 is tied up to the supply with pin 8, so it free-runs."""
+
+[[parts]]
+group = "laser"
+ref = "R65"
+kind = "R"
+kohms = 5.1
+
+[[parts]]
+group = "laser"
+ref = "R66"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "laser"
+ref = "D3"
+kind = "D"
+note = """
+Across R66, cathode toward the capacitor, so the charge current bypasses R66 \
+and the ramp is asymmetric: up through R65 alone, down through R66."""
+
+[[parts]]
+group = "laser"
+ref = "C53"
+kind = "C"
+uf = 10
+note = "The ramp the whole voice is swept by."
+
+[[parts]]
+group = "laser"
+ref = "C54"
+kind = "C"
+uf = 0.01
+note = "On the 555's control pin, which is what makes the ramp a third to two thirds."
+
+[[parts]]
+ref = "U8"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+note = """
+All four sections, and three of them are the laser's oscillator while the \
+fourth is the player ship's level follower. The part number is not printed; \
+see the note on U19."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "ramp follower"
+group = "laser"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "integrator"
+group = "laser"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "Schmitt"
+group = "laser"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "level follower"
+group = "player ship level"
+
+[[parts]]
+group = "laser"
+ref = "R67"
+kind = "R"
+kohms = 120
+
+[[parts]]
+group = "laser"
+ref = "R68"
+kind = "R"
+kohms = 51
+block = "laser halving divider"
+
+[[parts]]
+group = "laser"
+ref = "R69"
+kind = "R"
+kohms = 51
+block = "laser halving divider"
+
+[[parts]]
+group = "laser"
+ref = "C138"
+kind = "C"
+uf = 0.01
+
+[[parts]]
+group = "laser"
+ref = "R70"
+kind = "R"
+kohms = 47
+note = """
+The sink, onto U8 section B's pin 6, with the pin-5 divider crossing that \
+vertical and no dot: the same junction that cost a pass on the battleship."""
+
+[[parts]]
+group = "laser"
+ref = "R72"
+kind = "R"
+kohms = 51
+block = "laser Schmitt window"
+
+[[parts]]
+group = "laser"
+ref = "R73"
+kind = "R"
+kohms = 100
+block = "laser Schmitt window"
+
+[[parts]]
+group = "laser"
+ref = "R74"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "laser"
+ref = "D4"
+kind = "D"
+note = "Anode toward R74, cathode on Q3's base: D11, D5 and D6 again."
+
+[[parts]]
+group = "laser"
+ref = "Q3"
+kind = "Q"
+device = "C1684"
+out = ["c"]
+
+[[parts]]
+group = "laser"
+ref = "R71"
+kind = "R"
+kohms = 2.2
+note = "Q3's base pulldown: R160, R87 and R97 again."
+
+[[nets]]
+name = "U7 discharge"
+on = ["R65.b", "R66.a", "U7.7", "D3.a"]
+
+[[nets]]
+name = "U7 ramp"
+on = ["R66.b", "D3.k", "C53.a", "U7.2", "U7.6", "U8.3"]
+note = """
+The capacitor's own ramp, read directly by U8 section A. This is the node that \
+stands in for the output pin the symbol does not draw."""
+
+[[nets]]
+name = "U7 control"
+on = ["U7.5", "C54.a"]
+
+[[nets]]
+name = "U8a out"
+on = ["U8.1", "U8.2", "R67.a", "R68.a"]
+note = "strapped output to inverting input: a follower of the ramp."
+
+[[nets]]
+name = "U8b summing node"
+on = ["R67.b", "C138.a", "R70.b", "U8.6"]
+
+[[nets]]
+name = "U8b half"
+on = ["R68.b", "R69.a", "U8.5"]
+
+[[nets]]
+name = "U8b out"
+on = ["U8.7", "C138.b", "U8.9"]
+
+[[nets]]
+name = "U8c window"
+on = ["R72.b", "R73.a", "U8.10"]
+
+[[nets]]
+name = "U8c out"
+on = ["U8.8", "R73.b", "R74.a"]
+note = """
+The oscillator's square. It also leaves to the right half of this sheet, where \
+a 4016B gates it into the laser's leg, and that path is NOT traced."""
+
+[[nets]]
+name = "R74/D4 junction"
+on = ["R74.b", "D4.a"]
+
+[[nets]]
+name = "Q3 base"
+on = ["D4.k", "Q3.b", "R71.a"]
+
+[[nets]]
+name = "Q3 collector"
+on = ["Q3.c", "R70.a"]
