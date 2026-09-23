@@ -69,7 +69,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "sheet 11 nearly whole (shot, battleship, noise source, both explosions, cannon, alarms), plus all eleven mix legs and the whole output path through to the speaker connector. Still missing: the medium explosion's noise band-pass on U3, U45 section A, and the front ends of the six voices that live on sheet 12 (player ship A and B, engine, homing missile, base missile, laser) with the PPI and the supply decoupling"
+excerpt = "sheet 11 nearly whole (shot, battleship, noise source, both explosions, cannon, alarms), all eleven mix legs, the output path through to the speaker, and the PPI with all twelve gates. Still missing: the medium explosion's noise band-pass on U3, U45 section A, and the front ends of the six voices on sheet 12 (player ship A and B, engine, homing missile, base missile, laser) with the supply decoupling"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -549,9 +549,9 @@ block = "mix leg"
 # ---------------------------------------------------------------------------
 
 [[nets]]
-name = "PC0"
-port = "input"
-on = ["U21.1"]
+name = "SHOT"
+on = ["U23.14", "RP2.4", "U21.1"]
+note = "PC0, pulled up and active low, straight into the one-shot's A input."
 
 [[nets]]
 name = "+5V"
@@ -563,6 +563,7 @@ on = [
   "U45.10", "U45.11", "R125.a", "R126.a",
   "U44.10", "U44.11", "R166.b", "U46.2", "U46.3", "R167.b",
   "U50.14", "U50.4", "R168.a", "R170.a",
+  "U23.26", "RP1.com", "RP2.com",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -602,6 +603,7 @@ on = [
   "C97.b", "C98.b", "U50.7", "U49.2", "U49.12",
   "R175.b", "R178.b", "R181.b", "R184.b", "R187.b",
   "U11.11", "VR1.1", "C7.b", "C12.b", "R4.b", "U1.8", "R5.b", "R6.b",
+  "U23.7", "U32.1",
 ]
 
 [[nets]]
@@ -1044,22 +1046,38 @@ kind = "C"
 uf = 2.2
 
 [[parts]]
-group = "battleship"
 ref = "U30"
 kind = "U"
 device = "7406"
-pins = ["5", "6"]
-out = ["6"]
+pins = ["5", "6", "10", "11", "12", "13"]
+out = ["6", "10", "12"]
 read = "partial"
 note = """
-One inverter of a hex open-collector part shared across several gates on these \
-sheets; only the battleship's section is in this group. Open collector is why \
-R101 is there."""
+Three inverters of a hex open-collector part, serving three different voices. \
+Open collector is why each one needs a pull-up. Its other sections are \
+elsewhere on sheet 12 and are not transcribed yet."""
+unread = [
+  { pin = "10", why = "player ship A's inverted gate, into the level ladder on this sheet; not transcribed yet" },
+  { pin = "12", why = "player ship B's inverted gate, into the level ladder on this sheet; not transcribed yet" },
+]
 
 [[parts.sections]]
 name = "c"
 pins = ["5", "6"]
 role = "gate inverter"
+group = "battleship"
+
+[[parts.sections]]
+name = "e"
+pins = ["10", "11"]
+role = "gate inverter"
+group = "player ship A"
+
+[[parts.sections]]
+name = "f"
+pins = ["12", "13"]
+role = "gate inverter"
+group = "player ship B"
 
 [[parts]]
 group = "battleship"
@@ -1132,9 +1150,8 @@ note = "This voice's summing leg. All eleven legs on this board are 51k."
 
 [[nets]]
 name = "BATTLESHIP"
-port = "input"
-on = ["U30.5"]
-note = "from the PPI on sheet 12, active low."
+on = ["U23.37", "RP1.8", "U30.5"]
+note = "PA7, pulled up and active low, into its open-collector gate inverter."
 
 [[nets]]
 name = "battleship gate"
@@ -1836,9 +1853,8 @@ block = "medium explosion recovery"
 
 [[nets]]
 name = "S-EXP"
-port = "input"
-on = ["U22.1"]
-note = "from the PPI on sheet 12, active low."
+on = ["U23.22", "RP2.1", "U22.1"]
+note = "PB4, pulled up and active low."
 
 [[nets]]
 name = "U22 Cext"
@@ -1879,9 +1895,8 @@ U15 channel B to the small explosion and a VCA's CON has no other driver."""
 
 [[nets]]
 name = "M-EXP"
-port = "input"
-on = ["U21.9"]
-note = "from the PPI on sheet 12, active low."
+on = ["U23.23", "RP2.2", "U21.9"]
+note = "PB5, pulled up and active low."
 
 [[nets]]
 name = "U21b Cext"
@@ -2164,9 +2179,8 @@ note = "Smoothing on the gain stage's reference, which sits at 6 V x 22/55 = 2.4
 
 [[nets]]
 name = "CANNON"
-port = "input"
-on = ["U45.9"]
-note = "from the PPI on sheet 12, active low."
+on = ["U23.25", "RP2.3", "U45.9"]
+note = "PB7, pulled up and active low."
 
 [[nets]]
 name = "U45 Cext"
@@ -2445,15 +2459,13 @@ note = "Across R173, rolling the square's edges off at about 48 Hz."
 
 [[nets]]
 name = "ALARM 2"
-port = "input"
-on = ["U44.9"]
-note = "from the PPI on sheet 12, active low."
+on = ["U23.16", "RP2.5", "U44.9"]
+note = "PC2, pulled up and active low."
 
 [[nets]]
 name = "ALARM 3"
-port = "input"
-on = ["U46.1"]
-note = "from the PPI on sheet 12, active low."
+on = ["U23.17", "RP2.6", "U46.1"]
+note = "PC3, pulled up and active low."
 
 [[nets]]
 name = "U44 Cext"
@@ -2924,3 +2936,208 @@ on = ["C11.b", "R6.a"]
 [[nets]]
 name = "Zobel 2 return"
 on = ["C10.b", "R5.a"]
+
+# ===========================================================================
+# THE PPI AND THE GATES (sheet 12, left half).
+#
+# One 8255 supplies every gate on the board, and this is where the two sheets
+# join: each of the twelve gate names that leaves sheet 12 arrives at a voice
+# on sheet 11.
+#
+# ALL THREE PIN STATES APPEAR ON THIS ONE PART, which is why it is worth
+# transcribing carefully rather than as a block:
+#
+#   - drawn and wired: PA0-PA7, PB4, PB5, PB7, PC0, PC2, PC3
+#   - drawn and going nowhere: PB0, PB1, PB2, PB3, PB6, PC1, PC5, PC6, PC7,
+#     each with a pin number and a stub and no wire
+#   - absent from the symbol: PC4 on pin 13, which the drawing does not draw
+#     at all
+#
+# Twelve gates are used out of the twenty-four the part has. Every one is
+# active low and every one is pulled up, so a voice sounds while its bit is
+# low.
+# ===========================================================================
+
+[[parts]]
+group = "ppi"
+ref = "U23"
+kind = "U"
+device = "8255AC-5"
+pins = [
+  "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+  "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25",
+  "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36",
+  "37", "38", "39", "40",
+]
+out = [
+  "1", "2", "3", "4", "37", "38", "39", "40",
+  "18", "19", "20", "21", "22", "23", "24", "25",
+  "10", "11", "12", "14", "15", "16", "17",
+]
+note = """
+PC4 on pin 13 is absent from the symbol entirely, which is a different claim \
+from the nine pins below that are drawn and reach nothing."""
+nc = [
+  { pin = "18", why = "PB0 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "19", why = "PB1 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "20", why = "PB2 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "21", why = "PB3 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "24", why = "PB6 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "15", why = "PC1 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "12", why = "PC5 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "11", why = "PC6 is drawn with its pin number and a stub and connects to nothing" },
+  { pin = "10", why = "PC7 is drawn with its pin number and a stub and connects to nothing" },
+]
+
+[[parts]]
+group = "ppi"
+ref = "RP1"
+kind = "R"
+ohms = 4700
+pins = ["com", "1", "2", "3", "4", "5", "6", "7", "8"]
+note = """
+A bussed pack of eight 4.7k pull-ups, one per port A bit, drawn as eight \
+separate resistors sharing the +5 V rail. THE DRAWING DOES NOT NUMBER ITS \
+PINS, so `com` and 1 to 8 are this file's own names: element N pulls up PA(N-1). \
+One value for the whole pack is right here because every element is 4.7k."""
+
+[[parts]]
+group = "ppi"
+ref = "RP2"
+kind = "R"
+ohms = 4700
+pins = ["com", "1", "2", "3", "4", "5", "6"]
+note = """
+The same, with six elements, for the six gates that come off ports B and C. \
+Pin names are this file's own, as for RP1: 1 to 6 are S-EXP, M-EXP, CANNON, \
+SHOT, ALARM 2 and ALARM 3 in that order."""
+
+[[parts]]
+group = "ppi"
+ref = "U32"
+kind = "U"
+device = "74LS139"
+pins = ["1", "2", "3", "4", "5", "6", "7"]
+out = ["4", "5", "6", "7"]
+read = "partial"
+note = """
+One half of a dual 2-to-4 decoder, taking player ship C and D and selecting \
+one of four active-low outputs. Its enable on pin 1 is grounded, so it is \
+always decoding. The second half is not transcribed yet."""
+unread = [
+  { pin = "4", why = "decoded output 0, into the player ship circuit on this sheet; not transcribed yet" },
+  { pin = "5", why = "decoded output 1, into the player ship circuit on this sheet; not transcribed yet" },
+  { pin = "6", why = "decoded output 2, into the player ship circuit on this sheet; not transcribed yet" },
+  { pin = "7", why = "decoded output 3, into the player ship circuit on this sheet; not transcribed yet" },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3", "4", "5", "6", "7"]
+role = "decoder"
+group = "ppi"
+
+# --- the bus, from the CPU on sheets 13 and 14 ---
+
+[[nets]]
+name = "D0"
+port = "input"
+on = ["U23.34"]
+
+[[nets]]
+name = "D1"
+port = "input"
+on = ["U23.33"]
+
+[[nets]]
+name = "D2"
+port = "input"
+on = ["U23.32"]
+
+[[nets]]
+name = "D3"
+port = "input"
+on = ["U23.31"]
+
+[[nets]]
+name = "D4"
+port = "input"
+on = ["U23.30"]
+
+[[nets]]
+name = "D5"
+port = "input"
+on = ["U23.29"]
+
+[[nets]]
+name = "D6"
+port = "input"
+on = ["U23.28"]
+
+[[nets]]
+name = "D7"
+port = "input"
+on = ["U23.27"]
+
+[[nets]]
+name = "A0"
+port = "input"
+on = ["U23.9"]
+
+[[nets]]
+name = "A1"
+port = "input"
+on = ["U23.8"]
+
+[[nets]]
+name = "RD"
+port = "input"
+on = ["U23.5"]
+
+[[nets]]
+name = "WR"
+port = "input"
+on = ["U23.36"]
+
+[[nets]]
+name = "SOUCS"
+port = "input"
+on = ["U23.6"]
+
+[[nets]]
+name = "RES"
+port = "input"
+on = ["U23.35"]
+
+# --- the twelve gates ---
+
+[[nets]]
+name = "PLAYER SHIP A"
+on = ["U23.4", "RP1.1", "U30.11"]
+
+[[nets]]
+name = "PLAYER SHIP B"
+on = ["U23.3", "RP1.2", "U30.13"]
+
+[[nets]]
+name = "PLAYER SHIP C"
+on = ["U23.2", "RP1.3", "U32.2"]
+
+[[nets]]
+name = "PLAYER SHIP D"
+on = ["U23.1", "RP1.4", "U32.3"]
+
+[[nets]]
+name = "HOMING MISSILE"
+on = ["U23.40", "RP1.5"]
+note = "On to the homing missile on this sheet, which is not transcribed yet."
+
+[[nets]]
+name = "BASE MISSILE"
+on = ["U23.39", "RP1.6"]
+note = "On to the base missile on this sheet, which is not transcribed yet."
+
+[[nets]]
+name = "LASER"
+on = ["U23.38", "RP1.7"]
+note = "On to the laser on this sheet, which is not transcribed yet."
