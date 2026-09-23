@@ -12,7 +12,7 @@
 //! them as enforced rather than re-implementing them.
 
 use crate::netlist::{Netlist, Part, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How much a finding wants doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +56,11 @@ pub struct Finding {
 
 /// What the device declares it models, derived rather than maintained.
 ///
-/// A stopgap, and the design says so: rung 4 generates the constants from the
-/// netlist, and the set of designators they carry becomes a by-product of that
-/// rather than something extracted here. Until then the device's own constant
-/// *names* are the declaration, which is weaker than a manifest in one way and
-/// stronger in another: it cannot go stale, because it is the code.
+/// This was specified as a stopgap that rung 4 would retire by generating the
+/// constants. **Rung 4 was cut, so it is permanent**, and that is fine for the
+/// reason it was acceptable as a stopgap: the device's own constant *names* are
+/// the declaration, which is weaker than a manifest in one way and stronger in
+/// another, because it cannot go stale. It is the code.
 ///
 /// Constant names only, never comments. On this board that distinction is the
 /// whole result: `zaxxon_sound.rs` mentions `C94` in a doc comment, in a
@@ -70,30 +70,86 @@ pub struct Finding {
 pub struct DeviceParts {
     /// The designators the device's constant names carry.
     pub named: BTreeSet<String>,
+    /// Constants that name exactly one designator and give a plain number, by
+    /// designator. These are the ones whose value can be held against the
+    /// sheet's.
+    pub values: BTreeMap<String, Constant>,
+    /// Constants naming more than one designator, which are not checked. See
+    /// [`value_disagrees`] for why, and why saying so out loud matters.
+    pub compound: Vec<String>,
+}
+
+/// One device constant, as written.
+#[derive(Debug, Clone)]
+pub struct Constant {
+    /// The constant's name, so a finding can point at the line to change.
+    pub name: String,
+    /// Its literal, in whatever unit the source writes it in.
+    pub value: f64,
 }
 
 impl DeviceParts {
     /// Read a device source file and collect the designators its constants
     /// name. `const R156` contributes `R156`; `const R145_R146` contributes
     /// both, which is how this device writes a pair it has already summed.
+    ///
+    /// The literal is collected too, where there is one to collect. A constant
+    /// whose right-hand side is an expression rather than a number is a
+    /// *derived* quantity, and this deliberately does not try to evaluate one:
+    /// `shot_pitch_r` is two resistors in parallel and comparing it against
+    /// either of them would be nonsense.
     pub fn from_source(source: &str) -> DeviceParts {
         let mut named = BTreeSet::new();
+        let mut values: BTreeMap<String, Constant> = BTreeMap::new();
+        let mut compound = Vec::new();
         for line in source.lines() {
             let line = line.trim_start();
             let Some(rest) = line.strip_prefix("const ") else {
                 continue;
             };
-            let Some(name) = rest.split(':').next() else {
+            let Some((name, tail)) = rest.split_once(':') else {
                 continue;
             };
+            let name = name.trim();
+            let mut here: Vec<&str> = Vec::new();
             for token in name.split('_') {
                 if is_designator(token) {
                     named.insert(token.to_string());
+                    here.push(token);
                 }
             }
+            let literal = tail
+                .split_once('=')
+                .and_then(|(_, rhs)| numeric_literal(rhs));
+            match (here.as_slice(), literal) {
+                ([one], Some(value)) => {
+                    values.entry((*one).to_string()).or_insert(Constant {
+                        name: name.to_string(),
+                        value,
+                    });
+                }
+                ([_, _, ..], Some(_)) => compound.push(name.to_string()),
+                _ => {}
+            }
         }
-        DeviceParts { named }
+        DeviceParts {
+            named,
+            values,
+            compound,
+        }
     }
+}
+
+/// A Rust numeric literal, or nothing if the right-hand side is an expression.
+///
+/// Nothing is the common case and the important one: most of what a device
+/// holds is computed, and a check that guessed at an expression would be worse
+/// than no check.
+fn numeric_literal(rhs: &str) -> Option<f64> {
+    let rhs = rhs.split("//").next()?.trim().trim_end_matches(';').trim();
+    let rhs = rhs.trim_end_matches("f64").trim_end_matches("f32");
+    let cleaned: String = rhs.chars().filter(|c| *c != '_').collect();
+    cleaned.parse::<f64>().ok()
 }
 
 /// `R156`, `C94`, `U19`: one to three letters then digits, which is how every
@@ -129,9 +185,94 @@ pub fn run(netlist: &Netlist, device: Option<&DeviceParts>) -> Vec<Finding> {
     departures(netlist, &mut findings);
     if let Some(device) = device {
         not_modeled(netlist, device, &mut findings);
+        value_disagrees(netlist, device, &mut findings);
         no_part(netlist, device, &mut findings);
     }
     findings
+}
+
+/// A value the sheet and the device both carry, and disagree about.
+///
+/// The drift class, caught at the value level. `zaxxon_sound.rs` writes
+/// `const R156: f64 = 33_000.0` and the transcription writes `kohms = 33`, and
+/// until this check nothing held the two together: `lint` read the constant's
+/// *name* to ask which parts the device models and never looked at the number
+/// beside it.
+///
+/// **This is not what rung 4 was.** Codegen was cut because it supplies inputs
+/// and the drift it was tested against was in a derived figure. That verdict
+/// stands and this does not reverse it: nothing is generated, the device keeps
+/// its hand-written constants, and a derived quantity is skipped rather than
+/// guessed at. What this adds is that the inputs can no longer disagree
+/// silently, which is an hour of work for the cheap part of the same benefit.
+///
+/// Three things it deliberately declines to do, each because the alternative is
+/// a false positive, and a lint that cries wolf is a lint somebody turns off.
+///
+/// - **A constant naming several designators is not checked.** `R145_R146` is a
+///   series sum the device has already folded; comparing it against either part
+///   would report a disagreement that is not one. They are counted and named
+///   instead, so the gap in the coverage is visible rather than assumed away.
+/// - **A constant whose value is an expression is not checked**, for the same
+///   reason one step up: `shot_pitch_r` is two resistors in parallel and is not
+///   any part's value.
+/// - **Units are assumed to be SI on both sides.** The transcription guarantees
+///   it and this device happens to honor it. A device that held kilohms would
+///   make every row of this report at once, which is a loud failure rather than
+///   a quiet one, and that is the property worth having.
+fn value_disagrees(netlist: &Netlist, device: &DeviceParts, findings: &mut Vec<Finding>) {
+    let mut compared = 0;
+    for part in &netlist.parts {
+        let Some(sheet) = part.value.quantity() else {
+            continue;
+        };
+        // A run drawn as one symbol shares its value, so a constant naming any
+        // designator in the run is a claim about this number.
+        for designator in std::iter::once(&part.designator).chain(part.also.iter()) {
+            let Some(constant) = device.values.get(designator) else {
+                continue;
+            };
+            compared += 1;
+            if (constant.value - sheet).abs() <= sheet.abs() * 1e-6 {
+                continue;
+            }
+            // The ratio is the useful number: a factor of ten is a decimal
+            // point somebody read differently, and a few percent is a
+            // different part.
+            let ratio = if sheet == 0.0 {
+                f64::INFINITY
+            } else {
+                constant.value / sheet
+            };
+            findings.push(Finding {
+                lint: "value-disagrees",
+                severity: Severity::Problem,
+                subject: designator.clone(),
+                detail: format!(
+                    "the sheet says {} and `{}` holds {}, a factor of {ratio:.4}. One of the \
+                     two has been changed without the other",
+                    part.value.label(),
+                    constant.name,
+                    constant.value,
+                ),
+            });
+        }
+    }
+    // Always, even at zero. A silent check and a passing check read the same
+    // in a report, and this one is cheap enough to be believed for the wrong
+    // reason: it compares only where both sides name the same part, so a
+    // transcription that is an excerpt has far fewer rows than the device has
+    // constants.
+    findings.push(Finding {
+        lint: "value-disagrees",
+        severity: Severity::Observation,
+        subject: "(coverage)".to_string(),
+        detail: format!(
+            "{compared} values on this sheet were held against a device constant, out of {} \
+             constants carrying a literal",
+            device.values.len()
+        ),
+    });
 }
 
 /// A net with fewer than two endpoints connects nothing to nothing.
@@ -368,6 +509,113 @@ mod tests {
         assert!(device.named.contains("U12"));
         assert!(!device.named.contains("CANNON"));
         assert!(!device.named.contains("SWING"));
+    }
+
+    /// A two-part netlist and a device, wired enough to load, for the value
+    /// checks below.
+    fn one_resistor(ohms: &str) -> String {
+        format!(
+            "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"R156\"\nkind = \"R\"\n{ohms}\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"R156.a\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"R156.b\"]\n"
+        )
+    }
+
+    fn disagreements(netlist: &str, device: &str) -> Vec<Finding> {
+        findings_for(netlist, Some(device))
+            .into_iter()
+            .filter(|f| f.lint == "value-disagrees" && f.severity == Severity::Problem)
+            .collect()
+    }
+
+    /// The drift class at the value level: the sheet was re-read and corrected
+    /// and the device kept the old number, or the reverse. Nothing held these
+    /// two together before.
+    #[test]
+    fn a_value_the_device_and_the_sheet_disagree_about_is_reported() {
+        let found = disagreements(&one_resistor("kohms = 33"), "const R156: f64 = 47_000.0;\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].subject, "R156");
+        assert!(found[0].detail.contains("1.4242"), "{}", found[0].detail);
+    }
+
+    /// The same number written the way each file writes it. `kohms = 33` and
+    /// `33_000.0` are the same resistance and neither is a string anything
+    /// parses, which is decision 2 paying off on both sides at once.
+    #[test]
+    fn the_same_value_in_different_units_does_not_report() {
+        assert!(
+            disagreements(&one_resistor("kohms = 33"), "const R156: f64 = 33_000.0;\n").is_empty()
+        );
+        assert!(
+            disagreements(&one_resistor("ohms = 33000"), "const R156: f64 = 33e3;\n").is_empty()
+        );
+    }
+
+    /// The decimal-point case, which is the one this board actually had to
+    /// settle by cropping a label at 600 percent. A factor of ten between the
+    /// two files is exactly what this has to catch.
+    #[test]
+    fn a_decimal_point_read_differently_shows_up_as_a_factor_of_ten() {
+        let netlist = "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"C88\"\nkind = \"C\"\nuf = 0.047\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"C88.a\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"C88.b\"]\n";
+        let found = disagreements(netlist, "const C88: f64 = 0.47e-6;\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].detail.contains("10.0000"), "{}", found[0].detail);
+    }
+
+    /// A derived constant is not any part's value, so it is skipped rather
+    /// than guessed at. `shot_pitch_r` is two resistors in parallel, and a
+    /// check that compared it against `R147` would report a disagreement that
+    /// is not one, which is how a lint gets turned off.
+    #[test]
+    fn a_constant_whose_value_is_an_expression_is_not_compared() {
+        let device = "const R156: f64 = 33_000.0;\n\
+                      const R156_SHARE: f64 = R156 / (R156 + R159);\n";
+        let parts = DeviceParts::from_source(device);
+        assert!(parts.values.contains_key("R156"));
+        assert_eq!(parts.values["R156"].value, 33_000.0);
+        assert!(disagreements(&one_resistor("kohms = 33"), device).is_empty());
+    }
+
+    /// A constant naming two parts is a pair the device has already folded, so
+    /// comparing it against either one would be nonsense. It is counted and
+    /// named instead, so that the hole in the coverage is visible.
+    #[test]
+    fn a_constant_naming_several_parts_is_counted_rather_than_compared() {
+        let device = "const R145_R146: f64 = 1_270_000.0;\n";
+        let parts = DeviceParts::from_source(device);
+        assert!(parts.values.is_empty(), "{:?}", parts.values);
+        assert_eq!(parts.compound, vec!["R145_R146"]);
+
+        let netlist = "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"R145\"\nkind = \"R\"\nkohms = 270\n\n\
+             [[parts]]\nref = \"R146\"\nkind = \"R\"\nmohms = 1\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"R145.a\", \"R146.a\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"R145.b\", \"R146.b\"]\n";
+        assert!(disagreements(netlist, device).is_empty());
+    }
+
+    /// Coverage prints whether or not anything disagreed, because a check that
+    /// compared nothing and a check that found nothing read the same way.
+    #[test]
+    fn coverage_is_reported_even_when_everything_agrees() {
+        let findings = findings_for(
+            &one_resistor("kohms = 33"),
+            Some("const R156: f64 = 33_000.0;\n"),
+        );
+        let coverage = findings
+            .iter()
+            .find(|f| f.lint == "value-disagrees" && f.subject == "(coverage)")
+            .expect("coverage always reports");
+        assert!(
+            coverage.detail.starts_with("1 value"),
+            "{}",
+            coverage.detail
+        );
     }
 
     /// The result that decides the epic's kill criterion. `C94` is named by no

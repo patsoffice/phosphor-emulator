@@ -11,4 +11,5 @@
 
 pub mod lint;
 pub mod netlist;
+pub mod solve;
 pub mod svg;

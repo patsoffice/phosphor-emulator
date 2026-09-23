@@ -43,6 +43,20 @@
 #         docs/schematics/netlists/zaxxon-sound.toml \
 #         --device machines/src/zaxxon_sound.rs
 #
+# And what a voice's passive network actually does, as an operating point and
+# as the network's own time constants rather than one RC at a time. `--drive`
+# is where a scenario says what the parts the solver does not model are
+# holding, since the drawing gives the junction and never the voltage:
+#
+#     cargo run -p phosphor-netlist -- solve \
+#         docs/schematics/netlists/zaxxon-sound.toml --group shot \
+#         --drive U21.4=5.0
+#
+# Every pin it treated as open is printed before any number, and a node that
+# reaches no rail through a resistor is named rather than grounded. C94 is one:
+# the only thing at its other end is the MB4391's rolloff pin, so the solver
+# correctly has nothing to say about it.
+#
 # WHERE THIS READING COMES FROM. Drafted from `zaxxon-discrete-sound.md`, which
 # carries the argument behind every junction, and then checked part by part
 # against the scan itself. Everything the prose established held. The four

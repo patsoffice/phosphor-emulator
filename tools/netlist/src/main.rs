@@ -7,6 +7,7 @@
 use clap::{Parser, Subcommand};
 use phosphor_netlist::lint as lints;
 use phosphor_netlist::netlist::{self, Netlist};
+use phosphor_netlist::solve as solver;
 use phosphor_netlist::svg;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,6 +39,25 @@ enum Command {
         #[arg(short, long)]
         device: Option<PathBuf>,
     },
+    /// Solve the passive network: the operating point, and the natural time
+    /// constants a filter-chain model approximates one at a time.
+    Solve {
+        /// The `.toml` transcription.
+        file: PathBuf,
+        /// Solve only one subcircuit, by its parts' `group`.
+        #[arg(short, long)]
+        group: Option<String>,
+        /// Hold a net at a voltage, as `net=volts`. This is where a scenario
+        /// says what the parts the solver does not model are doing: an op-amp
+        /// output, a logic level, a 555's pin 3. A `part.pin` also names its
+        /// net, for a net the drawing does not label.
+        #[arg(short, long, value_name = "NET=VOLTS")]
+        drive: Vec<String>,
+        /// Override a rail's voltage, as `net=volts`. Rails whose names read
+        /// as a voltage need no flag.
+        #[arg(short, long, value_name = "NET=VOLTS")]
+        rail: Vec<String>,
+    },
     /// Generate netlistsvg input. `docs/schematics/render.sh` turns that into
     /// the SVG a document embeds.
     Svg {
@@ -56,7 +76,10 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let path = match &cli.command {
-        Command::Show { file, .. } | Command::Svg { file, .. } | Command::Lint { file, .. } => file,
+        Command::Show { file, .. }
+        | Command::Svg { file, .. }
+        | Command::Lint { file, .. }
+        | Command::Solve { file, .. } => file,
     };
     let netlist = match Netlist::load(path) {
         Ok(netlist) => netlist,
@@ -74,24 +97,152 @@ fn main() -> ExitCode {
             show(&netlist, *parts);
             ExitCode::SUCCESS
         }
-        Command::Svg { out, group, .. } => {
-            let drawn = match group {
-                Some(group) => {
-                    let subset = netlist.subset(group);
-                    if subset.parts.is_empty() {
-                        eprintln!(
-                            "no parts in group `{group}`. This file has: {}",
-                            netlist.groups().join(", ")
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    subset
-                }
-                None => netlist,
-            };
-            write_svg(&drawn, out.as_deref())
-        }
+        Command::Svg { out, group, .. } => match cut(&netlist, group.as_deref()) {
+            Some(drawn) => write_svg(&drawn, out.as_deref()),
+            None => ExitCode::FAILURE,
+        },
         Command::Lint { device, .. } => lint(&netlist, device.as_deref()),
+        Command::Solve {
+            group, drive, rail, ..
+        } => solve(&netlist, group.as_deref(), drive, rail),
+    }
+}
+
+/// Cut a group out, or take the whole board, reporting a group nobody drew.
+fn cut(netlist: &Netlist, group: Option<&str>) -> Option<Netlist> {
+    let Some(group) = group else {
+        return Some(netlist.clone());
+    };
+    let subset = netlist.subset(group);
+    if subset.parts.is_empty() {
+        eprintln!(
+            "no parts in group `{group}`. This file has: {}",
+            netlist.groups().join(", ")
+        );
+        return None;
+    }
+    Some(subset)
+}
+
+/// Solve the passive network and report both what it says and what it assumed
+/// to say it. The assumptions are not an appendix: a time constant computed
+/// with the wrong pin held open is a wrong answer that looks like a right one,
+/// so the list of opened pins prints before the numbers do.
+fn solve(netlist: &Netlist, group: Option<&str>, drive: &[String], rail: &[String]) -> ExitCode {
+    let Some(netlist) = cut(netlist, group) else {
+        return ExitCode::FAILURE;
+    };
+
+    let mut setup = solver::Setup::default();
+    for (flag, given, into) in [
+        ("--drive", drive, &mut setup.drives),
+        ("--rail", rail, &mut setup.rails),
+    ] {
+        for text in given {
+            let Some((name, volts)) = text.rsplit_once('=') else {
+                eprintln!("{flag} wants `net=volts`, and got `{text}`");
+                return ExitCode::FAILURE;
+            };
+            let Ok(volts) = volts.trim().parse::<f64>() else {
+                eprintln!("{flag} `{text}`: `{volts}` is not a number of volts");
+                return ExitCode::FAILURE;
+            };
+            // A net the drawing does not label is still reachable by a pin on
+            // it, which is how a scenario names an op-amp's own output.
+            let name = match name.rsplit_once('.') {
+                Some((part, pin)) => match netlist.net_of(part, pin) {
+                    Some(net) => net.name.clone(),
+                    None => name.to_string(),
+                },
+                None => name.to_string(),
+            };
+            into.insert(name, volts);
+        }
+    }
+
+    let network = match solver::Network::build(&netlist, &setup) {
+        Ok(network) => network,
+        Err(problems) => {
+            for problem in &problems {
+                eprintln!("{problem}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("held:");
+    for held in &network.held {
+        let kind = if held.rail { "rail " } else { "drive" };
+        println!("  {kind} {:<24} {:>9.4} V", held.net, held.volts);
+    }
+    println!(
+        "\nnetwork: {} unknown nodes, {} resistors, {} capacitors",
+        network.free.len(),
+        network.resistors().len(),
+        network.capacitors().len()
+    );
+    println!("  resistors:  {}", network.resistors().join(", "));
+    println!("  capacitors: {}", network.capacitors().join(", "));
+
+    // What the answer rests on. Printed before the answer, because a reader
+    // whose question is about one of these pins has learned everything they
+    // needed and can stop.
+    println!("\nassumed open ({} pins):", network.opened.len());
+    println!("  {}", network.opened.join(", "));
+    if !network.excluded.is_empty() {
+        println!("\nleft out of the network:");
+        for line in &network.excluded {
+            println!("  {line}");
+        }
+    }
+
+    match network.dc() {
+        Ok(dc) => {
+            println!("\noperating point:");
+            let mut dc = dc;
+            dc.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (net, volts) in &dc {
+                println!("  {net:<24} {volts:>9.4} V");
+            }
+        }
+        Err(problem) => println!("\noperating point: {problem}"),
+    }
+
+    match network.modes() {
+        Ok(modes) if modes.is_empty() => {
+            println!("\nno capacitors in the analyzed network, so it has no modes.");
+        }
+        Ok(modes) => {
+            println!("\nnatural modes, one per capacitor:");
+            for mode in &modes {
+                println!("\n  tau = {}", seconds(mode.tau));
+                for (net, share) in &mode.shape {
+                    // Below a percent a node is not taking part in the mode,
+                    // and printing it would bury the two that are.
+                    if share.abs() < 0.01 {
+                        continue;
+                    }
+                    println!("    {net:<24} {share:>7.3}");
+                }
+            }
+        }
+        Err(problem) => println!("\nnatural modes: {problem}"),
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// A time constant in the unit it reads best in. These span microseconds to
+/// seconds on one board, and a column of exponents is not comparable by eye.
+fn seconds(tau: f64) -> String {
+    if tau >= 1.0 {
+        format!("{tau:.4} s")
+    } else if tau >= 1e-3 {
+        format!("{:.4} ms", tau * 1e3)
+    } else if tau >= 1e-6 {
+        format!("{:.4} us", tau * 1e6)
+    } else {
+        format!("{:.4} ns", tau * 1e9)
     }
 }
 
@@ -114,6 +265,20 @@ fn lint(netlist: &Netlist, device: Option<&Path>) -> ExitCode {
         println!(
             "device declares {} designators, from the names of its constants",
             parts.named.len()
+        );
+        // How much of the device the value check can actually see. A coverage
+        // figure belongs beside a clean report, because "nothing disagrees"
+        // and "nothing was compared" print the same way otherwise.
+        println!(
+            "  {} of them carry a literal this can hold against the sheet; {} constants name \
+             several parts and are not checked{}",
+            parts.values.len(),
+            parts.compound.len(),
+            if parts.compound.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", parts.compound.join(", "))
+            }
         );
     } else {
         println!(

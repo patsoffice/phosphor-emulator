@@ -953,6 +953,30 @@ independent RCs at all. What that means is that **the error in this voice is not
 in these numbers**, because correcting both of them and coupling the two nodes
 still leaves the pitch an octave high and not falling.
 
+That paragraph was an assertion when it was written and it is now checked.
+Solving the whole two-capacitor network at once, out of the transcription and
+with no independent-RC step anywhere in it, gives **25.87 ms and 776.7 ms**
+against the 26.3 and 759.9 above, and puts node X's share of the slow mode at
+**0.579** against the 0.560 this file derives as a divider. Every one of the
+three is within three percent, so the separation argument holds and the octave
+is not in it. The run is
+[`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml) through
+`netlist solve --group shot`, and the numbers are pinned in
+`tools/netlist/tests/zaxxon_shot_test.rs`:
+
+```bash
+cargo run -p phosphor-netlist -- solve \
+    docs/schematics/netlists/zaxxon-sound.toml --group shot --drive U21.4=5.0
+```
+
+Two things fall out of it beyond the headline, both of which corroborate
+readings this file had argued from a recording alone. In the fast mode node Y
+moves 4 % of what node X does, which is the AC ground that lets `R148` out of
+the 26 ms path; in the slow mode node X moves 58 % of node Y, which is why
+`R145`/`R146` belong in the 760 ms one. The two superseded figures are refuted
+by the same run, 43 ms being 66 % off the fast pole and 468 ms 40 % off the
+slow.
+
 So this is where the file's own rule applies and the afternoon's work does not
 substitute for it: **go back to sheet 11.** What needs reading at 400 dpi is
 `U19`(1,2,3)'s supply and output range, node A between `R153`, `R154` and

@@ -1,6 +1,6 @@
 # Design: Schematic Transcription
 
-> **Status: rungs 1 and 3 done, rung 2 substantially done, rung 4 cut.** The
+> **Status: rungs 1, 3 and 5 done, rung 2 substantially done, rung 4 cut.** The
 > kill criterion is settled and its two questions disagreed; see the bottom of
 > this file. Make a board's transcription a single piece of data
 > rather than three prose copies of itself: a pin-level netlist per board, lints
@@ -309,6 +309,7 @@ Cheap, and each one catches an error this board actually had:
 | part in the netlist that no device node references | **`C94` and every other `RO` capacitor** |
 | part referenced by the device but absent from the netlist | a constant with no part behind it |
 | two parts with the same designator | a copy-paste during transcription |
+| device constant and sheet disagree about a value | a value corrected in one file and not the other |
 
 The third row is the one that matters. It is the question nobody could ask.
 
@@ -332,6 +333,21 @@ The third row is the one that matters. It is the question nobody could ask.
 >
 > Row four declines to run against an excerpt, where it would otherwise report
 > every part of every other voice.
+>
+> **Row six came later**, after rung 5, and is `value-disagrees`. The same trick
+> one step further: `lint` already read a constant's *name* to ask which parts
+> the device models, and reading the literal beside it holds the two files'
+> values together. Against the board today it compares 84 of the device's 111
+> readable constants and reports none, which is the first evidence that the
+> transcription and the device agree about more than their part lists.
+>
+> It is not rung 4 returning. Nothing is generated, and a constant whose value
+> is an *expression* is skipped rather than guessed at, which is the same line
+> decision 5 drew between inputs and derivations. Three things it declines to
+> check are named in the code, each because the alternative is a false positive
+> and a lint that cries wolf is a lint somebody turns off. The coverage count
+> prints whether or not anything disagreed, because "nothing was compared" and
+> "nothing disagreed" otherwise read the same.
 
 ### 4. Codegen
 
@@ -355,6 +371,71 @@ The cheap oracle rung. Nodal analysis over the passive subnetwork, same stimulus
 as the scenario, compared against both the device's traced node and the
 reference recording. First question to point it at: node X's two-capacitor
 superposition.
+
+> **Done, and the first question's answer is that the approximation is sound.**
+> `netlist solve <file> --group shot`, in `tools/netlist/src/solve.rs`, with the
+> board's answers pinned in `tools/netlist/tests/zaxxon_shot_test.rs`.
+>
+> **The instrument.** Replace every capacitor by a current source, solve the
+> resistive network once per capacitor, and the result is the matrix of
+> transresistances between capacitor ports. Times the capacitances, its
+> eigenvalues are the network's time constants: exactly `k` of them for `k`
+> capacitors, rather than one per node. Scaled by the square roots of the
+> capacitances the matrix is symmetric, so a Jacobi sweep is enough and nothing
+> can fail to converge, which is what decision 6 asked of this rung. The
+> **eigenvector** is the part that answers the question, because it says how
+> much of each mode appears at each node. That is the difference between "these
+> two capacitors each have a time constant" and "this network has two modes and
+> both nodes take part in both".
+>
+> **The answer.** Three numbers in `zaxxon_sound.rs` are derived by treating one
+> capacitor as a short or as an open while reading the other. Solving both at
+> once:
+>
+> | | the device, one RC at a time | the network, solved | out by |
+> |---|---|---|---|
+> | `shot_pitch_r`, `C88` at node X | 26.3 ms | **25.87 ms** | 1.7 % |
+> | `shot_vca_release_r`, `C89` at node Y | 759.9 ms | **776.7 ms** | 2.2 % |
+> | `shot_pitch_from_y`, Y's share of X | 0.560 | **0.579** | 3.4 % |
+>
+> The third row is the one nothing could have produced by hand: it is not a
+> divider ratio the solver computed, it is how far node X moves in the slow
+> mode, and it lands on the divider ratio the device uses.
+>
+> **The reasoning behind each is confirmed too, not just the answer.**
+> `shot_pitch_r` drops `R148` on the argument that `C89` holds node Y at an AC
+> ground at 4 Hz; in the fast mode node Y moves **4 %** of what node X does, so
+> it does. `shot_vca_release_r` keeps `R145`/`R146` on the argument that `C88`
+> is an open at 0.2 Hz, so node X is a divider rather than a ground; in the slow
+> mode node X moves 58 % of node Y, so it is. Both superseded readings are
+> refuted by the same run: 43 ms is 66 % off the fast pole and 468 ms is 40 %
+> off the slow one, which corroborates two corrections that had only ever been
+> argued from a recording.
+>
+> **So the shot's octave is not here**, and that is the result. A door closed is
+> what this rung was built to be able to produce, and it is the first time this
+> voice's residual has been narrowed by ruling something out rather than by
+> sweeping a constant.
+>
+> **The second question got a narrower answer than it asked.** With the 555
+> parked at its loaded output high the solver puts node A at **2.22 V**, against
+> the device's traced 2.07 V and the board's required 0.5 V. So the resistive
+> reading is right to a couple of percent and decision 6's table reads
+> disagrees/agrees the other way round from its worked example: it is the fourth
+> row, a part property or something outside the passive network. Which of those
+> it is needs the 555's duty against `C91`'s smoothing, and that is a transient
+> rather than an operating point. The solver does DC and modes and does not
+> pretend to the third.
+>
+> **What it declines to model is printed rather than assumed.** Every pin of
+> every part that is not an R, C or L is an open circuit, and the run lists all
+> 41 of them for the shot before it prints a number, because a time constant
+> computed with the wrong pin open is a wrong answer that looks like a right
+> one. A node that reaches no rail through any resistor is named and excluded
+> rather than quietly grounded, and `C94` is exactly that: its only other end is
+> the `MB4391`'s rolloff pin, so the honest answer about the part this epic
+> exists because of is that the solver has nothing to say. That is decision 7's
+> line drawn by the tool instead of by a reader.
 
 ### 6. SPICE export
 

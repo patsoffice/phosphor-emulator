@@ -940,6 +940,10 @@ fn shot_pitch_rest_v() -> f64 {
 /// inverting amplifier. `R147` joins them, so X slides from 8.42 V at rest to
 /// 6.12 V at the bottom of a trigger and back, and the amplifier sweeps with it
 /// instead of sitting on its floor from 40 ms onward.
+///
+/// The divider is the right way to compute it: solving the network gives node X
+/// **0.579** of the slow mode, which is this ratio to within 3 %. See
+/// [`shot_pitch_r`] for the run.
 fn shot_pitch_from_y() -> f64 {
     R145_R146 / (R145_R146 + R147)
 }
@@ -960,6 +964,13 @@ fn shot_pitch_from_y() -> f64 {
 /// twenty-nine to one is what lets each be written as its own RC: each
 /// capacitor sees the other as a short or as an open, with nothing in between
 /// for the approximation to lose.
+///
+/// **That separation is checked rather than asserted.** Solving the whole
+/// network out of the board's transcription gives 25.87 ms and 776.7 ms, so
+/// both readings here are within about two percent, and node Y moves only 4 %
+/// of node X in the fast mode, which is the AC ground this function's second
+/// paragraph rests on. `netlist solve --group shot`, pinned in
+/// `tools/netlist/tests/zaxxon_shot_test.rs`.
 fn shot_pitch_r() -> f64 {
     R145_R146 * R147 / (R145_R146 + R147)
 }
