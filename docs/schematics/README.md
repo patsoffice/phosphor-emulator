@@ -4,9 +4,25 @@ Small transcriptions of the specific sub-circuit a behaviour was derived from,
 so a claim in a design doc or a code comment can be checked in seconds instead
 of by re-downloading a scanned manual and hunting for the chip.
 
-One file per behaviour, not per board. These are excerpts, deliberately: nobody
-is transcribing an arcade motherboard, and a transcription nobody needs is a
-transcription nobody checks.
+**Usually one file per behavior, not per board.** Most of these are excerpts,
+deliberately: a transcription nobody needs is a transcription nobody checks.
+
+**The exception is a board under active modeling, and it is a live experiment
+rather than a slip.** This file used to say flatly that "nobody is transcribing
+an arcade motherboard". [`zaxxon-discrete-sound.md`](zaxxon-discrete-sound.md)
+already was, and six passes over that board are the argument for why: its
+expensive errors were not wrong values but wrong *junctions* and one part that
+was never transcribed at all, and an excerpt cannot catch either, because an
+excerpt has no way to say "this is everything on the sheet". A whole-board,
+pin-level transcription can be checked against itself, and "which parts does the
+device not model" becomes a query instead of an accident.
+
+That is being taken further deliberately. See
+[`docs/designs/schematic-transcription.md`](../designs/schematic-transcription.md):
+a pin-level netlist as the source of truth, with the constants generated from it
+and the prose referencing it rather than restating it. It is scoped to one board
+with a stated kill criterion, so if it does not pay off, this principle goes back
+to the way it was and these files stay excerpts.
 
 ## What goes in one
 
@@ -201,3 +217,12 @@ section is there so that is obvious.
   this one does not. Also carries the sheet inventory for a partial manual, and
   records that the two control latches and the `0xE0F0` decode are on sheets it
   does not have.
+- [`congo-percussion.md`](congo-percussion.md), Congo Bongo's percussion on the
+  same Sega board family as Zaxxon, and the worked example a later discrete
+  voice is built from.
+- [`mario-sound-sources.md`](mario-sound-sources.md), what generates each Mario
+  Bros. voice ahead of its effect chain.
+- [`namco-54xx-explosion.md`](namco-54xx-explosion.md), the 54XX's noise channel
+  into Xevious's discrete ladders and band-passes.
+- [`toobin-audio-output.md`](toobin-audio-output.md), Toobin's JSA-I sound board
+  on its own crystal.

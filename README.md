@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-3076%20passing-brightgreen.svg)](core/tests/)
+[![Tests](https://img.shields.io/badge/tests-5258%20passing-brightgreen.svg)](core/tests/)
 
 A modular emulator framework for retro CPUs, designed for extensibility and educational purposes. Features a trait-based architecture that allows easy addition of new CPUs, peripherals, and complete systems.
 
@@ -14,9 +14,24 @@ This is purely a project for fun and experimentation as a cycle-accurate emulato
 
 ### Prerequisites
 
-- Rust 1.85+ (2024 edition)
-- Cargo
-- SDL2 (`brew install sdl2` on macOS)
+- Rust 1.85+ and Cargo. 1.85 is the floor the 2024 edition sets. CI builds and
+  tests on **1.97.1** and again on current stable, so versions in between are
+  untested rather than known-good.
+- SDL2, for the frontend only (`brew install sdl2` on macOS). The core and
+  machines crates have no external C dependencies, so `cargo test -p
+  phosphor-core` needs nothing installed.
+
+**Optional: a Nix dev shell.** `flake.nix` pins the toolchain, SDL2, clang,
+pkg-config, libGL and the other build tools, and provides the same 1.97.1 that
+CI pins, so a clean local `clippy` and a clean CI `clippy` mean the same thing.
+It is a convenience rather than a requirement; a system Rust and SDL2 work fine.
+
+```bash
+nix develop              # enter the shell
+nix develop -c cargo test   # or run one command without entering
+```
+
+`shell.nix` is a flake-compat shim for anyone without flakes enabled.
 
 ### Build and Test
 
@@ -210,7 +225,18 @@ Complete system implementations that wire core components together:
 - **GridleeSystem** — Videa arcade (M6809 + bitmap video + trackball — freely distributable ROMs)
 - **BurgertimeSystem** — Data East BurgerTime on the shared btime board (DECO CPU-7 encrypted M6502 + 3bpp planar char/sprite/background video with X/Y-swap sprite RAM + inverted BGR palette + ROT270 portrait display + a second M6502 driving two AY-3-8910 PSGs)
 - **DocastleSystem** — Universal Mr. Do's Castle / Do! Run Run / Mr. Do's Wild Ride on the shared docastle board (two Z80s in cycle-accurate lockstep through a WAIT-gated bidirectional latch + NMI handshake, 4×SN76489A with READY-driven WAIT stalls, 2×TMS1025 input mux with a one-read select pipeline, 4bpp tilemap/sprite video with pen-15 sprite masking, per-variant memory maps and DIP tables)
-- Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, Simple68000System (test harnesses)
+- **GalaxianSystem** and the Galaxian-family boards: Galaxian, Moon Cresta, Pisces, UniWars, Scramble, Scobra and Frogger (Z80 + starfield + per-variant memory maps, sound hardware and protection)
+- **AsteroidsDeluxeSystem**: Asteroids Deluxe on the Asteroids vector board (M6502 + DVG + the 4-bit bank-switched EAROM and its state machine)
+- **ZaxxonSystem**: Sega Zaxxon (Z80 + the shared `sega_zaxxon.rs` video engine + twelve discrete analog sound voices, see [docs/schematics/zaxxon-discrete-sound.md](docs/schematics/zaxxon-discrete-sound.md))
+- **CongoBongoSystem**: Congo Bongo on the same Sega video engine, with its own discrete percussion
+- Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, SimpleI8035System, Simple68000System (test harnesses; all are aliases of the generic `SimpleSystem<C>` in `simple_system.rs`)
+
+This list is curated and the registry is the authority. For the full set, which
+is what `--machine` accepts:
+
+```bash
+cargo run -p phosphor-disasm --bin disasm -- machines
+```
 
 ### Macros Crate (`phosphor-macros`)
 
@@ -233,9 +259,9 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 
 [SingleStepTests](https://github.com/SingleStepTests/65x02)-style test infrastructure for validating CPU implementations against randomized test vectors with cycle-by-cycle bus traces. Cross-validates against independent reference emulators to catch flag, timing, and behavioral bugs.
 
-- **M6809** — 266 opcodes, 266,000 test vectors, cross-validated against [elmerucr/MC6809](https://github.com/elmerucr/MC6809) and [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) M6809. See [cpu-validation/README_6809.md](cpu-validation/README_6809.md).
-- **M6800** — 192 opcodes, 192,000 test vectors, cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) M6800. See [cpu-validation/README_6800.md](cpu-validation/README_6800.md).
-- **M6502** — 151 opcodes, 1,510,000 test vectors, validated against [SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) with cycle-by-cycle bus traces. See [cpu-validation/README_6502.md](cpu-validation/README_6502.md).
+- **M6809**: 285 opcodes across 3 opcode pages, 266,000 test vectors, cross-validated against [elmerucr/MC6809](https://github.com/elmerucr/MC6809) and [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) M6809. See [cpu-validation/README_m6809.md](cpu-validation/README_m6809.md).
+- **M6800**: 197 opcodes, 192,000 test vectors over the 192 that are validated (5 are excluded, and the per-CPU README says which and why), cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) M6800. See [cpu-validation/README_m6800.md](cpu-validation/README_m6800.md).
+- **M6502**: 151 opcodes, 1,510,000 test vectors, validated against [SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) with cycle-by-cycle bus traces. See [cpu-validation/README_m6502.md](cpu-validation/README_m6502.md).
 - **Z80** — 1604 opcodes, 1,604,000 test vectors, validated against [SingleStepTests/z80](https://github.com/SingleStepTests/z80) with full register/flag/timing verification. See [cpu-validation/README_z80.md](cpu-validation/README_z80.md).
 - **I8035** — 229 opcodes, 229,000 test vectors, cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) MCS-48. See [cpu-validation/README_i8035.md](cpu-validation/README_i8035.md).
 - **I8088** — 279 opcodes, 2,577,000 test vectors, validated against [SingleStepTests/8088](https://github.com/SingleStepTests/8088) with full register/flag/memory verification. See [cpu-validation/README_i8088.md](cpu-validation/README_i8088.md).
@@ -334,6 +360,16 @@ Standalone command-line utilities built on the core crates.
 - **`phosphor-disasm`** (`tools/disasm`) — disassembles a ROM with any per-CPU disassembler, in three modes: a raw file, a member of a `.zip`/directory ROM set, or a machine's named code region (CPU + origin auto-resolved from the disasm registry). Depends only on `phosphor-core`/`phosphor-machines` (no SDL2). See [docs/disassembler.md](docs/disassembler.md).
 - **`phosphor-script`** (`tools/script`) — Rhai scripting over a booted machine (`DebugSession`), shared by the frontend's interactive console and the headless script runner.
 - **`phosphor-bench`** (`tools/bench`) — headless throughput benchmark: boots a machine, runs a fixed number of frames with no window and no throttle, and reports per-frame cost split into emulation, render, and audio. Exists so performance changes are measurable rather than asserted.
+- **`phosphor-sound-compare`** (`tools/sound-compare`, binary `sndcmp`): drives one discrete-audio voice through a scenario and captures it, so a board's analog path can be compared against a reference or against its own previous revision. Owns `targets.toml`, the coverage catalog above, and the per-voice scenarios; `disasm audiodiff` owns the metrics.
+
+```bash
+# What scenarios exist for one target
+cargo run -p phosphor-sound-compare --bin sndcmp -- scenarios zaxxon-discrete
+
+# Capture one voice, then compare it against a reference WAV
+cargo run -p phosphor-sound-compare --bin sndcmp -- capture zaxxon/shot --out /tmp/shot.wav
+cargo run -p phosphor-disasm --bin disasm -- audiodiff reference.wav /tmp/shot.wav
+```
 
 ```bash
 # Representative board set: pacman, galaga, tempest, marble, joust
@@ -373,7 +409,8 @@ phosphor-emulator/
 ├── tools/                       # standalone CLIs built on the core crates
 │   ├── bench/                   #   phosphor-bench — headless throughput benchmark
 │   ├── disasm/                  #   phosphor-disasm — per-CPU ROM disassembler
-│   └── script/                  #   phosphor-script — Rhai scripting over a booted machine
+│   ├── script/                  #   phosphor-script — Rhai scripting over a booted machine
+│   └── sound-compare/           #   phosphor-sound-compare (sndcmp): discrete-voice capture + catalog
 └── cross-validation/            # C++ harnesses validating against reference emulators
 ```
 

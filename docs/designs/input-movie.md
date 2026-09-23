@@ -1,6 +1,10 @@
 # Design: Input Movies — Recording and Replaying Gameplay
 
-> **Status: proposed.** A deterministic input-movie format that records a
+> **Status: implemented.** `harness/src/movie.rs` carries the format, `disasm
+> movie` and `disasm replay` are shipped subcommands, and `frames.toml` pins
+> gameplay frames today.
+>
+> A deterministic input-movie format that records a
 > cabinet's exact input trace and replays it headlessly with a byte-identical
 > framebuffer, plus the `frames.toml` integration that makes it pin *gameplay*
 > rather than attract mode.

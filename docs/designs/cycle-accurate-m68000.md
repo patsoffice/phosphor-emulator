@@ -1,6 +1,12 @@
 # Design: Cycle-Accurate Motorola 68000
 
-> **Status: proposed, 2026-09-08.** Written to answer one question: is
+> **Status: in progress.** The status line said "proposed, 2026-09-08" long
+> after the work started: the body records M1 through M5 as built and measured,
+> with a throughput table comparing M1 against M3 and an M5 optimization that
+> was costed at 1.2 % and deliberately not built. Whoever owns this should set
+> the final state; "proposed" is the one thing it is not.
+>
+> Written to answer one question: is
 > converting the M68000 from instruction-level to per-cycle worth doing, and if
 > so, how. The recommendation is **yes, with a stop-and-measure gate after M1**,
 > for the reasons under [Recommendation](#recommendation).

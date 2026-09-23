@@ -1,6 +1,11 @@
 # Design: Discrete Sound Fidelity Tooling
 
-> **Status: proposed.** A ladder of Rust tooling for making discrete sound
+> **Status: implemented.** Every rung below is built and in use. The tracking
+> epic, `phosphor-emulator-discrete-sound-fidelity-l5r3`, closed on 2026-09-17
+> with all 11 children done. Read this as the record of why the tooling has the
+> shape it does, not as a plan.
+>
+> A ladder of Rust tooling for making discrete sound
 > demonstrably correct: a WAV differ that can gate, a ROM-less audio sanity test
 > over the whole registry, isolated per-effect capture, per-voice and
 > filter-section probes, construction-time parameter tuning, and — last — a
@@ -344,8 +349,15 @@ explains the reference" is a finding you cannot get by listening.
 The everyday tool, and the sibling of `imgdiff`.
 
 ```text
-disasm audiodiff A.wav B.wav [--png spec.png] [--json] [--tolerance ...]
+disasm audiodiff A.wav B.wav [--png spec.png] [--range A:B] [--range-b C:D]
+                             [--band-tolerance PP] [--centroid-tolerance FRAC]
+                             [--rms-tolerance DB] [--step-tolerance RATIO]
+                             [--pitch-window-ms MS] [--write-to OUT.wav]
 ```
+
+This drafted a single `--tolerance` and a `--json`; neither was built. The
+tolerances are per-metric because they are in different units, and the report is
+text because the thing that reads it is a person or a shell exit code.
 
 Reports duration and rate, RMS and the gain ratio between files, DC offset,
 clipped-sample count, silent fraction, spectral centroid, spectral flatness, and
@@ -367,14 +379,30 @@ then diff two spectrograms.
 |---|---|
 | Signal integrity | DC offset, peak dBFS, clipping fraction, crest factor, leading activity |
 | Level and time | AC RMS dBFS, integrated squared energy, RMS envelope, event count and spacing, and — per isolated event — attack time, energy, T20/T40 decay, fitted tau with r², duration above threshold |
-| Frequency and timbre | fundamental (spectral + autocorrelation), dominant peaks, centroid, rolloff, flatness, band-energy ratios, harmonic ratios |
+| Frequency and timbre | fundamental (spectral + autocorrelation), **per-window pitch track**, dominant peaks, centroid, rolloff, flatness, band-energy ratios, harmonic ratios |
 | Distance | multi-resolution log-magnitude STFT distance, envelope L1 |
 | Alignment | onset detection, envelope cross-correlation within a bound |
 
 Short arcade effects rarely have the dynamic range for a reliable T60, so
-several decay summaries beat one nominal number. Pitch combines spectral and
-autocorrelation estimates — a single largest FFT bin is unstable for swept tones
-and noisy resonances.
+several decay summaries beat one nominal number.
+
+**The claim about pitch here was half right and the correction is worth
+keeping.** This said that combining a spectral estimate with autocorrelation
+handles swept tones, where a single largest FFT bin does not. The combining part
+is true; the *swept tones* part is not, and the combined estimator's spectral
+fallback is what breaks it. On a square whose third harmonic is the largest bin
+it reports three times the pitch, and on one of this project's own captures,
+known to be a steady 1400 Hz because the oscillator was forced there, it reports
+exactly 700.0 Hz.
+
+So there are two measurements and they answer different questions.
+`fundamental_hz` answers "what pitch is this capture", once, over the first few
+periods of whatever slice it is handed. `PitchTrack` answers "what does the
+pitch *do*", estimating per window with **no spectral fallback**, because the
+fallback is the octave error. Read its `voiced_fraction` before its percentiles:
+a track that is 10 % voiced is a percentile over almost nothing, and that is the
+measurement reporting that the voice has no pitch at that resolution rather than
+a number to trust.
 
 **Every decay number is measured inside one isolated event, not across the
 capture.** A capture usually holds several: a walk enable held for two seconds

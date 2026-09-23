@@ -126,41 +126,33 @@ All major components (Bus, Cpu, Component) are traits:
 - Easy addition of new peripherals and systems
 - Composition over inheritance (Rust idiom)
 
-### Controlled Unsafe for Borrow Splitting
+### The borrow splits natively, and there is no unsafe
 
-The `Simple6809System::tick()` method uses a carefully controlled `unsafe` block:
+A CPU cycle needs two mutable borrows at once: the CPU's own registers, and the
+bus it reads and writes. If a machine struct *is* its own bus, those are two
+mutable borrows of one value and the borrow checker refuses.
+
+**The answer is the field layout, not an escape hatch.** A machine holds its CPU
+in one field and its bus state in another, so `self.cpu.execute_cycle(&mut
+self.board, ..)` borrows two disjoint fields and compiles as ordinary safe Rust.
+It also dispatches at a **concrete** bus type rather than through `&mut dyn Bus`,
+which is where the performance came from.
 
 ```rust
-pub fn tick(&mut self) {
-    let bus_ptr: *mut Self = self;
-    unsafe {
-        let bus = &mut *bus_ptr as &mut dyn Bus<Address = u16, Data = u8>;
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-    }
+pub fn step_cycle(&mut self) -> u32 {
+    self.cpu.execute_cycle(&mut self.board, BusMaster::Cpu(0))
 }
 ```
 
-**Why is this necessary?**
+Form the split **once per frame**, never per cycle: a per-cycle split costs more
+than the trait object it replaces. See
+[docs/designs/concrete-bus-dispatch.md](docs/designs/concrete-bus-dispatch.md)
+for the measurements.
 
-- The CPU needs `&mut self` to modify its registers
-- The CPU also needs `&mut Bus` to read/write memory
-- But `Simple6809System` *is* the bus (implements `Bus` trait)
-- Rust's borrow checker sees this as two mutable borrows of `self`
-
-**Why is this safe?**
-
-- The CPU only accesses its own fields (`cpu.a`, `cpu.pc`, etc.)
-- The Bus trait only accesses system fields (`ram`, `rom`, `pia`)
-- These are **disjoint memory regions** - no aliasing occurs
-- The raw pointer doesn't outlive the function (scoped)
-- This is a known pattern for "split borrowing" structs
-
-**Alternative approaches considered:**
-
-- RefCell - Runtime borrow checking adds overhead
-- Separate `System` and `Bus` structs - more boilerplate
-- Interior mutability everywhere - less idiomatic
-- Unsafe split borrow (chosen) - zero cost, clear invariants
+This section used to document the opposite: a `*mut Self` reborrowed into
+`&mut dyn Bus` inside an `unsafe` block, presented as the chosen design. That
+pattern is gone from the tree and **must not come back**; `core/CLAUDE.md` says
+so directly. There is no `unsafe` in `machines/src` at all.
 
 ## Troubleshooting
 

@@ -94,6 +94,7 @@ cargo run --release -p phosphor-bench -- --roms /path/to/roms   # Benchmark emul
 | `phosphor-disasm`          | Standalone ROM disassembler CLI           | phosphor-core, phosphor-machines, phosphor-harness, clap |
 | `phosphor-script`          | Rhai scripting over a booted machine      | phosphor-core, phosphor-machines, phosphor-harness, rhai |
 | `phosphor-bench`           | Headless emulation throughput benchmark   | phosphor-harness, clap                                |
+| `phosphor-sound-compare`   | Discrete-voice capture (`sndcmp`) + the coverage catalog in `targets.toml` | phosphor-core, phosphor-machines, phosphor-harness |
 | `cross-validation`         | C++ cross-validate against ref emulators  | (non-Cargo, uses Makefile)                            |
 
 - Never create circular dependencies between crates
@@ -337,5 +338,21 @@ Three notes on the pattern, so it is maintained rather than replaced:
 
 ### README
 
-- Keep roadmap checkboxes current
-- Update CPU-specific READMEs when adding instructions or changing opcode counts
+- Update CPU-specific READMEs when adding instructions or changing opcode
+  counts, **and the root README's CPU list in the same commit**. Those two
+  drifted apart once already: the root said 266 and 192 opcodes for the M6809
+  and M6800 where the per-CPU READMEs said 285 and 197, because the root had
+  been given the validated-vector count instead of the implemented-opcode count.
+- The root README's machine list is **curated, not exhaustive**, and the
+  registry is the authority. It fell seven machines behind once. Do not try to
+  keep it complete; keep it representative, and leave
+  `disasm machines` as the answer to "what is supported".
+- The test-count badge is a hardcoded number that nothing updates. It read 3076
+  against an actual 5258 for long enough that nobody noticed. If it is wrong
+  again, either fix it or delete it; a number that cannot self-update is a
+  liability.
+
+This section used to open with "keep roadmap checkboxes current". There are no
+checkboxes in the README or anywhere under `docs/`, and there have not been for
+as long as the file records. An instruction pointing at something that does not
+exist trains the reader to skim the rest, so it is gone rather than restated.

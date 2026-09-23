@@ -1,6 +1,12 @@
 # Design: Discrete Sound Device Framework
 
-> **Status: proposed.** This document describes a reusable framework for
+> **Status: implemented.** `core/src/device/discrete/` is built and ten machines
+> in `machines/src` construct a `DiscreteCircuit` today. The non-goals below are
+> still live policy, in particular that this is not a SPICE simulator and not a
+> netlist parser **in the runtime**; `schematic-transcription.md` proposes both
+> offline, and does not reverse either.
+>
+> This document describes a reusable framework for
 > discrete and board-level analog sound paths. Asteroids is the first migration
 > target: its discrete sound writes are currently stubbed, and its latch-driven
 > plus data-driven inputs exercise the framework without Donkey Kong's harder

@@ -173,4 +173,4 @@ Games sharing hardware use a shared board struct. When adding a new game on exis
 ## Reference Examples
 
 - `joust.rs` - Reference for Board Wrapper Pattern (Williams board)
-- `simple6502.rs`, `simple6800.rs`, `simple6809.rs`, `simplez80.rs` - Minimal test harnesses
+- `simple_system.rs` - Minimal test harnesses: one generic `SimpleSystem<C>` over a flat bus with no I/O devices, plus the `Simple6502System`/`Simple6800System`/`Simple6809System`/`SimpleZ80System`/`SimpleI8035System` aliases and a 32-bit `SimpleSystem32<C>` for 68000-class cores. These replaced the per-CPU `simple*.rs` files; the type names survived the consolidation, the file names did not
