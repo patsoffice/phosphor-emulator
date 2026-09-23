@@ -69,7 +69,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "sheet 11 nearly whole: the shot, the battleship, the noise source, both explosions, the cannon and the alarms, with the four MB4391 channels and six of the eleven mix legs. Still missing on sheet 11: the medium explosion's noise band-pass on U3, and U45 section A. Sheet 12 is not started"
+excerpt = "sheet 11 nearly whole (shot, battleship, noise source, both explosions, cannon, alarms), plus all eleven mix legs and the whole output path through to the speaker connector. Still missing: the medium explosion's noise band-pass on U3, U45 section A, and the front ends of the six voices that live on sheet 12 (player ship A and B, engine, homing missile, base missile, laser) with the PPI and the supply decoupling"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -572,7 +572,10 @@ gate."""
 [[nets]]
 name = "+6V"
 rail = true
-on = ["U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12"]
+on = [
+  "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
+  "U11.3",
+]
 
 [[nets]]
 name = "+12V"
@@ -580,6 +583,7 @@ rail = true
 on = [
   "R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a",
   "U2.4", "C64.a", "C65.a", "R171.a",
+  "C7.a", "U1.10",
 ]
 
 [[nets]]
@@ -596,6 +600,8 @@ on = [
   "C61.b", "C63.b",
   "C79.b", "R127.b", "R132.b", "Q6.e", "R133.b", "R141.b", "C85.b",
   "C97.b", "C98.b", "U50.7", "U49.2", "U49.12",
+  "R175.b", "R178.b", "R181.b", "R184.b", "R187.b",
+  "U11.11", "VR1.1", "C7.b", "C12.b", "R4.b", "U1.8", "R5.b", "R6.b",
 ]
 
 [[nets]]
@@ -1257,14 +1263,17 @@ on = ["C19.b", "R193.a"]
 
 [[nets]]
 name = "SJ"
-port = "output"
-on = ["R193.b", "R196.b", "R199.b", "R202.b", "R205.b", "R208.b"]
+on = [
+  "R193.b", "R196.b", "R199.b", "R202.b", "R205.b", "R208.b",
+  "R176.b", "R179.b", "R182.b", "R185.b", "R188.b",
+  "R209.a",
+]
 note = """
-The board's one summing junction, where all eleven legs meet. Every leg is \
-51k, so the legs are equally weighted and the whole balance of the board is \
-the series/shunt pair ahead of each one. Six of the eleven are transcribed so \
-far. It stays a port until the output stage is in: SJ is a passive node loaded \
-by R209 into U11, not a virtual ground."""
+The board's one summing junction, and all eleven legs are now on it: six from \
+sheet 11 and five from sheet 12. Every leg is 51k, so they are equally \
+weighted and the whole balance of the board is the series/shunt pair ahead of \
+each one. It is a PASSIVE node and not a virtual ground: R209 loads it into \
+U11 rather than holding it."""
 
 # ===========================================================================
 # THE MB4391 VCA CHANNELS AND THEIR MIX LEGS (sheet 11, right half).
@@ -2519,3 +2528,399 @@ on = ["R172.b", "R173.a", "C99.a", "U12.13"]
 name = "alarm stage out"
 on = ["U12.14", "R173.b", "C99.b", "R206.a"]
 note = "On to the leg that alarms 2 and 3 share."
+
+# ===========================================================================
+# THE FIVE MIX LEGS ON SHEET 12, and the output stage (sheet 12, right half).
+#
+# The sheet-12 legs are the same shape as the sheet-11 ones and confirm the
+# prose's table part for part. Their sources are on the left half and are not
+# transcribed yet, so each leg's input end is unread.
+# ===========================================================================
+
+[[parts]]
+group = "player ship A"
+ref = "R174"
+kind = "R"
+kohms = 15
+block = "player ship A leg"
+unread = [
+  { pin = "a", why = "the player ship tone A filter on sheet 12 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "player ship A"
+ref = "R175"
+kind = "R"
+kohms = 22
+block = "player ship A leg"
+
+[[parts]]
+group = "player ship A"
+ref = "C14"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "player ship A"
+ref = "R176"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "player ship B"
+ref = "R177"
+kind = "R"
+kohms = 15
+block = "player ship B leg"
+unread = [
+  { pin = "a", why = "the player ship tone B filter on sheet 12 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "player ship B"
+ref = "R178"
+kind = "R"
+kohms = 22
+block = "player ship B leg"
+
+[[parts]]
+group = "player ship B"
+ref = "C15"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "player ship B"
+ref = "R179"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "homing missile"
+ref = "R180"
+kind = "R"
+kohms = 22
+block = "homing missile leg"
+unread = [
+  { pin = "a", why = "the homing missile on sheet 12 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "homing missile"
+ref = "R181"
+kind = "R"
+kohms = 27
+block = "homing missile leg"
+
+[[parts]]
+group = "homing missile"
+ref = "C16"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "homing missile"
+ref = "R182"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "base missile"
+ref = "R183"
+kind = "R"
+kohms = 39
+block = "base missile leg"
+unread = [
+  { pin = "a", why = "the base missile on sheet 12 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "base missile"
+ref = "R184"
+kind = "R"
+kohms = 8.2
+block = "base missile leg"
+
+[[parts]]
+group = "base missile"
+ref = "C17"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "base missile"
+ref = "R185"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "laser"
+ref = "R186"
+kind = "R"
+kohms = 47
+block = "laser leg"
+unread = [
+  { pin = "a", why = "the laser on sheet 12 left; not transcribed yet" },
+]
+
+[[parts]]
+group = "laser"
+ref = "R187"
+kind = "R"
+kohms = 8.2
+block = "laser leg"
+
+[[parts]]
+group = "laser"
+ref = "C18"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "laser"
+ref = "R188"
+kind = "R"
+kohms = 51
+
+# --- the output stage ---
+
+[[parts]]
+group = "output"
+ref = "R209"
+kind = "R"
+kohms = 10
+note = "What loads SJ, and the input resistor of the stage that follows it."
+
+[[parts]]
+group = "output"
+ref = "U11"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3", "11"]
+out = ["1"]
+read = "partial"
+note = """
+Section A, an inverting stage of -R210/R209 = -8.2 about the +6 V on pin 3.
+
+PIN 11 IS DRAWN HERE, GOING TO GROUND, which is worth recording because it \
+settles the reading of U9 on sheet 11: on this drawing pin 11 of a 14-pin quad \
+is the negative supply, so U9's fourth section cannot have its output there. \
+See the note on U9.
+
+The part number is not printed; see the note on U19."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "mix amp"
+group = "output"
+
+[[parts]]
+group = "output"
+ref = "R210"
+kind = "R"
+kohms = 82
+
+[[parts]]
+group = "output"
+ref = "R211"
+kind = "R"
+kohms = 68
+
+[[parts]]
+group = "output"
+ref = "VR1"
+kind = "POT"
+kohms = 20
+pins = ["1", "2", "3"]
+note = """
+The volume control, with pin 1 grounded, pin 3 fed through R211 and the wiper \
+on pin 2. At full travel the wiper delivers 20/(68+20) = 0.227 of the mix \
+amp's output into the power amplifier."""
+
+[[parts]]
+group = "output"
+ref = "U1"
+kind = "U"
+device = "LA4460"
+pins = ["2", "3", "4", "5", "6", "7", "8", "9", "10"]
+out = ["7", "9"]
+read = "partial"
+note = """
+The power amplifier, bridge-tied: OUT1 on pin 9 and OUT2 on pin 7 drive the \
+speaker in antiphase, which is why the board has no output coupling capacitor. \
+C8 and C9 are its bootstrap capacitors, and each output carries a Zobel network \
+to ground."""
+unread = [
+  { pin = "3", why = "arrives from the left on the same sheet; not traced" },
+  { pin = "6", why = "MUTE, leaving downward; not traced" },
+]
+
+[[parts]]
+group = "output"
+ref = "C7"
+kind = "C"
+uf = 1000
+note = "The amplifier's supply reservoir."
+
+[[parts]]
+group = "output"
+ref = "C8"
+kind = "C"
+uf = 47
+block = "bootstrap"
+
+[[parts]]
+group = "output"
+ref = "C9"
+kind = "C"
+uf = 47
+block = "bootstrap"
+
+[[parts]]
+group = "output"
+ref = "C12"
+kind = "C"
+uf = 0.01
+block = "bootstrap return"
+
+[[parts]]
+group = "output"
+ref = "R4"
+kind = "R"
+kohms = 1.5
+block = "bootstrap return"
+
+[[parts]]
+group = "output"
+ref = "C10"
+kind = "C"
+uf = 0.033
+block = "Zobel 2"
+drawing_says = "the designator's second glyph is a blotted character that reads as either 0 or 8"
+note = """
+Read as C10 rather than C18. C18 is already the laser's 1 uF mix block on this \
+same sheet, and this part pairs with C11 across the other output, so C10 is \
+the only reading that is consistent."""
+
+[[parts]]
+group = "output"
+ref = "R5"
+kind = "R"
+ohms = 4.7
+block = "Zobel 2"
+
+[[parts]]
+group = "output"
+ref = "C11"
+kind = "C"
+uf = 0.033
+block = "Zobel 1"
+
+[[parts]]
+group = "output"
+ref = "R6"
+kind = "R"
+ohms = 4.7
+block = "Zobel 1"
+
+[[parts]]
+group = "output"
+ref = "P4"
+kind = "J"
+pins = ["1", "2", "3", "4", "5", "6"]
+note = "The speaker connector. Pin 3 is SPK+ and pin 4 is SPK-; the rest are unused here."
+nc = [
+  { pin = "1", why = "drawn on the connector symbol and reaching nothing on this sheet" },
+  { pin = "2", why = "drawn on the connector symbol and reaching nothing on this sheet" },
+  { pin = "5", why = "drawn on the connector symbol and reaching nothing on this sheet" },
+  { pin = "6", why = "drawn on the connector symbol and reaching nothing on this sheet" },
+]
+
+# --- sheet 12 leg and output nets ---
+
+[[nets]]
+name = "player ship A attenuated"
+on = ["R174.b", "R175.a", "C14.a"]
+
+[[nets]]
+name = "C14/R176 junction"
+on = ["C14.b", "R176.a"]
+
+[[nets]]
+name = "player ship B attenuated"
+on = ["R177.b", "R178.a", "C15.a"]
+
+[[nets]]
+name = "C15/R179 junction"
+on = ["C15.b", "R179.a"]
+
+[[nets]]
+name = "homing missile attenuated"
+on = ["R180.b", "R181.a", "C16.a"]
+
+[[nets]]
+name = "C16/R182 junction"
+on = ["C16.b", "R182.a"]
+
+[[nets]]
+name = "base missile attenuated"
+on = ["R183.b", "R184.a", "C17.a"]
+
+[[nets]]
+name = "C17/R185 junction"
+on = ["C17.b", "R185.a"]
+
+[[nets]]
+name = "laser attenuated"
+on = ["R186.b", "R187.a", "C18.a"]
+
+[[nets]]
+name = "C18/R188 junction"
+on = ["C18.b", "R188.a"]
+
+[[nets]]
+name = "mix amp in"
+on = ["R209.b", "R210.a", "U11.2"]
+
+[[nets]]
+name = "mix amp out"
+on = ["U11.1", "R210.b", "R211.a"]
+
+[[nets]]
+name = "volume top"
+on = ["R211.b", "VR1.3"]
+
+[[nets]]
+name = "volume wiper"
+on = ["VR1.2", "U1.2"]
+note = "Straight into the power amplifier's input, with no coupling capacitor."
+
+[[nets]]
+name = "U1 bootstrap"
+on = ["C8.b", "C9.b", "C12.a", "R4.a"]
+
+[[nets]]
+name = "U1 pin 4"
+on = ["U1.4", "C8.a"]
+
+[[nets]]
+name = "U1 pin 5"
+on = ["U1.5", "C9.a"]
+
+[[nets]]
+name = "SPK+"
+on = ["U1.9", "C11.a", "P4.3"]
+
+[[nets]]
+name = "SPK-"
+on = ["U1.7", "C10.a", "P4.4"]
+
+[[nets]]
+name = "Zobel 1 return"
+on = ["C11.b", "R6.a"]
+
+[[nets]]
+name = "Zobel 2 return"
+on = ["C10.b", "R5.a"]
