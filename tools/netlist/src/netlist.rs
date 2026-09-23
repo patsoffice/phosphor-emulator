@@ -264,6 +264,19 @@ pub struct Part {
     pub unread: Vec<Unread>,
     /// How completely this part has been read.
     pub read: Read,
+    /// What the drawing prints, where this transcription deliberately records
+    /// something else.
+    ///
+    /// The rarest and most dangerous kind of entry in a transcription: a place
+    /// where the reader concluded the drawing is wrong. `U9`'s fourth section
+    /// has its output labeled pin 11, where the identical section of the
+    /// identical part `U10` two sheets-halves away is labeled 14 and pin 11 on
+    /// a 14-pin quad is the negative supply, which cannot drive anything. So
+    /// the transcription says 14 and this says why the drawing disagrees.
+    ///
+    /// Every such departure is a place a later reader will otherwise
+    /// rediscover as a contradiction and "fix" back. Requires a `note`.
+    pub drawing_says: Option<String>,
     /// How a multi-section part is drawn. Presentation.
     pub sections: Vec<Section>,
     /// Which subcircuit this part belongs to: one of the board's voices, a
@@ -613,6 +626,14 @@ impl Netlist {
                     ));
                 }
             }
+            if part.drawing_says.is_some() && part.note.is_none() {
+                problems.push(format!(
+                    "{}: drawing_says records a departure from the drawing and there is no \
+                     `note` giving the reason. Contradicting the drawing is the one thing \
+                     a transcription must always justify.",
+                    part.designator
+                ));
+            }
             if part.device_inferred && !matches!(part.value, Value::Device(_)) {
                 problems.push(format!(
                     "{}: device_inferred is set and there is no `device` to be inferred",
@@ -752,6 +773,7 @@ struct RawPart {
     unread: Vec<Unread>,
     #[serde(default)]
     read: Read,
+    drawing_says: Option<String>,
     #[serde(default)]
     sections: Vec<Section>,
     group: Option<String>,
@@ -797,6 +819,7 @@ impl RawPart {
             } else {
                 Read::Partial
             },
+            drawing_says: self.drawing_says.clone(),
             sections: self.sections.clone(),
             group: self.group.clone(),
             block: self.block.clone(),
@@ -1148,6 +1171,19 @@ on = ["R144.a"]
             problems
                 .iter()
                 .any(|p| p.contains("marked unread and also on a net")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn contradicting_the_drawing_without_a_reason_is_rejected() {
+        let text = "[board]\nname = \"t\"\n\n[[parts]]\nref = \"U9\"\nkind = \"U\"\n\
+                    device = \"LM324\"\npins = [\"14\"]\n\
+                    drawing_says = \"this output is labeled pin 11\"\n\
+                    \n[[nets]]\nname = \"n\"\nport = \"output\"\non = [\"U9.14\"]\n";
+        let problems = Netlist::parse(text).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("must always justify")),
             "{problems:?}"
         );
     }

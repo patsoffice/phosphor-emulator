@@ -126,6 +126,7 @@ pub fn run(netlist: &Netlist, device: Option<&DeviceParts>) -> Vec<Finding> {
     floating_nets(netlist, &mut findings);
     unread_pins(netlist, &mut findings);
     inferred_devices(netlist, &mut findings);
+    departures(netlist, &mut findings);
     if let Some(device) = device {
         not_modeled(netlist, device, &mut findings);
         no_part(netlist, device, &mut findings);
@@ -183,6 +184,29 @@ fn unread_pins(netlist: &Netlist, findings: &mut Vec<Finding>) {
                 detail: format!("drawn but not read: {}", unread.why),
             });
         }
+    }
+}
+
+/// Places the transcription deliberately contradicts the drawing.
+///
+/// The highest-risk lines in any transcription, and the ones most likely to be
+/// "corrected" back by a later reader who rediscovers the contradiction and
+/// not the argument. There should be very few, and every one should be worth
+/// reading before trusting the file.
+fn departures(netlist: &Netlist, findings: &mut Vec<Finding>) {
+    for part in &netlist.parts {
+        let Some(drawn) = &part.drawing_says else {
+            continue;
+        };
+        findings.push(Finding {
+            lint: "departs-from-drawing",
+            severity: Severity::Explained,
+            subject: part.designator.clone(),
+            detail: match &part.note {
+                Some(note) => format!("the drawing says {drawn}. {}", first_sentence(note)),
+                None => format!("the drawing says {drawn}"),
+            },
+        });
     }
 }
 
@@ -455,6 +479,35 @@ mod tests {
             .collect();
         assert_eq!(inferred.len(), 1, "only the unlabeled one");
         assert_eq!(inferred[0].subject, "U19");
+    }
+
+    /// Contradicting the drawing is the one thing a transcription must always
+    /// justify, so the reason travels with the finding.
+    #[test]
+    fn a_departure_from_the_drawing_is_reported_with_its_reason() {
+        let netlist = "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"U9\"\nkind = \"U\"\ndevice = \"LM324\"\n\
+             device_inferred = true\npins = [\"12\", \"13\", \"14\"]\n\
+             drawing_says = \"the fourth section's output is labeled pin 11\"\n\
+             note = \"Pin 11 is the negative supply on a 14-pin quad and cannot drive.\"\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"U9.12\", \"U9.13\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"U9.14\"]\n";
+        let findings = findings_for(netlist, None);
+        let departures: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.lint == "departs-from-drawing")
+            .collect();
+        assert_eq!(departures.len(), 1);
+        assert!(
+            departures[0].detail.contains("pin 11"),
+            "{:?}",
+            departures[0]
+        );
+        assert!(
+            departures[0].detail.contains("negative supply"),
+            "the reason travels with it: {:?}",
+            departures[0]
+        );
     }
 
     #[test]

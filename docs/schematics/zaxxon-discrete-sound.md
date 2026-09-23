@@ -433,8 +433,8 @@ transistor closing the loop:
 
 ![zaxxon battleship oscillator](zaxxon-battleship-oscillator.svg)
 
-[`zaxxon-battleship-oscillator.json`](zaxxon-battleship-oscillator.json). The
-slow stage is the upper row and the fast one the lower, and the argument is in
+Drawn from the `battleship` group of
+[`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml). The argument is in
 the pins. `R85` and `R96` both arrive at their integrator's **pin 6**, the
 inverting input, not at the divider that feeds pin 5: that is what makes each
 loop reverse and it is the one thing a block diagram of this voice cannot say.
@@ -442,6 +442,16 @@ loop reverse and it is the one thing a block diagram of this voice cannot say.
 its own inverting input, so the slow stage drives a follower and nothing else.
 And `U10d`'s pin 12 sits on pin 10, the Schmitt's hysteresis node, rather than
 on pin 8.
+
+**The drawing is wrong on one pin number, and this file used to copy the error
+through.** `U9`'s fourth section has its output labeled **pin 11**. Pin 11 on a
+14-pin quad is the negative supply and cannot drive anything, and the identical
+section of the identical part `U10`, on the right half of the same sheet, is
+labeled **14**. `U9`'s other three sections sit on 1/2/3, 5/6/7 and 8/9/10
+exactly as that package does, so it is a drafting slip on one number and the
+output is pin 14. It went unnoticed for as long as the two copies were never
+held against each other, which is what a transcription that contains both makes
+cheap.
 
 | | slow (`U9`) | fast (`U10`) |
 |---|---|---|

@@ -1,194 +1,671 @@
 {
   "modules": {
-    "zaxxon battleship: two relaxation oscillators, one of which reaches nothing": {
+    "Zaxxon sound: so far: the shot voice (PC0), sheet 11, battleship": {
       "ports": {
-        "C59 -> U17 (1,2)": { "direction": "output", "bits": [40] }
+        "BATTLESHIP": {
+          "direction": "input",
+          "bits": [
+            2
+          ]
+        },
+        "SJ": {
+          "direction": "output",
+          "bits": [
+            31
+          ]
+        }
       },
       "cells": {
-        "uref": {
-          "type": "R80 2M2 / R81 220k",
-          "port_directions": { "+12V": "input", "1.091 V": "output" },
-          "connections": { "+12V": ["1"], "1.091 V": [2] },
+        "u9a": {
+          "type": "U9a ref follower",
+          "port_directions": {
+            "battleship reference (3)": "output",
+            "U9a out (1,2)": "output"
+          },
+          "connections": {
+            "battleship reference (3)": [
+              4
+            ],
+            "U9a out (1,2)": [
+              5
+            ]
+          },
           "attributes": {}
         },
-        "u9a": {
-          "type": "U9a buffer",
-          "port_directions": { "+ (3)": "input", "out (1)": "output" },
-          "connections": { "+ (3)": [2], "out (1)": [3] },
+        "u9b": {
+          "type": "U9b slow integrator",
+          "port_directions": {
+            "U9b summing node (6)": "output",
+            "U9b half (5)": "output",
+            "U9b out (7)": "output"
+          },
+          "connections": {
+            "U9b summing node (6)": [
+              6
+            ],
+            "U9b half (5)": [
+              7
+            ],
+            "U9b out (7)": [
+              9
+            ]
+          },
+          "attributes": {}
+        },
+        "u9c": {
+          "type": "U9c slow Schmitt",
+          "port_directions": {
+            "U9b out (9)": "input",
+            "U9c window (10)": "output",
+            "U9c out (8)": "output"
+          },
+          "connections": {
+            "U9b out (9)": [
+              9
+            ],
+            "U9c window (10)": [
+              10
+            ],
+            "U9c out (8)": [
+              11
+            ]
+          },
+          "attributes": {}
+        },
+        "u9d": {
+          "type": "U9d follower",
+          "port_directions": {
+            "fast reference (12)": "output",
+            "U9d out (14,13)": "output"
+          },
+          "connections": {
+            "fast reference (12)": [
+              15
+            ],
+            "U9d out (14,13)": [
+              16
+            ]
+          },
+          "attributes": {}
+        },
+        "u10a": {
+          "type": "U10a follower",
+          "port_directions": {
+            "U9d out (3)": "input",
+            "U10a out (1,2)": "output"
+          },
+          "connections": {
+            "U9d out (3)": [
+              16
+            ],
+            "U10a out (1,2)": [
+              17
+            ]
+          },
+          "attributes": {}
+        },
+        "u10b": {
+          "type": "U10b fast integrator",
+          "port_directions": {
+            "U10b summing node (6)": "output",
+            "U10b half (5)": "output",
+            "U10b out (7)": "output"
+          },
+          "connections": {
+            "U10b summing node (6)": [
+              18
+            ],
+            "U10b half (5)": [
+              19
+            ],
+            "U10b out (7)": [
+              20
+            ]
+          },
+          "attributes": {}
+        },
+        "u10c": {
+          "type": "U10c fast Schmitt",
+          "port_directions": {
+            "U10b out (9)": "input",
+            "U10c window (10)": "output",
+            "U10c out (8)": "output"
+          },
+          "connections": {
+            "U10b out (9)": [
+              20
+            ],
+            "U10c window (10)": [
+              21
+            ],
+            "U10c out (8)": [
+              22
+            ]
+          },
+          "attributes": {}
+        },
+        "u10d": {
+          "type": "U10d output follower",
+          "port_directions": {
+            "U10c window (12)": "output",
+            "U10d out (14,13)": "output"
+          },
+          "connections": {
+            "U10c window (12)": [
+              21
+            ],
+            "U10d out (14,13)": [
+              26
+            ]
+          },
+          "attributes": {}
+        },
+        "battleship_reference": {
+          "type": "R80 2.2M / R81 220k",
+          "port_directions": {
+            "+12V": "input",
+            "GND": "input",
+            "battleship reference": "output"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "GND": [
+              "0"
+            ],
+            "battleship reference": [
+              4
+            ]
+          },
           "attributes": {}
         },
         "r82": {
           "type": "R82 30k",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [3], "out": [4] },
+          "port_directions": {
+            "U9a out": "input",
+            "U9b summing node": "output"
+          },
+          "connections": {
+            "U9a out": [
+              5
+            ],
+            "U9b summing node": [
+              6
+            ]
+          },
           "attributes": {}
         },
-        "r83r84": {
+        "slow_halving_divider": {
           "type": "R83 51k / R84 51k",
-          "port_directions": { "in": "input", "0.545 V": "output" },
-          "connections": { "in": [3], "0.545 V": [5] },
-          "attributes": {}
-        },
-        "c5657": {
-          "type": "C56+C57 1u65",
-          "port_directions": { "pin 6": "input", "pin 7": "output" },
-          "connections": { "pin 6": [4], "pin 7": [6] },
-          "attributes": {}
-        },
-        "u9b": {
-          "type": "U9b integrator",
           "port_directions": {
-            "- (6)": "input",
-            "+ (5)": "input",
-            "out (7)": "output"
+            "GND": "input",
+            "U9a out": "input",
+            "U9b half": "output"
           },
-          "connections": { "- (6)": [4], "+ (5)": [5], "out (7)": [6] },
-          "attributes": {}
-        },
-        "u9c": {
-          "type": "U9c Schmitt",
-          "port_directions": {
-            "- (9)": "input",
-            "+ (10)": "input",
-            "out (8)": "output"
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U9a out": [
+              5
+            ],
+            "U9b half": [
+              7
+            ]
           },
-          "connections": { "- (9)": [6], "+ (10)": [7], "out (8)": [8] },
-          "attributes": {}
-        },
-        "r86": {
-          "type": "R86 51k",
-          "port_directions": { "+6V": "input", "out": "output" },
-          "connections": { "+6V": ["1"], "out": [7] },
-          "attributes": {}
-        },
-        "r88": {
-          "type": "R88 100k",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [8], "out": [7] },
-          "attributes": {}
-        },
-        "r89d5": {
-          "type": "R89 10k / D5",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [8], "out": [9] },
-          "attributes": {}
-        },
-        "q4": {
-          "type": "Q4 C1684 / R87 2k2",
-          "port_directions": { "B": "input", "C": "output" },
-          "connections": { "B": [9], "C": [10] },
           "attributes": {}
         },
         "r85": {
-          "type": "R85 2k2",
-          "port_directions": { "Q4 C": "input", "-> pin 6": "output" },
-          "connections": { "Q4 C": [10], "-> pin 6": [4] },
+          "type": "R85 2.2k",
+          "port_directions": {
+            "U9b summing node": "output",
+            "Q4 collector": "input"
+          },
+          "connections": {
+            "U9b summing node": [
+              6
+            ],
+            "Q4 collector": [
+              14
+            ]
+          },
+          "attributes": {}
+        },
+        "slow_integrator_cap": {
+          "type": "C56 3.3uF / C57 3.3uF",
+          "port_directions": {
+            "U9b summing node": "input",
+            "U9b out": "input"
+          },
+          "connections": {
+            "U9b summing node": [
+              6
+            ],
+            "U9b out": [
+              9
+            ]
+          },
+          "attributes": {}
+        },
+        "slow_schmitt_window": {
+          "type": "R86 51k / R88 100k",
+          "port_directions": {
+            "+6V": "input",
+            "U9c window": "output",
+            "U9c out": "input"
+          },
+          "connections": {
+            "+6V": [
+              "1"
+            ],
+            "U9c window": [
+              10
+            ],
+            "U9c out": [
+              11
+            ]
+          },
+          "attributes": {}
+        },
+        "r89": {
+          "type": "R89 10k",
+          "port_directions": {
+            "U9c out": "input",
+            "R89/D5 junction": "output"
+          },
+          "connections": {
+            "U9c out": [
+              11
+            ],
+            "R89/D5 junction": [
+              12
+            ]
+          },
+          "attributes": {}
+        },
+        "d5": {
+          "type": "D5",
+          "port_directions": {
+            "R89/D5 junction": "input",
+            "Q4 base": "output"
+          },
+          "connections": {
+            "R89/D5 junction": [
+              12
+            ],
+            "Q4 base": [
+              13
+            ]
+          },
+          "attributes": {}
+        },
+        "q4": {
+          "type": "Q4 C1684",
+          "port_directions": {
+            "GND (e)": "input",
+            "Q4 base (b)": "input",
+            "Q4 collector (c)": "output"
+          },
+          "connections": {
+            "GND (e)": [
+              "0"
+            ],
+            "Q4 base (b)": [
+              13
+            ],
+            "Q4 collector (c)": [
+              14
+            ]
+          },
+          "attributes": {}
+        },
+        "r87": {
+          "type": "R87 2.2k",
+          "port_directions": {
+            "GND": "input",
+            "Q4 base": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "Q4 base": [
+              13
+            ]
+          },
+          "attributes": {}
+        },
+        "fast_reference_divider": {
+          "type": "R90 120k / R91 100k",
+          "port_directions": {
+            "GND": "input",
+            "U9a out": "input",
+            "fast reference": "output"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U9a out": [
+              5
+            ],
+            "fast reference": [
+              15
+            ]
+          },
           "attributes": {}
         },
         "r92": {
           "type": "R92 30k",
-          "port_directions": { "U9 (7)": "input", "U10 (1)": "output" },
-          "connections": { "U9 (7)": [6], "U10 (1)": [21] },
-          "attributes": {}
-        },
-        "r90r91": {
-          "type": "R90 120k/R91 100k",
-          "port_directions": { "in": "input", "0.496 V": "output" },
-          "connections": { "in": [3], "0.496 V": [20] },
-          "attributes": {}
-        },
-        "u9d": {
-          "type": "U9d buffer",
-          "port_directions": { "+ (12)": "input", "out (11)": "output" },
-          "connections": { "+ (12)": [20], "out (11)": [22] },
-          "attributes": {}
-        },
-        "u10a": {
-          "type": "U10a",
           "port_directions": {
-            "+ (3)": "input",
-            "- (2) = out": "input",
-            "out (1)": "output"
+            "U9b out": "input",
+            "U10a out": "input"
           },
           "connections": {
-            "+ (3)": [22],
-            "- (2) = out": [21],
-            "out (1)": [21]
+            "U9b out": [
+              9
+            ],
+            "U10a out": [
+              17
+            ]
           },
           "attributes": {}
         },
         "r93": {
           "type": "R93 30k",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [21], "out": [23] },
+          "port_directions": {
+            "U10a out": "input",
+            "U10b summing node": "output"
+          },
+          "connections": {
+            "U10a out": [
+              17
+            ],
+            "U10b summing node": [
+              18
+            ]
+          },
           "attributes": {}
         },
-        "r94r95": {
+        "fast_halving_divider": {
           "type": "R94 51k / R95 51k",
-          "port_directions": { "in": "input", "0.248 V": "output" },
-          "connections": { "in": [21], "0.248 V": [24] },
-          "attributes": {}
-        },
-        "c58": {
-          "type": "C58 10n",
-          "port_directions": { "pin 6": "input", "pin 7": "output" },
-          "connections": { "pin 6": [23], "pin 7": [25] },
-          "attributes": {}
-        },
-        "u10b": {
-          "type": "U10b integrator",
           "port_directions": {
-            "- (6)": "input",
-            "+ (5)": "input",
-            "out (7)": "output"
+            "GND": "input",
+            "U10a out": "input",
+            "U10b half": "output"
           },
-          "connections": { "- (6)": [23], "+ (5)": [24], "out (7)": [25] },
-          "attributes": {}
-        },
-        "u10c": {
-          "type": "U10c Schmitt",
-          "port_directions": {
-            "- (9)": "input",
-            "+ (10)": "input",
-            "out (8)": "output"
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U10a out": [
+              17
+            ],
+            "U10b half": [
+              19
+            ]
           },
-          "connections": { "- (9)": [25], "+ (10)": [26], "out (8)": [27] },
-          "attributes": {}
-        },
-        "r98": {
-          "type": "R98 51k",
-          "port_directions": { "+6V": "input", "out": "output" },
-          "connections": { "+6V": ["1"], "out": [26] },
-          "attributes": {}
-        },
-        "r99": {
-          "type": "R99 100k",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [27], "out": [26] },
-          "attributes": {}
-        },
-        "r100d6": {
-          "type": "R100 10k / D6",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [27], "out": [28] },
-          "attributes": {}
-        },
-        "q5": {
-          "type": "Q5 C1684 / R97 2k2",
-          "port_directions": { "B": "input", "C": "output" },
-          "connections": { "B": [28], "C": [29] },
           "attributes": {}
         },
         "r96": {
           "type": "R96 15k",
-          "port_directions": { "Q5 C": "input", "-> pin 6": "output" },
-          "connections": { "Q5 C": [29], "-> pin 6": [23] },
+          "port_directions": {
+            "U10b summing node": "output",
+            "Q5 collector": "input"
+          },
+          "connections": {
+            "U10b summing node": [
+              18
+            ],
+            "Q5 collector": [
+              25
+            ]
+          },
           "attributes": {}
         },
-        "u10d": {
-          "type": "U10d",
-          "port_directions": { "+ (12) = pin 10": "input", "out (14)": "output" },
-          "connections": { "+ (12) = pin 10": [26], "out (14)": [40] },
+        "c58": {
+          "type": "C58 10nF",
+          "port_directions": {
+            "U10b summing node": "input",
+            "U10b out": "input"
+          },
+          "connections": {
+            "U10b summing node": [
+              18
+            ],
+            "U10b out": [
+              20
+            ]
+          },
+          "attributes": {}
+        },
+        "fast_schmitt_window": {
+          "type": "R98 51k / R99 100k",
+          "port_directions": {
+            "+6V": "input",
+            "U10c window": "output",
+            "U10c out": "input"
+          },
+          "connections": {
+            "+6V": [
+              "1"
+            ],
+            "U10c window": [
+              21
+            ],
+            "U10c out": [
+              22
+            ]
+          },
+          "attributes": {}
+        },
+        "r100": {
+          "type": "R100 10k",
+          "port_directions": {
+            "U10c out": "input",
+            "R100/D6 junction": "output"
+          },
+          "connections": {
+            "U10c out": [
+              22
+            ],
+            "R100/D6 junction": [
+              23
+            ]
+          },
+          "attributes": {}
+        },
+        "d6": {
+          "type": "D6",
+          "port_directions": {
+            "R100/D6 junction": "input",
+            "Q5 base": "output"
+          },
+          "connections": {
+            "R100/D6 junction": [
+              23
+            ],
+            "Q5 base": [
+              24
+            ]
+          },
+          "attributes": {}
+        },
+        "q5": {
+          "type": "Q5 C1684",
+          "port_directions": {
+            "GND (e)": "input",
+            "Q5 base (b)": "input",
+            "Q5 collector (c)": "output"
+          },
+          "connections": {
+            "GND (e)": [
+              "0"
+            ],
+            "Q5 base (b)": [
+              24
+            ],
+            "Q5 collector (c)": [
+              25
+            ]
+          },
+          "attributes": {}
+        },
+        "r97": {
+          "type": "R97 2.2k",
+          "port_directions": {
+            "GND": "input",
+            "Q5 base": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "Q5 base": [
+              24
+            ]
+          },
+          "attributes": {}
+        },
+        "c59": {
+          "type": "C59 2.2uF",
+          "port_directions": {
+            "U10d out": "input",
+            "U17 in": "output"
+          },
+          "connections": {
+            "U10d out": [
+              26
+            ],
+            "U17 in": [
+              27
+            ]
+          },
+          "attributes": {}
+        },
+        "u30c": {
+          "type": "U30c gate inverter",
+          "port_directions": {
+            "BATTLESHIP (5)": "input",
+            "battleship gate (6)": "output"
+          },
+          "connections": {
+            "BATTLESHIP (5)": [
+              2
+            ],
+            "battleship gate (6)": [
+              3
+            ]
+          },
+          "attributes": {}
+        },
+        "r101": {
+          "type": "R101 10k",
+          "port_directions": {
+            "+12V": "input",
+            "battleship gate": "input"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "battleship gate": [
+              3
+            ]
+          },
+          "attributes": {}
+        },
+        "u17a": {
+          "type": "U17a gate",
+          "port_directions": {
+            "battleship gate (13)": "input",
+            "U17 in (1)": "input",
+            "battleship leg (2)": "output"
+          },
+          "connections": {
+            "battleship gate (13)": [
+              3
+            ],
+            "U17 in (1)": [
+              27
+            ],
+            "battleship leg (2)": [
+              28
+            ]
+          },
+          "attributes": {}
+        },
+        "leg_bias": {
+          "type": "R189 51k / R190 51k",
+          "port_directions": {
+            "+12V": "input",
+            "GND": "input",
+            "battleship leg": "input"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "GND": [
+              "0"
+            ],
+            "battleship leg": [
+              28
+            ]
+          },
+          "attributes": {}
+        },
+        "leg_attenuator": {
+          "type": "R191 47k / R192 4.7k",
+          "port_directions": {
+            "GND": "input",
+            "battleship leg": "input",
+            "battleship attenuated": "output"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "battleship leg": [
+              28
+            ],
+            "battleship attenuated": [
+              29
+            ]
+          },
+          "attributes": {}
+        },
+        "c19": {
+          "type": "C19 1uF",
+          "port_directions": {
+            "battleship attenuated": "input",
+            "C19/R193 junction": "output"
+          },
+          "connections": {
+            "battleship attenuated": [
+              29
+            ],
+            "C19/R193 junction": [
+              30
+            ]
+          },
+          "attributes": {}
+        },
+        "r193": {
+          "type": "R193 51k",
+          "port_directions": {
+            "C19/R193 junction": "input",
+            "SJ": "output"
+          },
+          "connections": {
+            "C19/R193 junction": [
+              30
+            ],
+            "SJ": [
+              31
+            ]
+          },
           "attributes": {}
         }
       }

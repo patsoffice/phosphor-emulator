@@ -69,7 +69,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "so far: the shot voice (PC0), sheet 11"
+excerpt = "so far: the shot voice (PC0) and the battleship (PB7), both on sheet 11"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -539,12 +539,12 @@ note = "U21's B and clear are both strapped high, so the one-shot is armed and n
 [[nets]]
 name = "+6V"
 rail = true
-on = ["U19.3", "R161.a"]
+on = ["U19.3", "R161.a", "R86.a", "R98.a"]
 
 [[nets]]
 name = "+12V"
 rail = true
-on = ["R145.a", "R151.a", "U18.8", "U18.4"]
+on = ["R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a"]
 
 [[nets]]
 name = "GND"
@@ -552,6 +552,9 @@ rail = true
 on = [
   "R148.b", "C89.b", "U18.1", "C90.b", "R155.b", "C91.b",
   "R158.b", "Q7.e", "R160.b", "R165.b", "C94.b", "R204.b",
+  "R81.b", "R84.b", "R87.b", "Q4.e",
+  "R91.b", "R95.b", "R97.b", "Q5.e",
+  "R190.b", "R192.b",
 ]
 
 [[nets]]
@@ -691,3 +694,533 @@ name = "shot leg"
 port = "output"
 on = ["R203.b", "R204.a"]
 note = "on to C23 and the 51k summing leg R205, which are outside this excerpt."
+
+# ===========================================================================
+# THE BATTLESHIP (sheet 11, left half into right half).
+#
+# Two relaxation oscillators of the same shape as the shot's, built out of one
+# quad op-amp each. The slow one on U9 runs at a few hertz; the fast one on
+# U10 is the audible voice. The slow one's output reaches nothing, which is a
+# reading rather than a gap: see the note on `U10a out`.
+#
+# Every stage here repeats a pattern the shot also uses, which is the argument
+# for transcribing both: a reference divider, a halving divider into the
+# integrator's pin 5, a sink resistor onto pin 6, a Schmitt around the next
+# section, and a transistor switch driven through a series diode with a base
+# pulldown. Four copies on one board, with only the reference changing.
+# ===========================================================================
+
+[[parts]]
+group = "battleship"
+ref = "U9"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+read = "partial"
+drawing_says = "the fourth section's output is labeled pin 11"
+note = """
+THE DRAWING IS WRONG ON ONE PIN and this file departs from it. U9's fourth \
+section is drawn with pin 12 on the non-inverting input, pin 13 on the \
+inverting input and its output labeled 11. Pin 11 on a 14-pin quad is the \
+negative supply and cannot drive anything. The identical section of the \
+identical part U10, on the right half of the same sheet, is labeled 12, 13 \
+and 14, and U9's other three sections sit on 1/2/3, 5/6/7 and 8/9/10 exactly \
+as that package does. So this is a drafting slip on a single pin number and \
+the output is pin 14. The previous transcription copied the 11 through \
+without noticing that the two parts disagreed.
+
+The part number is not printed. See the note on U19."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "ref follower"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "slow integrator"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "slow Schmitt"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "follower"
+
+[[parts]]
+group = "battleship"
+ref = "U10"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+read = "partial"
+note = "The part number is not printed. See the note on U19."
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "follower"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "fast integrator"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "fast Schmitt"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "output follower"
+
+[[parts]]
+group = "battleship"
+ref = "R80"
+kind = "R"
+mohms = 2.2
+block = "battleship reference"
+
+[[parts]]
+group = "battleship"
+ref = "R81"
+kind = "R"
+kohms = 220
+block = "battleship reference"
+
+[[parts]]
+group = "battleship"
+ref = "R82"
+kind = "R"
+kohms = 30
+
+[[parts]]
+group = "battleship"
+ref = "R83"
+kind = "R"
+kohms = 51
+block = "slow halving divider"
+
+[[parts]]
+group = "battleship"
+ref = "R84"
+kind = "R"
+kohms = 51
+block = "slow halving divider"
+
+[[parts]]
+group = "battleship"
+ref = "R85"
+kind = "R"
+kohms = 2.2
+note = """
+The slow stage's sink, from Q4's collector onto U9 section B's pin 6. The same \
+junction the shot's R159 makes, and the reason this is an oscillator rather \
+than a filter."""
+
+[[parts]]
+group = "battleship"
+ref = "C56"
+kind = "C"
+uf = 3.3
+block = "slow integrator cap"
+note = """
+C56 and C57 are in series BACK TO BACK, positive plates on the outside, which \
+makes a non-polarized 1.65 uF out of two electrolytics. The integrator's node \
+swings both ways, so a single polarized part would be wrong here. Both are \
+3.3 uF 16 V."""
+
+[[parts]]
+group = "battleship"
+ref = "C57"
+kind = "C"
+uf = 3.3
+block = "slow integrator cap"
+
+[[parts]]
+group = "battleship"
+ref = "R86"
+kind = "R"
+kohms = 51
+block = "slow Schmitt window"
+
+[[parts]]
+group = "battleship"
+ref = "R88"
+kind = "R"
+kohms = 100
+block = "slow Schmitt window"
+
+[[parts]]
+group = "battleship"
+ref = "R89"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "battleship"
+ref = "D5"
+kind = "D"
+note = "Anode toward R89, cathode on Q4's base: the shot's D11 again."
+
+[[parts]]
+group = "battleship"
+ref = "Q4"
+kind = "Q"
+device = "C1684"
+out = ["c"]
+note = "Drawn rotated: horizontal lead the base, top the collector, emitter grounded."
+
+[[parts]]
+group = "battleship"
+ref = "R87"
+kind = "R"
+kohms = 2.2
+note = "Q4's base pulldown, the shot's R160 again."
+
+[[parts]]
+group = "battleship"
+ref = "R90"
+kind = "R"
+kohms = 120
+block = "fast reference divider"
+
+[[parts]]
+group = "battleship"
+ref = "R91"
+kind = "R"
+kohms = 100
+block = "fast reference divider"
+
+[[parts]]
+group = "battleship"
+ref = "R92"
+kind = "R"
+kohms = 30
+note = """
+THE PART THAT REACHES NOTHING. It leaves U9 section B's output and lands on \
+the node where U10 section A's output, its own inverting input, R93 and R94 \
+all meet. That section is strapped output to inverting input, so it is a unity \
+follower of the bias on its pin 3 and R92 can only load it. The slow \
+oscillator therefore does not modulate the fast one, and has no other output \
+anywhere on the sheet. Traced three times. Either a drawing error or a \
+vestigial part, but either way the drawing gives no modulation path."""
+
+[[parts]]
+group = "battleship"
+ref = "R93"
+kind = "R"
+kohms = 30
+
+[[parts]]
+group = "battleship"
+ref = "R94"
+kind = "R"
+kohms = 51
+block = "fast halving divider"
+
+[[parts]]
+group = "battleship"
+ref = "R95"
+kind = "R"
+kohms = 51
+block = "fast halving divider"
+
+[[parts]]
+group = "battleship"
+ref = "R96"
+kind = "R"
+kohms = 15
+note = """
+The fast stage's sink, onto U10 section B's pin 6, with the pin-5 divider \
+crossing that vertical and no dot. Read as pin 5 it moves this voice by a \
+factor of four, which is the error that cost a pass here and on the laser."""
+
+[[parts]]
+group = "battleship"
+ref = "C58"
+kind = "C"
+uf = 0.01
+
+[[parts]]
+group = "battleship"
+ref = "R98"
+kind = "R"
+kohms = 51
+block = "fast Schmitt window"
+
+[[parts]]
+group = "battleship"
+ref = "R99"
+kind = "R"
+kohms = 100
+block = "fast Schmitt window"
+
+[[parts]]
+group = "battleship"
+ref = "R100"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "battleship"
+ref = "D6"
+kind = "D"
+note = "Anode toward R100, cathode on Q5's base."
+
+[[parts]]
+group = "battleship"
+ref = "Q5"
+kind = "Q"
+device = "C1684"
+out = ["c"]
+
+[[parts]]
+group = "battleship"
+ref = "R97"
+kind = "R"
+kohms = 2.2
+note = "Q5's base pulldown."
+
+[[parts]]
+group = "battleship"
+ref = "C59"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "battleship"
+ref = "U30"
+kind = "U"
+device = "7406"
+pins = ["5", "6"]
+out = ["6"]
+read = "partial"
+note = """
+One inverter of a hex open-collector part shared across several gates on these \
+sheets; only the battleship's section is in this group. Open collector is why \
+R101 is there."""
+
+[[parts.sections]]
+name = "c"
+pins = ["5", "6"]
+role = "gate inverter"
+
+[[parts]]
+group = "battleship"
+ref = "R101"
+kind = "R"
+kohms = 10
+note = "Pull-up for U30's open-collector output."
+
+[[parts]]
+group = "battleship"
+ref = "U17"
+kind = "U"
+device = "4016B"
+pins = ["1", "2", "13"]
+out = ["2"]
+read = "partial"
+note = """
+One switch of a quad bilateral part. Pin 13 is this switch's control, driven \
+by the inverted BATTLESHIP gate, so the voice passes while the PPI bit is \
+low. The package's other three switches gate other voices and are not in this \
+group."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "13"]
+role = "gate"
+
+[[parts]]
+group = "battleship"
+ref = "R189"
+kind = "R"
+kohms = 51
+block = "leg bias"
+
+[[parts]]
+group = "battleship"
+ref = "R190"
+kind = "R"
+kohms = 51
+block = "leg bias"
+
+[[parts]]
+group = "battleship"
+ref = "R191"
+kind = "R"
+kohms = 47
+block = "leg attenuator"
+
+[[parts]]
+group = "battleship"
+ref = "R192"
+kind = "R"
+kohms = 4.7
+block = "leg attenuator"
+
+[[parts]]
+group = "battleship"
+ref = "C19"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "battleship"
+ref = "R193"
+kind = "R"
+kohms = 51
+note = "This voice's summing leg. All eleven legs on this board are 51k."
+
+# --- battleship nets ---
+
+[[nets]]
+name = "BATTLESHIP"
+port = "input"
+on = ["U30.5"]
+note = "from the PPI on sheet 12, active low."
+
+[[nets]]
+name = "battleship gate"
+on = ["U30.6", "R101.b", "U17.13"]
+
+[[nets]]
+name = "battleship reference"
+on = ["R80.b", "R81.a", "U9.3"]
+
+[[nets]]
+name = "U9a out"
+on = ["U9.1", "U9.2", "R82.a", "R83.a", "R90.a"]
+note = "strapped output to inverting input, so a unity follower of the reference."
+
+[[nets]]
+name = "U9b summing node"
+on = ["R82.b", "C56.a", "R85.b", "U9.6"]
+
+[[nets]]
+name = "U9b half"
+on = ["R83.b", "R84.a", "U9.5"]
+
+[[nets]]
+name = "C56/C57 junction"
+on = ["C56.b", "C57.a"]
+note = "the two negative plates, facing each other."
+
+[[nets]]
+name = "U9b out"
+on = ["U9.7", "C57.b", "U9.9", "R92.a"]
+
+[[nets]]
+name = "U9c window"
+on = ["R86.b", "R88.a", "U9.10"]
+
+[[nets]]
+name = "U9c out"
+on = ["U9.8", "R88.b", "R89.a"]
+
+[[nets]]
+name = "R89/D5 junction"
+on = ["R89.b", "D5.a"]
+
+[[nets]]
+name = "Q4 base"
+on = ["D5.k", "Q4.b", "R87.a"]
+
+[[nets]]
+name = "Q4 collector"
+on = ["Q4.c", "R85.a"]
+
+[[nets]]
+name = "fast reference"
+on = ["R90.b", "R91.a", "U9.12"]
+
+[[nets]]
+name = "U9d out"
+on = ["U9.14", "U9.13", "U10.3"]
+note = "strapped output to inverting input: a follower of the fast reference."
+
+[[nets]]
+name = "U10a out"
+on = ["U10.1", "U10.2", "R92.b", "R93.a", "R94.a"]
+note = """
+Where the slow oscillator's R92 arrives, and the reason it modulates nothing. \
+U10 section A is strapped output to inverting input, so it is a unity follower \
+of the bias on its pin 3 and R92 can only load it."""
+
+[[nets]]
+name = "U10b summing node"
+on = ["R93.b", "C58.a", "R96.b", "U10.6"]
+note = "Pin 6, not pin 5. R96 crosses the pin-5 divider's vertical with no dot."
+
+[[nets]]
+name = "U10b half"
+on = ["R94.b", "R95.a", "U10.5"]
+
+[[nets]]
+name = "U10b out"
+on = ["U10.7", "C58.b", "U10.9"]
+
+[[nets]]
+name = "U10c window"
+on = ["R98.b", "R99.a", "U10.10", "U10.12"]
+note = """
+U10 section D taps the Schmitt's hysteresis node here rather than its output \
+on pin 8, which is one crossing lower on the sheet. That node swings by the \
+window rather than by the whole output span, so the voice reaching the switch \
+is much smaller than the op-amp's swing."""
+
+[[nets]]
+name = "U10c out"
+on = ["U10.8", "R99.b", "R100.a"]
+
+[[nets]]
+name = "R100/D6 junction"
+on = ["R100.b", "D6.a"]
+
+[[nets]]
+name = "Q5 base"
+on = ["D6.k", "Q5.b", "R97.a"]
+
+[[nets]]
+name = "Q5 collector"
+on = ["Q5.c", "R96.a"]
+
+[[nets]]
+name = "U10d out"
+on = ["U10.14", "U10.13", "C59.a"]
+
+[[nets]]
+name = "U17 in"
+on = ["C59.b", "U17.1"]
+
+[[nets]]
+name = "battleship leg"
+on = ["U17.2", "R189.b", "R190.a", "R191.a"]
+
+[[nets]]
+name = "battleship attenuated"
+on = ["R191.b", "R192.a", "C19.a"]
+
+[[nets]]
+name = "C19/R193 junction"
+on = ["C19.b", "R193.a"]
+
+[[nets]]
+name = "SJ"
+port = "output"
+on = ["R193.b"]
+note = """
+The board's one summing junction, where all eleven legs meet. Only the \
+battleship's is transcribed so far, so this reads as a port; it becomes an \
+interior net once the mix is in."""
