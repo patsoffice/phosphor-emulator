@@ -125,6 +125,7 @@ pub fn run(netlist: &Netlist, device: Option<&DeviceParts>) -> Vec<Finding> {
     let mut findings = Vec::new();
     floating_nets(netlist, &mut findings);
     unread_pins(netlist, &mut findings);
+    inferred_devices(netlist, &mut findings);
     if let Some(device) = device {
         not_modeled(netlist, device, &mut findings);
         no_part(netlist, device, &mut findings);
@@ -182,6 +183,31 @@ fn unread_pins(netlist: &Netlist, findings: &mut Vec<Finding>) {
                 detail: format!("drawn but not read: {}", unread.why),
             });
         }
+    }
+}
+
+/// Part numbers that were reasoned about rather than read.
+///
+/// Decision 7 asks for the line between "we genuinely do not know" and "we did
+/// not check" to be visible, and this is the first place it bites: every
+/// op-amp on these sheets is an unlabeled 14-pin quad, and the output swing
+/// that sets the shot's whole pitch range is a property of the part class
+/// somebody picked. That is a good inference resting on nothing printed, and a
+/// reader deciding whether to trust a rate needs to see it.
+fn inferred_devices(netlist: &Netlist, findings: &mut Vec<Finding>) {
+    for part in &netlist.parts {
+        if !part.device_inferred {
+            continue;
+        }
+        findings.push(Finding {
+            lint: "inferred-device",
+            severity: Severity::Observation,
+            subject: part.designator.clone(),
+            detail: format!(
+                "{} is not printed on the drawing; it is inferred from the package",
+                part.value.label()
+            ),
+        });
     }
 }
 
@@ -409,6 +435,26 @@ mod tests {
         assert_eq!(no_part.len(), 1);
         assert_eq!(no_part[0].subject, "R99");
         assert_eq!(no_part[0].severity, Severity::Problem);
+    }
+
+    /// A part number that was reasoned about has to look different from one
+    /// that was read, or the swing limits a voice's pitch rests on look like
+    /// facts off the drawing.
+    #[test]
+    fn an_inferred_part_number_is_reported_as_an_inference() {
+        let netlist = "[board]\nname = \"t\"\n\n\
+             [[parts]]\nref = \"U19\"\nkind = \"U\"\ndevice = \"LM324\"\n\
+             device_inferred = true\npins = [\"1\", \"2\"]\n\n\
+             [[parts]]\nref = \"U18\"\nkind = \"U\"\ndevice = \"555\"\npins = [\"3\"]\n\n\
+             [[nets]]\nname = \"a\"\nport = \"input\"\non = [\"U19.1\", \"U18.3\"]\n\n\
+             [[nets]]\nname = \"b\"\nport = \"output\"\non = [\"U19.2\"]\n";
+        let findings = findings_for(netlist, None);
+        let inferred: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.lint == "inferred-device")
+            .collect();
+        assert_eq!(inferred.len(), 1, "only the unlabeled one");
+        assert_eq!(inferred[0].subject, "U19");
     }
 
     #[test]

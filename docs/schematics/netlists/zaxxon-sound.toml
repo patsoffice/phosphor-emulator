@@ -201,13 +201,18 @@ group = "shot"
 ref = "U20"
 kind = "U"
 device = "LM324"
+device_inferred = true
 pins = ["1", "2", "3"]
 out = ["1"]
 read = "partial"
 note = """
 Section A only, strapped output to inverting input, so it is a unity follower \
 of node Y driving the MB4391's control pin. The package's other three sections \
-and its supply pins are elsewhere on the sheet and are not in this excerpt."""
+and its supply pins are elsewhere on the sheet and are not in this excerpt.
+
+The part number is NOT printed on the drawing. Every op-amp on these two sheets \
+is an unlabeled 14-pin quad wired on pins 1/2/3, 5/6/7, 8/9/10 and 12/13/14, \
+running from +12 V and ground, and LM324 is the 1982 part for that job."""
 
 [[parts.sections]]
 name = "a"
@@ -227,14 +232,21 @@ group = "shot"
 ref = "U19"
 kind = "U"
 device = "LM324"
+device_inferred = true
 pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
 out = ["1", "7", "8", "14"]
 read = "partial"
 note = """
-The supply pins are not drawn in this region of the sheet, so the output \
-swing this voice's rate depends on is an assumption about the part class \
-rather than a reading. That is the single unread fact with the most leverage \
-on this voice."""
+The part number is NOT printed on the drawing, and this is the inference with \
+the most leverage on the whole board. Every op-amp on these two sheets is an \
+unlabeled 14-pin quad wired on pins 1/2/3, 5/6/7, 8/9/10 and 12/13/14 from \
++12 V and ground, and LM324 is the 1982 part for that job: an internal sink \
+pulls the output to within tens of millivolts of ground while the source side \
+stops about 1.5 V short of the positive rail. The shot's tail comes from that \
+low limit alone and its head from the high one, so the voice's entire pitch \
+range rests on a part class rather than on anything printed.
+
+The supply pins are also not drawn in this region of the sheet."""
 
 [[parts.sections]]
 name = "d"

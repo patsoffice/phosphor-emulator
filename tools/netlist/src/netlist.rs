@@ -241,6 +241,18 @@ pub struct Part {
     pub kind: Kind,
     /// The value, in SI base units, or the part number.
     pub value: Value,
+    /// Set when the part number is inferred from the package and the era
+    /// rather than printed on the drawing.
+    ///
+    /// Every op-amp on these two sheets is an unlabeled 14-pin quad, and
+    /// `LM324` is the 1982 part for that job. That is a good inference and it
+    /// is still an inference: the swing limits the shot's whole pitch range
+    /// rests on come from the part class, so a reader has to be able to tell
+    /// which parts were read off the drawing and which were reasoned about.
+    /// Decision 7 asks for exactly this line, between "we genuinely do not
+    /// know" and "we did not check", and a part number that looks read when it
+    /// was guessed erases it.
+    pub device_inferred: bool,
     /// The pins the symbol draws, in the order the drawing reads them.
     pub pins: Vec<String>,
     /// The pins that drive rather than listen. Presentation for the generated
@@ -601,6 +613,12 @@ impl Netlist {
                     ));
                 }
             }
+            if part.device_inferred && !matches!(part.value, Value::Device(_)) {
+                problems.push(format!(
+                    "{}: device_inferred is set and there is no `device` to be inferred",
+                    part.designator
+                ));
+            }
             if !part.sections.is_empty() && part.block.is_some() {
                 problems.push(format!(
                     "{}: has sections and a block. A section is already a box in the \
@@ -710,6 +728,8 @@ struct RawPart {
     designator: String,
     kind: Kind,
     device: Option<String>,
+    #[serde(default)]
+    device_inferred: bool,
 
     ohms: Option<f64>,
     kohms: Option<f64>,
@@ -765,6 +785,7 @@ impl RawPart {
             designator: self.designator.clone(),
             kind: self.kind,
             value,
+            device_inferred: self.device_inferred,
             pins,
             outputs: self.out.clone(),
             nc: self.nc.clone(),
