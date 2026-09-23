@@ -114,20 +114,37 @@ thrust is also darker thrust.
 > leg, and, much larger, `R22` and `R26`'s 48.2 kOhm path to +5 V loading the
 > same node. Solving all eight settings:
 >
-> | throttle | legs closed | corner, solved | corner, above |
-> |---|---|---|---|
-> | 1 | `R18` | **13.9 Hz** | 10.6 Hz |
-> | 2 | `R20` | 22.5 Hz | |
-> | 3 | `R18`, `R20` | 33.1 Hz | |
-> | 4 | `R19` | 43.3 Hz | |
-> | 5 | `R19`, `R18` | 53.8 Hz | |
-> | 6 | `R19`, `R20` | 62.5 Hz | |
-> | 7 | all three | **73.1 Hz** | 71 Hz |
+> | throttle | legs closed | R against `C15` | corner | DC gain | at 89.5 Hz | linear would be |
+> |---|---|---|---|---|---|---|
+> | 1 | `R18` | 11487 | **13.9 Hz** | 0.762 | 0.193 | 0.143 |
+> | 2 | `R20` | 7066 | 22.5 Hz | 0.853 | 0.345 | 0.286 |
+> | 3 | `R18`, `R20` | 4812 | 33.1 Hz | 0.900 | 0.517 | 0.429 |
+> | 4 | `R19` | 3676 | 43.3 Hz | 0.924 | 0.666 | 0.571 |
+> | 5 | `R19`, `R18` | 2956 | 53.8 Hz | 0.939 | 0.801 | 0.714 |
+> | 6 | `R19`, `R20` | 2546 | 62.5 Hz | 0.947 | 0.898 | 0.857 |
+> | 7 | all three | 2178 | **73.1 Hz** | 0.955 | 1.000 | 1.000 |
 >
-> The error is 3 percent at full throttle and **31 percent at throttle 1**,
-> because the load matters more as the switched resistance rises. It runs the
-> same direction as the finding rather than against it: the spectrum moves with
-> the volume even more than this section says.
+> The corner error against the figures above is 3 percent at full throttle and
+> **31 percent at throttle 1**, because the load matters more as the switched
+> resistance rises. It runs the same direction as the finding rather than
+> against it: the spectrum moves with the volume even more than this section
+> says.
+>
+> **The last three columns are what a model needs**, and they replace two
+> things at once. `llander_sound.rs` builds this stage as
+> `rc_low_pass("NOISE_RC", noise, 2_247.0, 1e-6)` followed by a linear multiply
+> by `throttle/7`. The resistance column replaces the 2247, which is right at
+> one setting of eight, and the DC-gain column replaces the multiply, which is
+> right at two. Tracked as `phosphor-emulator-b72s`.
+>
+> **The op-amp being open in the solver does not carry this.** The band-pass
+> input is a virtual ground in the real circuit and an open pin in the model,
+> which changes the load on the common node through `R22`. Holding `R7` pin 6
+> at +5 V to model the virtual ground moves the corner from 11.4867 ms to
+> 11.4774 ms at throttle 1 and from 2.1782 ms to 2.1783 ms at full: under a
+> tenth of a percent either way, because `R26`'s 1.2 kOhm is an order below
+> `C20`'s impedance in this band and dominates the parallel. The result is
+> about the resistors, not about the modeling choice.
 >
 > **The volume law itself is confirmed.** Weighted at the band center from the
 > solved DC gain and corner, throttle 1 lands at **0.193** of full against the
@@ -283,6 +300,50 @@ this document did not have:
 - **`R7` section 1, on pins 1, 2 and 3, is not drawn at all.** What the board
   does with the fourth amplifier is still unread, but "not drawn" is now
   recorded as a statement about the drawing rather than as a silence.
+
+### The two noise legs do not have a ratio, because they are not both flat
+
+`phosphor-emulator-b72s` asks to resolve a disagreement about the mixer
+balance: the reference netlist gives both legs the same `R31`/`R28` and
+separates them with a 1000-against-600 level, where this drawing has
+`R31`/`R21` against `R31`/`R28`. **Transcribed, the question turns out to be
+the wrong shape.** Neither leg is a flat gain, and they scarcely overlap:
+
+| | path from the common node | midband | at 89.5 Hz | at 5 kHz |
+|---|---|---|---|---|
+| thrust | band-pass, then `R28` 6.8 k into `R31` | 4.22 | **4.22** | 0.01 |
+| explosion | `R21` 1.5 k and `C91` into `R31` | 6.67 above 2.3 kHz | **0.26** | 6.08 |
+
+The thrust leg is a band-pass at 89.5 Hz with Q 7.6; the explosion leg is a
+high-pass cornering at `1/(2*pi*R21*C91)` = **2258 Hz**. At the thrust's own
+center the explosion is sixteen times down, and at 5 kHz the explosion is some
+six hundred times up. A single balance number describes neither, so "their
+ratio" has no value to resolve and the two parameterizations are not comparing
+the same quantity.
+
+The band-pass's midband gain is `R27/(2*R22)` = **2.87** referred to the common
+node, which is the same 115 the device carries referred to the `R22`/`R26`
+Thevenin source, the two differing by that divider's 0.0249. **That figure is
+hand arithmetic from the transcribed values and not a solver result**: a
+multiple-feedback band-pass is an op-amp circuit, and the passive solver models
+every op-amp as open. It is the kind of number rung 6 of
+[the transcription design](../designs/schematic-transcription.md) exists to
+make an output rather than a formula.
+
+### The board still does not clip, and the margin is half what this file says
+
+The section below argues the board cannot clip from "roughly 20 V available
+from an LM324 biased at +5 V on a +22 V rail". **The 20 V is the total range
+and not the usable swing.** Biased at +5 V, an output reaches ground 5 V below
+and the positive limit 15 V above, so a symmetric signal is bounded by the
+negative side at **10 V peak to peak**, not 20.
+
+The conclusion survives with room to spare: 11 V peak to peak differential is
+5.5 V on each output, which is 2.25 V to 7.75 V about the bias and clears both
+limits. But the margin is about 1.8 to 1 rather than 3.6 to 1, and it is the
+ground rail that binds. The solver confirms the half of this that is a
+reading: every `R7` output sits at exactly +5 V at DC, because all three
+sections are DC-coupled to the +5 V their non-inverting inputs sit on.
 
 ## Confidence
 
