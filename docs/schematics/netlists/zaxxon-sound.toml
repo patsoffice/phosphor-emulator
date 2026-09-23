@@ -69,7 +69,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "so far, all on sheet 11: the shot and the battleship in full, and the four MB4391 VCA channels with their mix legs (small explosion, medium explosion, cannon, shot) plus the alarms' shared leg"
+excerpt = "so far, all on sheet 11: the shot, the battleship, the noise source, and both explosions from their one-shots to their VCAs; plus the four MB4391 channels with their mix legs and the alarms' shared leg. Missing: the cannon's front end, the alarms, and the whole of sheet 12"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -81,27 +81,37 @@ prose = "docs/schematics/zaxxon-discrete-sound.md"
 # ---------------------------------------------------------------------------
 
 [[parts]]
-group = "shot"
 ref = "U21"
 kind = "U"
 device = "74123"
-pins = ["1", "2", "3", "4", "13", "14", "15"]
-out = ["4"]
-read = "partial"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["4", "12"]
 note = """
-Section A only, and the package is shared: section B on pins 5 to 12 is the \
-medium explosion's one-shot, elsewhere on this sheet and outside this excerpt. \
-Pin 1 (A) and pin 3 (CLR) are drawn with inversion bubbles, so the trigger is \
-active low, which is what the twelve PPI gates on this board all are. Pins 2 \
-and 3 are both strapped to +5 V, so the part is armed and never cleared."""
+BOTH HALVES USED, BY TWO DIFFERENT VOICES: section A is the shot and section B \
+is the medium explosion. The two are drawn the same way and the package's own \
+pinout mirrors them, so the halves are A on 1/2/3/4/13/14/15 and B on \
+5/6/7/9/10/11/12.
+
+In both halves the A input carries an inversion bubble and the B and clear \
+inputs are strapped to +5 V, so each one-shot is armed, never cleared, and \
+fires on the falling edge of its gate. That is what every PPI bit on this \
+board does."""
 nc = [
-  { pin = "13", why = "Q is drawn on the symbol and has neither a pin number nor a wire; 13 is the package's pin for it rather than something the drawing says. Qbar on pin 4 is what drives R144, and reading Q as the driver inverts the whole voice: the shaper node would rest low, holding node Y below the MB4391's mute point, and the voice would scream at power-on instead of resting silent." },
+  { pin = "13", why = "Section A's Q is drawn on the symbol and has neither a pin number nor a wire; 13 is the package's pin for it rather than something the drawing says. Qbar on pin 4 is what drives R144, and reading Q as the driver inverts the whole voice: the shaper node would rest low, holding node Y below the MB4391's mute point, and the voice would scream at power-on instead of resting silent." },
+  { pin = "5", why = "Section B's Q, drawn on the symbol with no pin number and no wire, exactly as section A's is. Qbar on pin 12 is what drives R108." },
 ]
 
 [[parts.sections]]
 name = "a"
 pins = ["1", "2", "3", "4", "13", "14", "15"]
 role = "one-shot"
+group = "shot"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7", "9", "10", "11", "12"]
+role = "one-shot"
+group = "medium explosion"
 
 [[parts]]
 group = "shot"
@@ -197,18 +207,18 @@ crosses back above the mute point at about 630 ms. That is the shot's length; \
 the reference recording of this voice is 990 ms."""
 
 [[parts]]
-group = "shot"
 ref = "U20"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3"]
-out = ["1"]
+pins = ["1", "2", "3", "8", "9", "10", "12", "13", "14"]
+out = ["1", "8", "14"]
 read = "partial"
 note = """
-Section A only, strapped output to inverting input, so it is a unity follower \
-of node Y driving the MB4391's control pin. The package's other three sections \
-and its supply pins are elsewhere on the sheet and are not in this excerpt.
+Three of its four sections, serving three different voices, and every one of \
+them is the same thing: strapped output to inverting input, so a unity \
+follower of whatever its non-inverting input taps, driving an MB4391's control \
+pin. Section B on 5/6/7 is not transcribed yet.
 
 The part number is NOT printed on the drawing. Every op-amp on these two sheets \
 is an unlabeled 14-pin quad wired on pins 1/2/3, 5/6/7, 8/9/10 and 12/13/14, \
@@ -217,7 +227,20 @@ running from +12 V and ground, and LM324 is the 1982 part for that job."""
 [[parts.sections]]
 name = "a"
 pins = ["1", "2", "3"]
-role = "follower"
+role = "node Y follower"
+group = "shot"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "envelope follower"
+group = "small explosion"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "envelope follower"
+group = "medium explosion"
 
 # ---------------------------------------------------------------------------
 # The quad that carries the oscillator.
@@ -533,18 +556,28 @@ on = ["U21.1"]
 [[nets]]
 name = "+5V"
 rail = true
-on = ["R142.a", "R143.a", "U21.2", "U21.3"]
-note = "U21's B and clear are both strapped high, so the one-shot is armed and never cleared."
+on = [
+  "R142.a", "R143.a", "U21.2", "U21.3",
+  "U21.10", "U21.11", "R107.a", "R108.a", "R109.a",
+  "U22.2", "U22.3", "R102.a", "R103.a", "R104.a",
+]
+note = """
+Every 74123 on this board has its B and clear inputs strapped high, so each \
+one-shot is armed and never cleared and fires on the falling edge of its \
+gate."""
 
 [[nets]]
 name = "+6V"
 rail = true
-on = ["U19.3", "R161.a", "R86.a", "R98.a"]
+on = ["U19.3", "R161.a", "R86.a", "R98.a", "U3.3"]
 
 [[nets]]
 name = "+12V"
 rail = true
-on = ["R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a"]
+on = [
+  "R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a",
+  "U2.4", "C64.a", "C65.a",
+]
 
 [[nets]]
 name = "GND"
@@ -556,6 +589,8 @@ on = [
   "R91.b", "R95.b", "R97.b", "Q5.e",
   "R190.b", "R192.b",
   "C75.b", "R195.b", "C77.b", "R198.b", "C86.b", "R201.b", "R207.b",
+  "U2.1", "U2.2", "C64.b", "C65.b",
+  "C61.b", "C63.b",
 ]
 
 [[nets]]
@@ -1254,9 +1289,6 @@ note = """
 Channel B only; channel A is elsewhere on the sheet and is not transcribed \
 yet. The MB4391 has no datasheet on the open web and no SPICE model, so what \
 RO does quantitatively is a genuine unknown rather than an unread fact."""
-unread = [
-  { pin = "6", why = "CON, the control pin, driven by the small explosion's envelope follower on sheet 11 left; that voice is not transcribed yet" },
-]
 
 [[parts.sections]]
 name = "b"
@@ -1276,7 +1308,6 @@ Both channels used, by two different voices. This is why a drawing is cut \
 along a section rather than a part."""
 unread = [
   { pin = "2", why = "CON for channel A, driven by the cannon's envelope on sheet 11 left; not transcribed yet" },
-  { pin = "6", why = "CON for channel B, driven by the medium explosion's envelope on sheet 11 left; not transcribed yet" },
 ]
 
 [[parts.sections]]
@@ -1547,3 +1578,327 @@ on = ["R206.b", "R207.a", "C24.a"]
 [[nets]]
 name = "C24/R208 junction"
 on = ["C24.b", "R208.a"]
+
+# ===========================================================================
+# THE NOISE SOURCE (sheet 11, left half into right half).
+#
+# One MM5837 shift-register noise generator feeding the whole board. NOISE 1
+# is its raw output and also crosses to sheet 12; NOISE 2 is NOISE 1 through
+# an inverting stage of 0.1, which is attenuation rather than gain because the
+# part's output is a logic-level swing.
+# ===========================================================================
+
+[[parts]]
+group = "noise"
+ref = "U2"
+kind = "U"
+device = "MM5837"
+pins = ["1", "2", "3", "4"]
+out = ["3"]
+note = """
+Runs the way this part is meant to: VSS on pin 4 is the positive supply and \
+VDD and VGG, pins 1 and 2, are both grounded. The symbol draws only these \
+four of its eight pins."""
+
+[[parts]]
+group = "noise"
+ref = "C64"
+kind = "C"
+uf = 22
+block = "MM5837 decoupling"
+
+[[parts]]
+group = "noise"
+ref = "C65"
+kind = "C"
+uf = 0.1
+block = "MM5837 decoupling"
+
+[[parts]]
+group = "noise"
+ref = "C66"
+kind = "C"
+uf = 10
+
+[[parts]]
+group = "noise"
+ref = "R111"
+kind = "R"
+kohms = 100
+
+[[parts]]
+group = "noise"
+ref = "R112"
+kind = "R"
+kohms = 10
+note = "Feedback around U3 section A: -R112/R111 = -0.1, so this stage divides by ten."
+
+[[parts]]
+ref = "U3"
+kind = "U"
+device = "LM324"
+device_inferred = true
+pins = ["1", "2", "3"]
+out = ["1"]
+read = "partial"
+note = """
+Section A only. Its other sections are elsewhere on these sheets, including \
+the medium explosion's band-pass, and are not transcribed yet. The part \
+number is not printed; see the note on U19."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "noise amp"
+group = "noise"
+
+[[nets]]
+name = "NOISE 1"
+on = ["U2.3", "C66.a"]
+note = """
+The raw generator output. It also crosses to sheet 12, where several voices \
+read it; those endpoints join this net as those voices are transcribed."""
+
+[[nets]]
+name = "C66/R111 junction"
+on = ["C66.b", "R111.a"]
+
+[[nets]]
+name = "U3a in"
+on = ["R111.b", "R112.b", "U3.2"]
+
+[[nets]]
+name = "NOISE 2"
+on = ["U3.1", "R112.a"]
+note = """
+Also crosses to sheet 12 and feeds the medium explosion's band-pass through \
+C68 on sheet 11 right. Neither is transcribed yet."""
+
+# ===========================================================================
+# THE TWO EXPLOSIONS (sheet 11, left half).
+#
+# The same envelope twice, at different time constants: a one-shot whose Qbar
+# dumps a storage capacitor through a diode, and a long recovery to +5 V that
+# sets the decay. Both feed an MB4391 through a follower.
+#
+# THE FOLLOWER DOES NOT TAP THE CAPACITOR. On both voices the recovery path is
+# two resistors in series and the follower's non-inverting input sits on the
+# junction BETWEEN them, with a filled dot. So what reaches the VCA is
+# (5 V + V_cap) / 2, halved and offset, not the capacitor's own swing. The
+# device holds each pair as one series value, which is right for the time
+# constant and says nothing about the node.
+# ===========================================================================
+
+[[parts]]
+group = "small explosion"
+ref = "U22"
+kind = "U"
+device = "74123"
+pins = ["1", "2", "3", "4", "13", "14", "15"]
+out = ["4"]
+read = "partial"
+note = "Section A. Section B is not transcribed yet."
+nc = [
+  { pin = "13", why = "Q is drawn on the symbol with no pin number and no wire, as on every other 74123 here. Qbar on pin 4 is the driver." },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3", "4", "13", "14", "15"]
+role = "one-shot"
+group = "small explosion"
+
+[[parts]]
+group = "small explosion"
+ref = "C60"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "small explosion"
+ref = "R102"
+kind = "R"
+kohms = 36
+
+[[parts]]
+group = "small explosion"
+ref = "R103"
+kind = "R"
+kohms = 1
+note = "Pull-up on Qbar, which is open collector on this part."
+
+[[parts]]
+group = "small explosion"
+ref = "D7"
+kind = "D"
+note = "Cathode toward Qbar, anode toward R106: the one-shot discharges C61 through it."
+
+[[parts]]
+group = "small explosion"
+ref = "R106"
+kind = "R"
+kohms = 1
+note = "The discharge path, so the envelope's attack."
+
+[[parts]]
+group = "small explosion"
+ref = "C61"
+kind = "C"
+uf = 2.2
+note = "The envelope storage capacitor."
+
+[[parts]]
+group = "small explosion"
+ref = "R104"
+kind = "R"
+kohms = 470
+block = "small explosion recovery"
+note = """
+R104 and R105 in series are the recovery path from +5 V, 940k against C61 for \
+about 2.07 s. The follower taps BETWEEN them, so the envelope reaching the VCA \
+is (5 + V_C61) / 2."""
+
+[[parts]]
+group = "small explosion"
+ref = "R105"
+kind = "R"
+kohms = 470
+block = "small explosion recovery"
+
+[[parts]]
+group = "medium explosion"
+ref = "C62"
+kind = "C"
+uf = 3.3
+
+[[parts]]
+group = "medium explosion"
+ref = "R107"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "medium explosion"
+ref = "R108"
+kind = "R"
+kohms = 1
+note = "Pull-up on Qbar."
+
+[[parts]]
+group = "medium explosion"
+ref = "D8"
+kind = "D"
+note = "Cathode toward Qbar, anode toward R212."
+
+[[parts]]
+group = "medium explosion"
+ref = "R212"
+kind = "R"
+ohms = 470
+
+[[parts]]
+group = "medium explosion"
+ref = "C63"
+kind = "C"
+uf = 1
+
+[[parts]]
+group = "medium explosion"
+ref = "R109"
+kind = "R"
+mohms = 1
+block = "medium explosion recovery"
+note = """
+R109 and R110 in series are the recovery path from +5 V, 2M against C63 for \
+about 2.00 s, and the follower taps between them exactly as the small \
+explosion's does."""
+
+[[parts]]
+group = "medium explosion"
+ref = "R110"
+kind = "R"
+mohms = 1
+block = "medium explosion recovery"
+
+# --- explosion nets ---
+
+[[nets]]
+name = "S-EXP"
+port = "input"
+on = ["U22.1"]
+note = "from the PPI on sheet 12, active low."
+
+[[nets]]
+name = "U22 Cext"
+on = ["C60.a", "U22.14"]
+
+[[nets]]
+name = "U22 timing"
+on = ["R102.b", "C60.b", "U22.15"]
+
+[[nets]]
+name = "small explosion Qbar"
+on = ["U22.4", "R103.b", "D7.k"]
+
+[[nets]]
+name = "D7/R106 junction"
+on = ["D7.a", "R106.a"]
+
+[[nets]]
+name = "small explosion envelope"
+on = ["R106.b", "R105.b", "C61.a"]
+note = "The storage node. The follower does not read it: it reads R104/R105's midpoint."
+
+[[nets]]
+name = "small explosion envelope tap"
+on = ["R104.b", "R105.a", "U20.10"]
+note = """
+Where U20 section C's non-inverting input actually sits, with a filled dot. \
+Halfway between +5 V and the capacitor, so the envelope is compressed into the \
+top half of the range."""
+
+[[nets]]
+name = "small explosion CON"
+on = ["U20.8", "U20.9", "U15.6"]
+note = """
+The follower's output, strapped to its own inverting input, driving U15 \
+channel B's control pin. It crosses to sheet 11 right; the mix table assigns \
+U15 channel B to the small explosion and a VCA's CON has no other driver."""
+
+[[nets]]
+name = "M-EXP"
+port = "input"
+on = ["U21.9"]
+note = "from the PPI on sheet 12, active low."
+
+[[nets]]
+name = "U21b Cext"
+on = ["C62.a", "U21.6"]
+
+[[nets]]
+name = "U21b timing"
+on = ["R107.b", "C62.b", "U21.7"]
+
+[[nets]]
+name = "medium explosion Qbar"
+on = ["U21.12", "R108.b", "D8.k"]
+
+[[nets]]
+name = "D8/R212 junction"
+on = ["D8.a", "R212.a"]
+
+[[nets]]
+name = "medium explosion envelope"
+on = ["R212.b", "R110.b", "C63.a"]
+
+[[nets]]
+name = "medium explosion envelope tap"
+on = ["R109.b", "R110.a", "U20.12"]
+note = "The same midpoint tap as the small explosion's."
+
+[[nets]]
+name = "medium explosion CON"
+on = ["U20.14", "U20.13", "U13.6"]
+note = """
+Driving U13 channel B's control pin. The mix table assigns that channel to the \
+medium explosion."""
