@@ -254,6 +254,16 @@ pub struct Part {
     pub read: Read,
     /// How a multi-section part is drawn. Presentation.
     pub sections: Vec<Section>,
+    /// Which subcircuit this part belongs to: one of the board's voices, a
+    /// power supply, a mix bus.
+    ///
+    /// A whole board is one file, and a drawing is of one stage, so something
+    /// has to bridge those. `netlist svg --group shot` cuts the group out and
+    /// draws it, and a net crossing the group's edge becomes a port of the
+    /// excerpt. That rule is what lets a board be transcribed once and drawn
+    /// in pieces, instead of one file per picture, which is the duplication
+    /// this design exists to remove.
+    pub group: Option<String>,
     /// Which block of the drawing this part belongs to. Parts sharing a block
     /// become one box in the generated SVG. Presentation, per decision 4:
     /// grouping is how the picture reads, not a fact about the board.
@@ -382,6 +392,84 @@ impl Netlist {
         self.nets
             .iter()
             .find(|n| n.on.iter().any(|e| e.part == designator && e.pin == pin))
+    }
+
+    /// Every group named by a part, in the order the file first mentions them.
+    pub fn groups(&self) -> Vec<&str> {
+        let mut seen: Vec<&str> = Vec::new();
+        for part in &self.parts {
+            if let Some(group) = part.group.as_deref()
+                && !seen.contains(&group)
+            {
+                seen.push(group);
+            }
+        }
+        seen
+    }
+
+    /// Cut one subcircuit out of a whole-board transcription, as its own
+    /// netlist, so it can be drawn on its own.
+    ///
+    /// **A net that crosses the group's edge becomes a port**, and that is the
+    /// whole trick. An excerpt's boundary is not something anyone has to
+    /// declare: it is wherever a wire leaves, which the board already knows.
+    /// The port faces out if the group drives the net and in otherwise.
+    ///
+    /// Rails stay rails, since a supply is not a signal leaving the excerpt.
+    /// Endpoints outside the group are dropped from each net, so the excerpt
+    /// never names a part it does not contain.
+    pub fn subset(&self, group: &str) -> Netlist {
+        let parts: Vec<Part> = self
+            .parts
+            .iter()
+            .filter(|part| part.group.as_deref() == Some(group))
+            .cloned()
+            .collect();
+        let inside = |designator: &str| parts.iter().any(|p| p.designator == designator);
+
+        let mut nets = Vec::new();
+        for net in &self.nets {
+            let kept: Vec<Endpoint> = net.on.iter().filter(|e| inside(&e.part)).cloned().collect();
+            if kept.is_empty() {
+                continue;
+            }
+            let leaves = kept.len() < net.on.len();
+            let port = if net.rail {
+                net.port
+            } else if leaves {
+                // The group drives it if any pin of ours on it is an output.
+                let driven_here = kept.iter().any(|e| {
+                    self.part(&e.part)
+                        .is_some_and(|p| p.outputs.contains(&e.pin))
+                });
+                Some(if driven_here {
+                    Direction::Output
+                } else {
+                    Direction::Input
+                })
+            } else {
+                net.port
+            };
+            nets.push(Net {
+                name: net.name.clone(),
+                on: kept,
+                rail: net.rail,
+                port,
+                note: net.note.clone(),
+            });
+        }
+
+        Netlist {
+            board: Board {
+                excerpt: Some(match &self.board.excerpt {
+                    Some(excerpt) => format!("{excerpt}, {group}"),
+                    None => group.to_string(),
+                }),
+                ..self.board.clone()
+            },
+            parts,
+            nets,
+        }
     }
 
     /// Read a transcription, checking it as far as the format itself can.
@@ -646,6 +734,7 @@ struct RawPart {
     read: Read,
     #[serde(default)]
     sections: Vec<Section>,
+    group: Option<String>,
     block: Option<String>,
     note: Option<String>,
 }
@@ -688,6 +777,7 @@ impl RawPart {
                 Read::Partial
             },
             sections: self.sections.clone(),
+            group: self.group.clone(),
             block: self.block.clone(),
             note: self.note.clone(),
         })
@@ -1123,6 +1213,123 @@ on = ["R144.a"]
         let text = "[board]\nname = \"t\"\n\n[[parts]]\nref = \"R1\"\nkind = \"R\"\nkohm = 3.3\n";
         let problems = Netlist::parse(text).unwrap_err();
         assert!(problems.iter().any(|p| p.contains("kohm")), "{problems:?}");
+    }
+
+    const TWO_GROUPS: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "U1"
+kind = "U"
+device = "555"
+pins = ["3"]
+out = ["3"]
+group = "oscillator"
+
+# A three-terminal part so that the oscillator can reach ground and the mix
+# from different pins, which is what makes this fixture legal: one pin sits on
+# one net.
+[[parts]]
+ref = "R1"
+kind = "R"
+kohms = 10
+pins = ["a", "b", "c"]
+group = "oscillator"
+
+[[parts]]
+ref = "R2"
+kind = "R"
+kohms = 51
+group = "mix"
+
+[[parts]]
+ref = "R3"
+kind = "R"
+kohms = 8.2
+group = "mix"
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["R1.b", "R3.b"]
+
+[[nets]]
+name = "U1 out"
+on = ["U1.3", "R1.a"]
+
+[[nets]]
+name = "leg"
+on = ["R1.c", "R2.a"]
+
+[[nets]]
+name = "sum"
+port = "output"
+on = ["R2.b", "R3.a"]
+"#;
+
+    #[test]
+    fn a_group_is_cut_out_with_only_its_own_parts() {
+        let netlist = Netlist::parse(TWO_GROUPS).expect("should load");
+        let mix = netlist.subset("mix");
+        assert_eq!(mix.parts.len(), 2);
+        assert!(mix.part("R2").is_some());
+        assert!(mix.part("R1").is_none(), "a part outside the group is gone");
+        for net in &mix.nets {
+            for endpoint in &net.on {
+                assert!(
+                    mix.part(&endpoint.part).is_some(),
+                    "excerpt names {endpoint}, which it does not contain"
+                );
+            }
+        }
+    }
+
+    /// The boundary of an excerpt is not something anyone declares. It is
+    /// wherever a wire leaves, and the board already knows that.
+    #[test]
+    fn a_net_crossing_the_groups_edge_becomes_a_port() {
+        let netlist = Netlist::parse(TWO_GROUPS).expect("should load");
+
+        let mix = netlist.subset("mix");
+        let leg = mix.nets.iter().find(|n| n.name == "leg").unwrap();
+        assert_eq!(leg.port, Some(Direction::Input), "the mix receives the leg");
+
+        // The same net crosses the other way too, so it is a port on both
+        // sides. Its direction there falls back to `input`, because the pin on
+        // it is a plain resistor end and nothing declares a driver: direction
+        // is layout, and the fallback is the documented one.
+        let oscillator = netlist.subset("oscillator");
+        let leg = oscillator.nets.iter().find(|n| n.name == "leg").unwrap();
+        assert_eq!(leg.port, Some(Direction::Input));
+        assert_eq!(leg.on.len(), 1, "only the oscillator's own end of it");
+    }
+
+    #[test]
+    fn a_rail_stays_a_rail_rather_than_becoming_a_port() {
+        let netlist = Netlist::parse(TWO_GROUPS).expect("should load");
+        let mix = netlist.subset("mix");
+        let gnd = mix.nets.iter().find(|n| n.name == "GND").unwrap();
+        assert!(gnd.rail);
+        assert_eq!(gnd.port, None);
+        assert_eq!(gnd.on.len(), 1, "only the endpoint inside the group");
+    }
+
+    /// A net wholly inside a group keeps whatever the board said it was, so an
+    /// interior wire does not sprout a port just because a group was cut.
+    #[test]
+    fn a_net_wholly_inside_a_group_is_unchanged() {
+        let netlist = Netlist::parse(TWO_GROUPS).expect("should load");
+        let oscillator = netlist.subset("oscillator");
+        let out = oscillator.nets.iter().find(|n| n.name == "U1 out").unwrap();
+        assert_eq!(out.port, None);
+        assert_eq!(out.on.len(), 2);
+    }
+
+    #[test]
+    fn groups_are_listed_in_the_order_the_file_mentions_them() {
+        let netlist = Netlist::parse(TWO_GROUPS).expect("should load");
+        assert_eq!(netlist.groups(), vec!["oscillator", "mix"]);
     }
 
     #[test]

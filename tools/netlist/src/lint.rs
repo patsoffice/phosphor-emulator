@@ -103,7 +103,9 @@ impl DeviceParts {
 fn is_designator(token: &str) -> bool {
     let letters = token.chars().take_while(|c| c.is_ascii_uppercase()).count();
     let digits = token.len() - letters;
-    (1..=3).contains(&letters) && digits >= 1 && token[letters..].chars().all(|c| c.is_ascii_digit())
+    (1..=3).contains(&letters)
+        && digits >= 1
+        && token[letters..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Whether a part carries a quantity the device could hold as a constant.

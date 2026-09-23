@@ -46,6 +46,10 @@ enum Command {
         /// Where to write the JSON. Defaults to stdout.
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Draw only one subcircuit, by its parts' `group`. A net crossing the
+        /// group's edge becomes a port of the excerpt.
+        #[arg(short, long)]
+        group: Option<String>,
     },
 }
 
@@ -70,7 +74,23 @@ fn main() -> ExitCode {
             show(&netlist, *parts);
             ExitCode::SUCCESS
         }
-        Command::Svg { out, .. } => write_svg(&netlist, out.as_deref()),
+        Command::Svg { out, group, .. } => {
+            let drawn = match group {
+                Some(group) => {
+                    let subset = netlist.subset(group);
+                    if subset.parts.is_empty() {
+                        eprintln!(
+                            "no parts in group `{group}`. This file has: {}",
+                            netlist.groups().join(", ")
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    subset
+                }
+                None => netlist,
+            };
+            write_svg(&drawn, out.as_deref())
+        }
         Command::Lint { device, .. } => lint(&netlist, device.as_deref()),
     }
 }
