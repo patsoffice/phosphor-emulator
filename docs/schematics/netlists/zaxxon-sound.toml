@@ -616,6 +616,7 @@ on = [
   "U7.1", "C53.b", "C54.b", "R69.b", "R71.b", "Q3.e",
   "C1.b", "R2.b", "C4.b", "C139.b", "C140.b", "C149.b", "C5.a",
   "R27.b", "C33.b", "R41.b", "C42.b", "C52.b",
+  "C30.b", "C39.b",
 ]
 
 [[nets]]
@@ -3288,19 +3289,31 @@ ref = "U5"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3"]
-out = ["1"]
+pins = ["1", "2", "3", "8", "9", "10", "12", "13", "14"]
+out = ["1", "8", "14"]
 read = "partial"
 note = """
-Section A, the engine's resonator. Its other sections are on the right half of \
-this sheet and are not transcribed yet. The part number is not printed; see \
-the note on U19."""
+Three sections: the engine's resonator on the left half of this sheet, and the \
+two player ship tone filters on the right half. Section B is not transcribed \
+yet. The part number is not printed; see the note on U19."""
 
 [[parts.sections]]
 name = "a"
 pins = ["1", "2", "3"]
 role = "resonator"
 group = "engine"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "tone low-pass"
+group = "player ship A"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "tone low-pass"
+group = "player ship B"
 
 [[parts]]
 group = "engine"
@@ -3376,9 +3389,9 @@ group = "engine"
 ref = "C29"
 kind = "C"
 uf = 2.2
-unread = [
-  { pin = "b", why = "crosses to the right half of this sheet; not traced" },
-]
+note = """
+Couples the resonator across to the right half of the sheet, into the player \
+ship tone A filter."""
 
 [[nets]]
 name = "U8d out"
@@ -3669,9 +3682,6 @@ ref = "R26"
 kind = "R"
 kohms = 12
 block = "tone A attenuator"
-unread = [
-  { pin = "a", why = "the player ship tone A filter on this sheet; not transcribed yet" },
-]
 
 [[parts]]
 group = "player ship A"
@@ -3699,9 +3709,6 @@ ref = "R40"
 kind = "R"
 kohms = 12
 block = "tone B attenuator"
-unread = [
-  { pin = "a", why = "the player ship tone B filter on this sheet; not transcribed yet" },
-]
 
 [[parts]]
 group = "player ship B"
@@ -3738,6 +3745,163 @@ ref = "C52"
 kind = "C"
 pf = 680
 note = "680 pF on U14 pin 10, the RO pin, to ground. C94's sibling."
+
+# ===========================================================================
+# THE TWO PLAYER SHIP TONE FILTERS (sheet 12, right half).
+#
+# Equal-component Sallen-Key low-passes, gain 2 from an equal 2.2k pair, and
+# the only filters on the board with that shape.
+#
+# THE SHUNT CAPACITOR'S LEFT END IS A CROSSING, NOT A JUNCTION. C30's and
+# C39's horizontals run on past the node above them with no dot, so each
+# capacitor returns to the rail rather than sitting across the second
+# resistor. Read the other way those resistors and capacitors would carry no
+# current at all, since the node beyond them is an op-amp input. This is the
+# third crossing-without-a-dot on these sheets, after R10/R11 on the player
+# ship ladder and R96/R70 on the oscillators.
+#
+# The corner confirms it: 1/(2*pi*100k*2200pF) is 723 Hz, which is the figure
+# the prose's architecture already gives for these.
+# ===========================================================================
+
+[[parts]]
+group = "player ship A"
+ref = "R22"
+kind = "R"
+kohms = 2.2
+block = "tone A gain"
+unread = [
+  { pin = "a", why = "the reference this gain pair returns to, arriving from the left; not traced" },
+]
+
+[[parts]]
+group = "player ship A"
+ref = "R23"
+kind = "R"
+kohms = 2.2
+block = "tone A gain"
+note = "Equal to R22, so the stage is a non-inverting gain of 2."
+
+[[parts]]
+group = "player ship A"
+ref = "R24"
+kind = "R"
+kohms = 100
+block = "tone A low-pass"
+
+[[parts]]
+group = "player ship A"
+ref = "R25"
+kind = "R"
+kohms = 100
+block = "tone A low-pass"
+
+[[parts]]
+group = "player ship A"
+ref = "C30"
+kind = "C"
+pf = 2200
+note = "The shunt capacitor, from the op-amp's input node to the rail."
+
+[[parts]]
+group = "player ship A"
+ref = "C31"
+kind = "C"
+pf = 2200
+note = "The feedback capacitor, from the R24/R25 junction to the output."
+
+[[parts]]
+group = "player ship B"
+ref = "C38"
+kind = "C"
+uf = 2.2
+unread = [
+  { pin = "a", why = "the tone B source, arriving from the left half of this sheet; not traced" },
+]
+
+[[parts]]
+group = "player ship B"
+ref = "R36"
+kind = "R"
+kohms = 2.2
+block = "tone B gain"
+unread = [
+  { pin = "a", why = "the reference this gain pair returns to, arriving from the left; not traced" },
+]
+
+[[parts]]
+group = "player ship B"
+ref = "R37"
+kind = "R"
+kohms = 2.2
+block = "tone B gain"
+
+[[parts]]
+group = "player ship B"
+ref = "R38"
+kind = "R"
+kohms = 100
+block = "tone B low-pass"
+
+[[parts]]
+group = "player ship B"
+ref = "R39"
+kind = "R"
+kohms = 100
+block = "tone B low-pass"
+
+[[parts]]
+group = "player ship B"
+ref = "C39"
+kind = "C"
+pf = 3300
+
+[[parts]]
+group = "player ship B"
+ref = "C40"
+kind = "C"
+pf = 3300
+
+[[nets]]
+name = "tone A in"
+on = ["C29.b", "R24.a"]
+note = "The engine's resonator output, coupled through C29 into the tone A filter."
+
+[[nets]]
+name = "tone A node P"
+on = ["R24.b", "R25.a", "C31.a"]
+
+[[nets]]
+name = "tone A node Q"
+on = ["R25.b", "C30.a", "U5.10"]
+
+[[nets]]
+name = "U5c in"
+on = ["R22.b", "R23.a", "U5.9"]
+
+[[nets]]
+name = "U5c out"
+on = ["U5.8", "R23.b", "C31.b", "R26.a"]
+
+[[nets]]
+name = "tone B in"
+on = ["C38.b", "R38.a"]
+
+[[nets]]
+name = "tone B node P"
+on = ["R38.b", "R39.a", "C40.a"]
+
+[[nets]]
+name = "tone B node Q"
+on = ["R39.b", "C39.a", "U5.12"]
+
+[[nets]]
+name = "U5d in"
+on = ["R36.b", "R37.a", "U5.13"]
+
+[[nets]]
+name = "U5d out"
+on = ["U5.14", "R37.b", "C40.b", "R40.a"]
 
 [[nets]]
 name = "tone A attenuated"
