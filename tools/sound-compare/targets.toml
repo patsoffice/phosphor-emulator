@@ -381,7 +381,24 @@ the same 51k.
 What is NOT: the MCD-725H opto-isolator's transfer curve, the MB4391's control
 law beyond its direction, Q6's collector-emitter resistance, the op-amps' output
 swing, and the shot's oscillator pitch. Each is named INVENTED in place in the
-device."""
+device.
+
+AND ONE PART IS OMITTED RATHER THAN APPROXIMATED, which is a different kind of
+gap and the reason this row is not closer to `validated` than it was. Every
+MB4391 channel on these two sheets carries 680 pF on the pin the drawing labels
+RO, and the device models none of them: C33 and C42 on the engine pair, C75 on
+U15 ch B, C77 on U13 ch B, C86, and C94 on U16 ch A. This file used to call that
+class "the part's own rolloff pin and not in the signal path", which is how the
+shot's went untranscribed through five passes. A pin named RO with a capacitor
+on it is a rolloff. It is not cosmetic: the shot's recording carries less energy
+above 3 kHz than this chain produces at ANY pitch, by a bound rather than a fit,
+and the deficit deepens through the voice, which is what a VCA whose bandwidth
+follows its gain does. Modeling it needs the MB4391 datasheet's RO
+specification, and that is not on the open web.
+
+The issue that built this board, phosphor-emulator-uy54, is closed with that and
+the rest of its residuals documented in docs/schematics/zaxxon-discrete-sound.md
+rather than resolved."""
 
 [[target]]
 id = "atari-system1-audio"
