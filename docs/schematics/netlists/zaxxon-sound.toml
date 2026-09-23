@@ -69,7 +69,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "so far, all on sheet 11: the shot, the battleship, the noise source, and both explosions from their one-shots to their VCAs; plus the four MB4391 channels with their mix legs and the alarms' shared leg. Missing: the cannon's front end, the alarms, and the whole of sheet 12"
+excerpt = "sheet 11 nearly whole: the shot, the battleship, the noise source, both explosions, the cannon and the alarms, with the four MB4391 channels and six of the eleven mix legs. Still missing on sheet 11: the medium explosion's noise band-pass on U3, and U45 section A. Sheet 12 is not started"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -561,6 +561,8 @@ on = [
   "U21.10", "U21.11", "R107.a", "R108.a", "R109.a",
   "U22.2", "U22.3", "R102.a", "R103.a", "R104.a",
   "U45.10", "U45.11", "R125.a", "R126.a",
+  "U44.10", "U44.11", "R166.b", "U46.2", "U46.3", "R167.b",
+  "U50.14", "U50.4", "R168.a", "R170.a",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -570,14 +572,14 @@ gate."""
 [[nets]]
 name = "+6V"
 rail = true
-on = ["U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a"]
+on = ["U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12"]
 
 [[nets]]
 name = "+12V"
 rail = true
 on = [
   "R145.a", "R151.a", "U18.8", "U18.4", "R80.a", "R101.a", "R189.a",
-  "U2.4", "C64.a", "C65.a",
+  "U2.4", "C64.a", "C65.a", "R171.a",
 ]
 
 [[nets]]
@@ -593,6 +595,7 @@ on = [
   "U2.1", "U2.2", "C64.b", "C65.b",
   "C61.b", "C63.b",
   "C79.b", "R127.b", "R132.b", "Q6.e", "R133.b", "R141.b", "C85.b",
+  "C97.b", "C98.b", "U50.7", "U49.2", "U49.12",
 ]
 
 [[nets]]
@@ -1481,9 +1484,6 @@ ref = "R206"
 kind = "R"
 kohms = 68
 block = "alarms leg"
-unread = [
-  { pin = "a", why = "the alarm stage on sheet 11 left; not transcribed yet" },
-]
 
 [[parts]]
 group = "alarms"
@@ -1987,13 +1987,12 @@ ref = "U12"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10"]
-out = ["1", "7", "8"]
-read = "partial"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
 note = """
-Three sections, all the cannon's: the band-pass, the envelope follower and a \
-gain stage. Section D is not transcribed yet. The part number is not printed; \
-see the note on U19."""
+All four sections, and they are not all one voice: three are the cannon's \
+band-pass, envelope follower and gain stage, and the fourth is the alarms' \
+output stage. The part number is not printed; see the note on U19."""
 
 [[parts.sections]]
 name = "a"
@@ -2012,6 +2011,12 @@ name = "c"
 pins = ["8", "9", "10"]
 role = "gain"
 group = "cannon"
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "alarm output"
+group = "alarms"
 
 [[parts]]
 group = "cannon"
@@ -2221,3 +2226,296 @@ note = """
 Where this goes next is not traced. It should be U13 channel A's control pin, \
 which is still marked unread on that part, but the wire has not been \
 followed."""
+
+# ===========================================================================
+# THE ALARMS (sheet 11, both halves).
+#
+# The only voice on this board that is not analog at all. A 556 free-runs at
+# about 20 kHz, a 74393 divides it, and two of the divider's taps are gated by
+# a 7426 and summed onto one leg. That is why the two alarms share a single
+# leg in the mix and why the prose can corroborate them by naming 1QC and 1QD.
+#
+# The last stage is what makes the leg's absurd 0.0145 attenuation make sense:
+# U12 section D is an inverting stage of -R173/R172 = -220, which saturates
+# rail to rail, with C99 rolling its edges off at about 48 Hz.
+# ===========================================================================
+
+[[parts]]
+group = "alarms"
+ref = "U44"
+kind = "U"
+device = "74123"
+pins = ["5", "6", "7", "9", "10", "11", "12"]
+out = ["5"]
+read = "partial"
+note = """
+Section B, for alarm 2. U44, U45 and U46 are a consecutive run of three 74123s \
+and U45 is the cannon's, so these two alarms are U44 and U46. The two \
+designators are close to illegible at this scan's resolution and the run is \
+what separates them."""
+nc = [
+  { pin = "12", why = "Qbar is drawn and connects to nothing; this voice takes Q on pin 5." },
+]
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7", "9", "10", "11", "12"]
+role = "one-shot"
+group = "alarms"
+
+[[parts]]
+group = "alarms"
+ref = "C95"
+kind = "C"
+uf = 10
+
+[[parts]]
+group = "alarms"
+ref = "R166"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "alarms"
+ref = "U46"
+kind = "U"
+device = "74123"
+pins = ["1", "2", "3", "4", "13", "14", "15"]
+out = ["13"]
+read = "partial"
+note = "Section A, for alarm 3. See the note on U44."
+nc = [
+  { pin = "4", why = "Qbar is drawn and connects to nothing; this voice takes Q on pin 13." },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3", "4", "13", "14", "15"]
+role = "one-shot"
+group = "alarms"
+
+[[parts]]
+group = "alarms"
+ref = "C96"
+kind = "C"
+uf = 10
+
+[[parts]]
+group = "alarms"
+ref = "R167"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "alarms"
+ref = "U50"
+kind = "U"
+device = "556"
+pins = ["1", "2", "3", "4", "5", "6", "7", "14"]
+out = ["5"]
+read = "partial"
+note = """
+One half of a dual timer, free-running: reset on pin 4 held high, discharge on \
+pin 1 between R168 and R169, threshold and trigger tied together on the \
+capacitor, control decoupled by C98. R168 470 and R169 120 against C97 0.1 uF \
+put it near 20 kHz, which is not a tone: it is the clock the 74393 divides. \
+The second half is not transcribed yet."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3", "4", "5", "6", "7", "14"]
+role = "clock"
+group = "alarms"
+
+[[parts]]
+group = "alarms"
+ref = "R168"
+kind = "R"
+ohms = 470
+block = "556 timing"
+
+[[parts]]
+group = "alarms"
+ref = "R169"
+kind = "R"
+ohms = 120
+block = "556 timing"
+
+[[parts]]
+group = "alarms"
+ref = "C97"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "alarms"
+ref = "C98"
+kind = "C"
+uf = 0.1
+note = "Decoupling on the 556's control pin, not part of the timing."
+
+[[parts]]
+group = "alarms"
+ref = "R170"
+kind = "R"
+kohms = 1
+note = "Pull-up on the 556's output, which drives the divider's clock."
+
+[[parts]]
+group = "alarms"
+ref = "U49"
+kind = "U"
+device = "74393"
+pins = ["1", "2", "5", "6", "12", "13"]
+out = ["5", "6"]
+read = "partial"
+note = """
+A dual 4-bit counter. Counter 1 is clocked from the 556 on pin 1, and its QD \
+on pin 6 clocks counter 2 on pin 13, so the two chain. Both clears are tied \
+together and grounded. QC on pin 5 and QD on pin 6 are the two taps the alarms \
+use. Counter 2's outputs are not transcribed yet."""
+
+[[parts]]
+group = "alarms"
+ref = "U67"
+kind = "U"
+device = "7426"
+pins = ["1", "2", "3", "4", "5", "6"]
+out = ["3", "6"]
+read = "partial"
+note = """
+Two NAND sections of an open-collector quad, whose outputs are wired together \
+onto R171's pull-up. That wired-OR is why the two alarms share one mix leg."""
+unread = [
+  { pin = "1", why = "one of the two alarm one-shot outputs; which alarm drives which section is not traced" },
+  { pin = "4", why = "the other alarm one-shot output; which alarm drives which section is not traced" },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "gate"
+group = "alarms"
+
+[[parts.sections]]
+name = "b"
+pins = ["4", "5", "6"]
+role = "gate"
+group = "alarms"
+
+[[parts]]
+group = "alarms"
+ref = "R171"
+kind = "R"
+kohms = 1
+note = "Pull-up for the two open-collector gate outputs, from +12 V."
+
+[[parts]]
+group = "alarms"
+ref = "R172"
+kind = "R"
+kohms = 1.5
+
+[[parts]]
+group = "alarms"
+ref = "R173"
+kind = "R"
+kohms = 330
+block = "alarm output stage"
+note = "Feedback around U12 section D: -R173/R172 = -220, so the stage saturates."
+
+[[parts]]
+group = "alarms"
+ref = "C99"
+kind = "C"
+uf = 0.01
+block = "alarm output stage"
+note = "Across R173, rolling the square's edges off at about 48 Hz."
+
+# --- alarm nets ---
+
+[[nets]]
+name = "ALARM 2"
+port = "input"
+on = ["U44.9"]
+note = "from the PPI on sheet 12, active low."
+
+[[nets]]
+name = "ALARM 3"
+port = "input"
+on = ["U46.1"]
+note = "from the PPI on sheet 12, active low."
+
+[[nets]]
+name = "U44 Cext"
+on = ["C95.a", "U44.6"]
+
+[[nets]]
+name = "U44 timing"
+on = ["R166.a", "C95.b", "U44.7"]
+
+[[nets]]
+name = "alarm 2 Q"
+on = ["U44.5"]
+port = "output"
+note = """
+Leaves for one of U67's gate sections. Which of the two it reaches is not \
+traced, so it is recorded as leaving rather than guessed onto a gate."""
+
+[[nets]]
+name = "U46 Cext"
+on = ["C96.a", "U46.14"]
+
+[[nets]]
+name = "U46 timing"
+on = ["R167.a", "C96.b", "U46.15"]
+
+[[nets]]
+name = "alarm 3 Q"
+on = ["U46.13"]
+port = "output"
+note = "As with alarm 2's: it reaches one of U67's sections and which is not traced."
+
+[[nets]]
+name = "556 discharge"
+on = ["R168.b", "R169.a", "U50.1"]
+
+[[nets]]
+name = "556 timing"
+on = ["R169.b", "C97.a", "U50.2", "U50.6"]
+
+[[nets]]
+name = "556 control"
+on = ["U50.3", "C98.a"]
+
+[[nets]]
+name = "alarm clock"
+on = ["U50.5", "R170.b", "U49.1"]
+
+[[nets]]
+name = "1QC"
+on = ["U49.5", "U67.5"]
+note = "One of the two divider taps the alarms use."
+
+[[nets]]
+name = "1QD"
+on = ["U49.6", "U49.13", "U67.2"]
+note = """
+The other tap, and also the clock for the second counter: QD chains into 2A on \
+pin 13."""
+
+[[nets]]
+name = "alarm gates out"
+on = ["U67.3", "U67.6", "R171.b", "R172.a"]
+note = """
+Both open-collector outputs wired together onto one pull-up. That is the \
+wired-OR that puts both alarms on a single mix leg."""
+
+[[nets]]
+name = "alarm stage in"
+on = ["R172.b", "R173.a", "C99.a", "U12.13"]
+
+[[nets]]
+name = "alarm stage out"
+on = ["U12.14", "R173.b", "C99.b", "R206.a"]
+note = "On to the leg that alarms 2 and 3 share."
