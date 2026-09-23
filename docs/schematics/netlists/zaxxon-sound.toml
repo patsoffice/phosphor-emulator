@@ -615,6 +615,7 @@ on = [
   "R35.b", "C37.b", "C34.b", "C35.b",
   "U7.1", "C53.b", "C54.b", "R69.b", "R71.b", "Q3.e",
   "C1.b", "R2.b", "C4.b", "C139.b", "C140.b", "C149.b", "C5.a",
+  "R27.b", "C33.b", "R41.b", "C42.b", "C52.b",
 ]
 
 [[nets]]
@@ -1320,19 +1321,28 @@ U11 rather than holding it."""
 ref = "U15"
 kind = "U"
 device = "MB4391"
-pins = ["5", "6", "10", "11"]
-out = ["11"]
-read = "partial"
+pins = ["1", "2", "5", "6", "10", "11", "14", "15"]
+out = ["11", "15"]
 note = """
-Channel B only; channel A is elsewhere on the sheet and is not transcribed \
-yet. The MB4391 has no datasheet on the open web and no SPICE model, so what \
-RO does quantitatively is a genuine unknown rather than an unread fact."""
+Both channels used, by two different voices: the small explosion on B and \
+player ship tone B on A. The MB4391 has no datasheet on the open web and no \
+SPICE model, so what RO does quantitatively is a genuine unknown rather than \
+an unread fact."""
+unread = [
+  { pin = "2", why = "CON for channel A, the player ship tone's control; the filter that drives it is on the right half and is not transcribed yet" },
+]
 
 [[parts.sections]]
 name = "b"
 pins = ["5", "6", "10", "11"]
 role = "VCA"
 group = "small explosion"
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "14", "15"]
+role = "VCA"
+group = "player ship B"
 
 [[parts]]
 ref = "U13"
@@ -2563,9 +2573,6 @@ ref = "R174"
 kind = "R"
 kohms = 15
 block = "player ship A leg"
-unread = [
-  { pin = "a", why = "the player ship tone A filter on sheet 12 left; not transcribed yet" },
-]
 
 [[parts]]
 group = "player ship A"
@@ -2592,9 +2599,6 @@ ref = "R177"
 kind = "R"
 kohms = 15
 block = "player ship B leg"
-unread = [
-  { pin = "a", why = "the player ship tone B filter on sheet 12 left; not transcribed yet" },
-]
 
 [[parts]]
 group = "player ship B"
@@ -2621,9 +2625,6 @@ ref = "R180"
 kind = "R"
 kohms = 22
 block = "homing missile leg"
-unread = [
-  { pin = "a", why = "the homing missile on sheet 12 left; not transcribed yet" },
-]
 
 [[parts]]
 group = "homing missile"
@@ -3626,6 +3627,162 @@ kind = "R"
 kohms = 220
 block = "base missile reference"
 
+# ===========================================================================
+# THE THREE REMAINING MB4391 CHANNELS (sheet 12, right half).
+#
+# WITH THESE, THE `RO` CLASS IS SEVEN. C33, C42 and C52 here, C75, C77 and C86
+# on sheet 11, and C94, the one that was found by accident. Every MB4391
+# channel on this board has 680 pF from its rolloff pin to ground and the
+# device models none of them.
+# ===========================================================================
+
+[[parts]]
+ref = "U14"
+kind = "U"
+device = "MB4391"
+pins = ["1", "2", "5", "6", "10", "11", "14", "15"]
+out = ["11", "15"]
+note = """
+Both channels used, by two different voices: player ship tone A on channel A \
+and the homing missile on channel B. Channel B's output runs to R180, which \
+the mix table gives as the homing missile's leg, and channel A's to R174, \
+which it gives as player ship tone A's."""
+unread = [
+  { pin = "2", why = "CON for channel A, the player ship tone's control; the filter that drives it is on the right half and is not transcribed yet" },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "14", "15"]
+role = "VCA"
+group = "player ship A"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "10", "11"]
+role = "VCA"
+group = "homing missile"
+
+[[parts]]
+group = "player ship A"
+ref = "R26"
+kind = "R"
+kohms = 12
+block = "tone A attenuator"
+unread = [
+  { pin = "a", why = "the player ship tone A filter on this sheet; not transcribed yet" },
+]
+
+[[parts]]
+group = "player ship A"
+ref = "R27"
+kind = "R"
+kohms = 3.3
+block = "tone A attenuator"
+
+[[parts]]
+group = "player ship A"
+ref = "C32"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "player ship A"
+ref = "C33"
+kind = "C"
+pf = 680
+note = "680 pF on U14 pin 14, the RO pin, to ground. C94's sibling."
+
+[[parts]]
+group = "player ship B"
+ref = "R40"
+kind = "R"
+kohms = 12
+block = "tone B attenuator"
+unread = [
+  { pin = "a", why = "the player ship tone B filter on this sheet; not transcribed yet" },
+]
+
+[[parts]]
+group = "player ship B"
+ref = "R41"
+kind = "R"
+kohms = 3.3
+block = "tone B attenuator"
+
+[[parts]]
+group = "player ship B"
+ref = "C41"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "player ship B"
+ref = "C42"
+kind = "C"
+pf = 680
+note = "680 pF on U15 pin 14, the RO pin, to ground. C94's sibling."
+
+[[parts]]
+group = "homing missile"
+ref = "C51"
+kind = "C"
+uf = 22
+unread = [
+  { pin = "a", why = "the homing missile's source on this sheet; not transcribed yet" },
+]
+
+[[parts]]
+group = "homing missile"
+ref = "C52"
+kind = "C"
+pf = 680
+note = "680 pF on U14 pin 10, the RO pin, to ground. C94's sibling."
+
+[[nets]]
+name = "tone A attenuated"
+on = ["R26.b", "R27.a", "C32.a"]
+
+[[nets]]
+name = "U14 ch A in"
+on = ["C32.b", "U14.1"]
+
+[[nets]]
+name = "U14 ch A RO"
+on = ["U14.14", "C33.a"]
+
+[[nets]]
+name = "player ship A out"
+on = ["U14.15", "R174.a"]
+
+[[nets]]
+name = "tone B attenuated"
+on = ["R40.b", "R41.a", "C41.a"]
+
+[[nets]]
+name = "U15 ch A in"
+on = ["C41.b", "U15.1"]
+
+[[nets]]
+name = "U15 ch A RO"
+on = ["U15.14", "C42.a"]
+
+[[nets]]
+name = "player ship B out"
+on = ["U15.15", "R177.a"]
+
+[[nets]]
+name = "U14 ch B in"
+on = ["C51.b", "U14.5"]
+
+[[nets]]
+name = "U14 ch B RO"
+on = ["U14.10", "C52.a"]
+
+[[nets]]
+name = "homing missile out"
+on = ["U14.11", "R180.a"]
+
 [[nets]]
 name = "R34/R35 midpoint"
 on = ["R34.b", "R35.a", "C36.b", "C37.a"]
@@ -3651,11 +3808,12 @@ explosions use."""
 
 [[nets]]
 name = "homing missile CON"
-on = ["U11.8", "U11.9"]
+on = ["U11.8", "U11.9", "U14.6"]
 note = """
-The follower's output, strapped to its own inverting input. It leaves upward on \
-the sheet and where it goes is NOT TRACED, so this net is the strap only and \
-is certainly incomplete."""
+The follower's output, strapped to its own inverting input, driving U14 channel \
+B's control pin. The wire itself is not traced across the sheet; what places it \
+is that channel B's output runs to R180, which the mix table gives as the \
+homing missile's leg, and a VCA's CON has no other driver."""
 
 [[nets]]
 name = "base missile buffered"
