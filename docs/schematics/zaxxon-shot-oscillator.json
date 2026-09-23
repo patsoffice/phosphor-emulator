@@ -1,214 +1,642 @@
 {
   "modules": {
-    "zaxxon shot: the same oscillator, with its reference swept by a 555": {
+    "Zaxxon sound: the shot voice (PC0): a one-shot, a shaper, a 555-swept relaxation oscillator and a VCA": {
       "ports": {
-        "PC0": { "direction": "input", "bits": [2] },
-        "R203 39k -> SJ": { "direction": "output", "bits": [60] }
+        "PC0": {
+          "direction": "input",
+          "bits": [
+            2
+          ]
+        },
+        "shot leg": {
+          "direction": "output",
+          "bits": [
+            29
+          ]
+        }
       },
       "cells": {
         "u21a": {
-          "type": "U21a 74123",
+          "type": "U21a one-shot",
           "port_directions": {
-            "A (1)": "input",
-            "C87 2u2 / R142 18k": "input",
-            "Qbar (4)": "output",
-            "Q (13) n/c": "output"
+            "PC0 (1)": "input",
+            "U21 Cext (14)": "output",
+            "U21 timing (15)": "output",
+            "Qbar (4)": "output"
           },
           "connections": {
-            "A (1)": [2],
-            "C87 2u2 / R142 18k": ["1"],
-            "Qbar (4)": [3],
-            "Q (13) n/c": [99]
+            "PC0 (1)": [
+              2
+            ],
+            "U21 Cext (14)": [
+              3
+            ],
+            "U21 timing (15)": [
+              4
+            ],
+            "Qbar (4)": [
+              5
+            ]
+          },
+          "attributes": {}
+        },
+        "c87": {
+          "type": "C87 2.2uF",
+          "port_directions": {
+            "U21 Cext": "input",
+            "U21 timing": "output"
+          },
+          "connections": {
+            "U21 Cext": [
+              3
+            ],
+            "U21 timing": [
+              4
+            ]
+          },
+          "attributes": {}
+        },
+        "r142": {
+          "type": "R142 18k",
+          "port_directions": {
+            "+5V": "input",
+            "U21 timing": "output"
+          },
+          "connections": {
+            "+5V": [
+              "1"
+            ],
+            "U21 timing": [
+              4
+            ]
           },
           "attributes": {}
         },
         "shaper": {
-          "type": "R143 3k3 / R144 560",
+          "type": "R143 3.3k / R144 560",
           "port_directions": {
             "+5V": "input",
             "Qbar": "input",
-            "5.0 / 0.9 V": "output"
+            "shaper node": "output"
           },
-          "connections": { "+5V": ["1"], "Qbar": [3], "5.0 / 0.9 V": [4] },
+          "connections": {
+            "+5V": [
+              "1"
+            ],
+            "Qbar": [
+              5
+            ],
+            "shaper node": [
+              6
+            ]
+          },
           "attributes": {}
         },
         "d10": {
           "type": "D10",
-          "port_directions": { "anode": "input", "cathode": "output" },
-          "connections": { "anode": [10], "cathode": [4] },
+          "port_directions": {
+            "shaper node": "output",
+            "node Y": "input"
+          },
+          "connections": {
+            "shaper node": [
+              6
+            ],
+            "node Y": [
+              9
+            ]
+          },
           "attributes": {}
         },
         "c88": {
-          "type": "C88 47n",
-          "port_directions": { "in": "input", "node X": "output" },
-          "connections": { "in": [4], "node X": [5] },
+          "type": "C88 47nF",
+          "port_directions": {
+            "shaper node": "input",
+            "node X": "output"
+          },
+          "connections": {
+            "shaper node": [
+              6
+            ],
+            "node X": [
+              8
+            ]
+          },
           "attributes": {}
         },
-        "r145r146": {
+        "node_x_pullup": {
           "type": "R145 270k / R146 1M",
-          "port_directions": { "+12V": "input", "node X": "output" },
-          "connections": { "+12V": ["1"], "node X": [5] },
+          "port_directions": {
+            "+12V": "input",
+            "node X": "output"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "node X": [
+              8
+            ]
+          },
           "attributes": {}
         },
         "r147": {
           "type": "R147 1M",
-          "port_directions": { "node X": "input", "node Y": "output" },
-          "connections": { "node X": [5], "node Y": [10] },
+          "port_directions": {
+            "node X": "input",
+            "node Y": "output"
+          },
+          "connections": {
+            "node X": [
+              8
+            ],
+            "node Y": [
+              9
+            ]
+          },
           "attributes": {}
         },
-        "c89r148": {
-          "type": "C89 680n / R148 2M2",
-          "port_directions": { "node Y": "input", "468 ms": "output" },
-          "connections": { "node Y": [10], "468 ms": [11] },
+        "node_y_tail": {
+          "type": "R148 2.2M / C89 680nF",
+          "port_directions": {
+            "GND": "input",
+            "node Y": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "node Y": [
+              9
+            ]
+          },
           "attributes": {}
         },
         "u20a": {
-          "type": "U20a",
-          "port_directions": { "+ (3)": "input", "out (1)": "output" },
-          "connections": { "+ (3)": [11], "out (1)": [12] },
+          "type": "U20a follower",
+          "port_directions": {
+            "node Y (3)": "output",
+            "U20a out (1,2)": "output"
+          },
+          "connections": {
+            "node Y (3)": [
+              9
+            ],
+            "U20a out (1,2)": [
+              10
+            ]
+          },
           "attributes": {}
         },
         "u19d": {
-          "type": "U19d",
-          "port_directions": { "+ (12)": "input", "out (14)": "output" },
-          "connections": { "+ (12)": [5], "out (14)": [20] },
+          "type": "U19d follower of X",
+          "port_directions": {
+            "node X (12)": "output",
+            "U19d out (14,13)": "output"
+          },
+          "connections": {
+            "node X (12)": [
+              8
+            ],
+            "U19d out (14,13)": [
+              11
+            ]
+          },
           "attributes": {}
         },
         "u19a": {
-          "type": "U19a",
+          "type": "U19a x-5.89",
           "port_directions": {
-            "R149 5k6 (2)": "input",
-            "R150 33k (2-1)": "input",
             "+6V (3)": "input",
-            "out (1)": "output"
+            "U19a in (2)": "output",
+            "net 21 (1)": "output"
           },
           "connections": {
-            "R149 5k6 (2)": [20],
-            "R150 33k (2-1)": [21],
-            "+6V (3)": ["1"],
-            "out (1)": [21]
+            "+6V (3)": [
+              "1"
+            ],
+            "U19a in (2)": [
+              12
+            ],
+            "net 21 (1)": [
+              13
+            ]
+          },
+          "attributes": {}
+        },
+        "u19b": {
+          "type": "U19b integrator",
+          "port_directions": {
+            "A/2 (5)": "output",
+            "U19b summing node (6)": "output",
+            "U19b out (7)": "output"
+          },
+          "connections": {
+            "A/2 (5)": [
+              18
+            ],
+            "U19b summing node (6)": [
+              19
+            ],
+            "U19b out (7)": [
+              20
+            ]
+          },
+          "attributes": {}
+        },
+        "u19c": {
+          "type": "U19c Schmitt",
+          "port_directions": {
+            "U19b out (9)": "input",
+            "Schmitt window (10)": "output",
+            "Schmitt out (8)": "output"
+          },
+          "connections": {
+            "U19b out (9)": [
+              20
+            ],
+            "Schmitt window (10)": [
+              21
+            ],
+            "Schmitt out (8)": [
+              22
+            ]
+          },
+          "attributes": {}
+        },
+        "r149": {
+          "type": "R149 5.6k",
+          "port_directions": {
+            "U19d out": "input",
+            "U19a in": "output"
+          },
+          "connections": {
+            "U19d out": [
+              11
+            ],
+            "U19a in": [
+              12
+            ]
+          },
+          "attributes": {}
+        },
+        "r150": {
+          "type": "R150 33k",
+          "port_directions": {
+            "U19a in": "output",
+            "net 21": "input"
+          },
+          "connections": {
+            "U19a in": [
+              12
+            ],
+            "net 21": [
+              13
+            ]
           },
           "attributes": {}
         },
         "u18": {
           "type": "U18 555",
           "port_directions": {
-            "R151/R152 10k (7)": "input",
-            "C90 3u3 (2,6)": "input",
-            "CV (5)": "input",
-            "out (3)": "output"
+            "+12V (8)": "input",
+            "GND (1)": "input",
+            "net 21 (5)": "input",
+            "U18 discharge (7)": "output",
+            "U18 timing (6,2)": "output",
+            "U18 out (3)": "output"
           },
           "connections": {
-            "R151/R152 10k (7)": ["1"],
-            "C90 3u3 (2,6)": ["1"],
-            "CV (5)": [21],
-            "out (3)": [30]
+            "+12V (8)": [
+              "1"
+            ],
+            "GND (1)": [
+              "0"
+            ],
+            "net 21 (5)": [
+              13
+            ],
+            "U18 discharge (7)": [
+              14
+            ],
+            "U18 timing (6,2)": [
+              15
+            ],
+            "U18 out (3)": [
+              16
+            ]
+          },
+          "attributes": {}
+        },
+        "r151": {
+          "type": "R151 10k",
+          "port_directions": {
+            "+12V": "input",
+            "U18 discharge": "output"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "U18 discharge": [
+              14
+            ]
+          },
+          "attributes": {}
+        },
+        "r152": {
+          "type": "R152 10k",
+          "port_directions": {
+            "U18 discharge": "input",
+            "U18 timing": "output"
+          },
+          "connections": {
+            "U18 discharge": [
+              14
+            ],
+            "U18 timing": [
+              15
+            ]
+          },
+          "attributes": {}
+        },
+        "c90": {
+          "type": "C90 3.3uF",
+          "port_directions": {
+            "GND": "input",
+            "U18 timing": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U18 timing": [
+              15
+            ]
           },
           "attributes": {}
         },
         "r153": {
-          "type": "R153 2k7",
-          "port_directions": { "in": "input", "node A": "output" },
-          "connections": { "in": [30], "node A": [40] },
+          "type": "R153 2.7k",
+          "port_directions": {
+            "U18 out": "input",
+            "node A": "output"
+          },
+          "connections": {
+            "U18 out": [
+              16
+            ],
+            "node A": [
+              17
+            ]
+          },
           "attributes": {}
         },
         "r154": {
-          "type": "R154 8k2",
-          "port_directions": { "in": "input", "node A": "output" },
-          "connections": { "in": [21], "node A": [40] },
+          "type": "R154 8.2k",
+          "port_directions": {
+            "net 21": "input",
+            "node A": "output"
+          },
+          "connections": {
+            "net 21": [
+              13
+            ],
+            "node A": [
+              17
+            ]
+          },
           "attributes": {}
         },
-        "r155c91": {
-          "type": "R155 820 / C91 15u",
-          "port_directions": { "node A": "input", "0.3-3 V": "output" },
-          "connections": { "node A": [40], "0.3-3 V": [41] },
+        "node_a_load": {
+          "type": "R155 820 / C91 15uF",
+          "port_directions": {
+            "GND": "input",
+            "node A": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "node A": [
+              17
+            ]
+          },
           "attributes": {}
         },
         "r156": {
           "type": "R156 33k",
-          "port_directions": { "node A": "input", "-> pin 6": "output" },
-          "connections": { "node A": [41], "-> pin 6": [42] },
+          "port_directions": {
+            "node A": "input",
+            "U19b summing node": "output"
+          },
+          "connections": {
+            "node A": [
+              17
+            ],
+            "U19b summing node": [
+              19
+            ]
+          },
           "attributes": {}
         },
-        "r157r158": {
+        "reference_divider": {
           "type": "R157 33k / R158 33k",
-          "port_directions": { "node A": "input", "A/2": "output" },
-          "connections": { "node A": [41], "A/2": [43] },
+          "port_directions": {
+            "GND": "input",
+            "node A": "input",
+            "A/2": "output"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "node A": [
+              17
+            ],
+            "A/2": [
+              18
+            ]
+          },
           "attributes": {}
         },
         "c92": {
-          "type": "C92 1n",
-          "port_directions": { "pin 6": "input", "pin 7": "output" },
-          "connections": { "pin 6": [42], "pin 7": [44] },
-          "attributes": {}
-        },
-        "u19b": {
-          "type": "U19b integrator",
+          "type": "C92 1nF",
           "port_directions": {
-            "- (6)": "input",
-            "+ (5)": "input",
-            "out (7)": "output"
+            "U19b summing node": "input",
+            "U19b out": "input"
           },
-          "connections": { "- (6)": [42], "+ (5)": [43], "out (7)": [44] },
-          "attributes": {}
-        },
-        "u19c": {
-          "type": "U19c Schmitt",
-          "port_directions": {
-            "- (9)": "input",
-            "+ (10)": "input",
-            "out (8)": "output"
+          "connections": {
+            "U19b summing node": [
+              19
+            ],
+            "U19b out": [
+              20
+            ]
           },
-          "connections": { "- (9)": [44], "+ (10)": [45], "out (8)": [46] },
-          "attributes": {}
-        },
-        "r161": {
-          "type": "R161 33k",
-          "port_directions": { "+6V": "input", "out": "output" },
-          "connections": { "+6V": ["1"], "out": [45] },
-          "attributes": {}
-        },
-        "r162": {
-          "type": "R162 100k",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [46], "out": [45] },
-          "attributes": {}
-        },
-        "r163d11": {
-          "type": "R163 10k / D11",
-          "port_directions": { "in": "input", "out": "output" },
-          "connections": { "in": [46], "out": [47] },
-          "attributes": {}
-        },
-        "q7": {
-          "type": "Q7 C1684 / R160 2k2",
-          "port_directions": { "B": "input", "C": "output" },
-          "connections": { "B": [47], "C": [48] },
           "attributes": {}
         },
         "r159": {
           "type": "R159 15k",
-          "port_directions": { "Q7 C": "input", "-> pin 6": "output" },
-          "connections": { "Q7 C": [48], "-> pin 6": [42] },
-          "attributes": {}
-        },
-        "r164r165": {
-          "type": "R164 1M / R165 220k",
-          "port_directions": { "in": "input", "x0.18": "output" },
-          "connections": { "in": [46], "x0.18": [50] },
-          "attributes": {}
-        },
-        "u16": {
-          "type": "U16 MB4391",
           "port_directions": {
-            "C93 2u2 IN (1)": "input",
-            "CON (2)": "input",
-            "OUT (15)": "output"
+            "U19b summing node": "output",
+            "Q7 collector": "input"
           },
           "connections": {
-            "C93 2u2 IN (1)": [50],
-            "CON (2)": [12],
-            "OUT (15)": [60]
+            "U19b summing node": [
+              19
+            ],
+            "Q7 collector": [
+              24
+            ]
+          },
+          "attributes": {}
+        },
+        "schmitt_window": {
+          "type": "R161 33k / R162 100k",
+          "port_directions": {
+            "+6V": "input",
+            "Schmitt window": "output",
+            "Schmitt out": "input"
+          },
+          "connections": {
+            "+6V": [
+              "1"
+            ],
+            "Schmitt window": [
+              21
+            ],
+            "Schmitt out": [
+              22
+            ]
+          },
+          "attributes": {}
+        },
+        "r163": {
+          "type": "R163 10k",
+          "port_directions": {
+            "Schmitt out": "input",
+            "Q7 base drive": "output"
+          },
+          "connections": {
+            "Schmitt out": [
+              22
+            ],
+            "Q7 base drive": [
+              23
+            ]
+          },
+          "attributes": {}
+        },
+        "q7": {
+          "type": "Q7 C1684",
+          "port_directions": {
+            "Q7 base drive (b)": "input",
+            "Q7 collector (c)": "output"
+          },
+          "connections": {
+            "Q7 base drive (b)": [
+              23
+            ],
+            "Q7 collector (c)": [
+              24
+            ]
+          },
+          "attributes": {}
+        },
+        "x0_18_divider": {
+          "type": "R164 1M / R165 220k",
+          "port_directions": {
+            "GND": "input",
+            "Schmitt out": "input",
+            "x0.18": "output"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "Schmitt out": [
+              22
+            ],
+            "x0.18": [
+              25
+            ]
+          },
+          "attributes": {}
+        },
+        "c93": {
+          "type": "C93 2.2uF",
+          "port_directions": {
+            "x0.18": "input",
+            "U16 in": "output"
+          },
+          "connections": {
+            "x0.18": [
+              25
+            ],
+            "U16 in": [
+              26
+            ]
+          },
+          "attributes": {}
+        },
+        "u16a": {
+          "type": "U16a VCA",
+          "port_directions": {
+            "U20a out (2)": "input",
+            "U16 in (1)": "input",
+            "U16 RO (14)": "output",
+            "U16 out (15)": "output"
+          },
+          "connections": {
+            "U20a out (2)": [
+              10
+            ],
+            "U16 in (1)": [
+              26
+            ],
+            "U16 RO (14)": [
+              27
+            ],
+            "U16 out (15)": [
+              28
+            ]
+          },
+          "attributes": {}
+        },
+        "c94": {
+          "type": "C94 680pF",
+          "port_directions": {
+            "GND": "input",
+            "U16 RO": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U16 RO": [
+              27
+            ]
+          },
+          "attributes": {}
+        },
+        "mix_leg": {
+          "type": "R203 39k / R204 8.2k",
+          "port_directions": {
+            "GND": "input",
+            "U16 out": "input",
+            "shot leg": "output"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U16 out": [
+              28
+            ],
+            "shot leg": [
+              29
+            ]
           },
           "attributes": {}
         }

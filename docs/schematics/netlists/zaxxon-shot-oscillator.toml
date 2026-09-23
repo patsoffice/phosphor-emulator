@@ -1,0 +1,618 @@
+# Zaxxon's shot voice (PC0), at pin level.
+#
+# The first transcription in the format `docs/designs/schematic-transcription.md`
+# describes, and the probe for whether that format can carry what these sheets
+# contain. It replaces `docs/schematics/zaxxon-shot-oscillator.json`, which is
+# now generated from this file:
+#
+#     cargo run -p phosphor-netlist -- svg \
+#         docs/schematics/netlists/zaxxon-shot-oscillator.toml \
+#         -o docs/schematics/zaxxon-shot-oscillator.json
+#     ./docs/schematics/render.sh
+#
+# WHERE THIS READING COMES FROM. Not from the scan directly: from
+# `zaxxon-discrete-sound.md`, which carries the argument behind every junction
+# here and records that the shaper half and the oscillator half were each
+# re-read at 400 dpi. That makes this a fourth reading of an already settled
+# circuit rather than a first reading of a drawing, which is the right risk for
+# a format probe and the wrong one for a board nobody has read. The parts whose
+# junctions that prose does not establish are marked `unread` rather than
+# guessed, and `netlist show` counts them.
+#
+# TWO PLACES THIS DISAGREES WITH THE JSON IT REPLACES, both because the prose's
+# node table is finer than a block diagram can be:
+#
+#   - `R148` and `C89` are drawn there as a series block between node Y and
+#     `U20` pin 3. The node table puts node Y directly on pin 3, with `R148`
+#     and `C89` from node Y to ground. Same parts, different circuit.
+#   - `R155` and `C91` are drawn there as a series block between node A and
+#     the divider. The node table puts both from node A to ground.
+#
+# Neither is a new reading. Both are what the prose already said and what a
+# lumped drawing could not express, which is the argument for this format in
+# one line.
+
+[board]
+name = "Zaxxon sound"
+assembly = "834-0214"
+source = "arcade-museum.com/manuals-videogames/Z/Zaxxon.pdf, IC Board A, sheets 11 and 12"
+sheets = "11-12"
+dpi = 400
+excerpt = "the shot voice (PC0): a one-shot, a shaper, a 555-swept relaxation oscillator and a VCA"
+prose = "docs/schematics/zaxxon-discrete-sound.md"
+
+# ---------------------------------------------------------------------------
+# The trigger and the shaper.
+#
+# `PC0` fires a one-shot; its Qbar drops the shaper node; `C88` carries that
+# step into node X and `D10` holds node Y a diode drop above the shaper node
+# until `C89` recovers.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "U21"
+kind = "U"
+device = "74123"
+pins = ["1", "2", "3", "4", "13", "14", "15"]
+out = ["4"]
+read = "partial"
+note = """
+Section A only. The prose establishes pin 1 as the trigger, pin 4 as Qbar, \
+pin 13 as Q, and the timing network on pins 14 and 15. The B and clear inputs \
+on pins 2 and 3 are on the drawing and have not been read."""
+nc = [
+  { pin = "13", why = "Q is drawn and connects to nothing. Qbar on pin 4 is what drives R144, and reading Q as the driver inverts the whole voice: the shaper node would rest low, holding node Y below the MB4391's mute point, and the voice would scream at power-on instead of resting silent." },
+]
+unread = [
+  { pin = "2", why = "the one-shot's B input; not established by the prose, needs the sheet at 400 dpi" },
+  { pin = "3", why = "the one-shot's clear; not established by the prose, needs the sheet at 400 dpi" },
+]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3", "4", "13", "14", "15"]
+role = "one-shot"
+
+[[parts]]
+ref = "C87"
+kind = "C"
+uf = 2.2
+note = "the one-shot's timing capacitor, on U21 pins 14 and 15."
+
+[[parts]]
+ref = "R142"
+kind = "R"
+kohms = 18
+
+[[parts]]
+ref = "R143"
+kind = "R"
+kohms = 3.3
+block = "shaper"
+
+[[parts]]
+ref = "R144"
+kind = "R"
+ohms = 560
+block = "shaper"
+
+[[parts]]
+ref = "D10"
+kind = "D"
+note = """
+Anode on node Y, cathode on the shaper node. This orientation is what makes \
+the voice rest muted: with the shaper node at +5 V the diode holds Y at 5.6 V, \
+above the MB4391's 4.76 V mute point, and the trigger drags Y down to 1.50 V \
+to open the VCA."""
+
+[[parts]]
+ref = "C88"
+kind = "C"
+uf = 0.047
+note = """
+The drawing writes this value as `047UF` with no decimal point anywhere, \
+neither leading nor medial, which leaves it open between 0.047 and 0.47 uF. \
+Settled at 0.047 by comparing glyphs at 600 percent against a known `.047 UF` \
+on C139 and C140 in the same drawing set: identical glyph size, identical 0-to-4 \
+spacing, and no room between the 0 and the 4 for the point that 0.47 would \
+need. The distinction is worth 10x on node X's time constant, 26 ms against \
+260 ms."""
+
+# ---------------------------------------------------------------------------
+# Node X and node Y: the envelope, and the amplifier that is not amplifying.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R145"
+kind = "R"
+kohms = 270
+block = "node X pullup"
+
+[[parts]]
+ref = "R146"
+kind = "R"
+mohms = 1
+block = "node X pullup"
+
+[[parts]]
+ref = "R147"
+kind = "R"
+mohms = 1
+
+[[parts]]
+ref = "R148"
+kind = "R"
+mohms = 2.2
+block = "node Y tail"
+
+[[parts]]
+ref = "C89"
+kind = "C"
+uf = 0.68
+block = "node Y tail"
+note = """
+Recovers through R147 in parallel with R148, a 468 ms time constant, and Y \
+crosses back above the mute point at about 630 ms. That is the shot's length; \
+the reference recording of this voice is 990 ms."""
+
+[[parts]]
+ref = "U20"
+kind = "U"
+device = "LM324"
+pins = ["1", "2", "3"]
+out = ["1"]
+read = "partial"
+note = """
+Section A only, strapped output to inverting input, so it is a unity follower \
+of node Y driving the MB4391's control pin. The package's other three sections \
+and its supply pins are elsewhere on the sheet and are not in this excerpt."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "follower"
+
+# ---------------------------------------------------------------------------
+# The quad that carries the oscillator.
+#
+# Four sections doing four different jobs: a follower of node X, an inverting
+# amplifier that spends its life pinned at a rail, and the integrator and
+# Schmitt pair that are the battleship's oscillator built a third time.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "U19"
+kind = "U"
+device = "LM324"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+read = "partial"
+note = """
+The supply pins are not drawn in this region of the sheet, so the output \
+swing this voice's rate depends on is an assumption about the part class \
+rather than a reading. That is the single unread fact with the most leverage \
+on this voice."""
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "follower of X"
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "x-5.89"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "integrator"
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "Schmitt"
+
+[[parts]]
+ref = "R149"
+kind = "R"
+kohms = 5.6
+
+[[parts]]
+ref = "R150"
+kind = "R"
+kohms = 33
+note = "feedback around U19 section A: -R150/R149 = -5.89 about the +6 V on pin 3."
+
+# ---------------------------------------------------------------------------
+# The 555 that sweeps the reference, and node A.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "U18"
+kind = "U"
+device = "555"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8"]
+out = ["3"]
+note = """
+An astable on +12 V that would run at 14.5 Hz alone, but pin 5 is live: it \
+carries U19 section A's output, so the part runs near 39 Hz at 11 percent duty \
+with that amplifier low and near 7 Hz at 84 percent with it high. The duty is \
+what the board is using."""
+unread = [
+  { pin = "4", why = "reset; almost certainly tied to the supply, but the prose does not read it and a 555's reset is worth reading rather than assuming" },
+]
+
+[[parts]]
+ref = "R151"
+kind = "R"
+kohms = 10
+
+[[parts]]
+ref = "R152"
+kind = "R"
+kohms = 10
+
+[[parts]]
+ref = "C90"
+kind = "C"
+uf = 3.3
+
+[[parts]]
+ref = "R153"
+kind = "R"
+kohms = 2.7
+
+[[parts]]
+ref = "R154"
+kind = "R"
+kohms = 8.2
+
+[[parts]]
+ref = "R155"
+kind = "R"
+ohms = 820
+block = "node A load"
+note = """
+The part that makes the voice work. It holds node A to about a fifth of what \
+either source alone would give, which is what keeps the oscillator's reference \
+in the range where it sounds like a shot."""
+
+[[parts]]
+ref = "C91"
+kind = "C"
+uf = 15
+block = "node A load"
+
+# ---------------------------------------------------------------------------
+# The oscillator proper. R156 with R157 and R158 is a reference divider and
+# not a filter's input, and R159 arrives at the integrator's pin 6 rather than
+# at the divider feeding pin 5. Those two facts are what make this a swept
+# oscillator rather than the low-pass every other U19-class stage on this board
+# is, and neither is visible in a part list.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R156"
+kind = "R"
+kohms = 33
+
+[[parts]]
+ref = "R157"
+kind = "R"
+kohms = 33
+block = "reference divider"
+
+[[parts]]
+ref = "R158"
+kind = "R"
+kohms = 33
+block = "reference divider"
+
+[[parts]]
+ref = "C92"
+kind = "C"
+pf = 1000
+
+[[parts]]
+ref = "R159"
+kind = "R"
+kohms = 15
+note = """
+Lands on U19 section B's pin 6, the summing node, and not on the pin-5 divider \
+that crosses that vertical with no dot. The same shape appears on the \
+battleship and reading it wrong moves the voice by a factor of four."""
+
+[[parts]]
+ref = "R161"
+kind = "R"
+kohms = 33
+block = "Schmitt window"
+
+[[parts]]
+ref = "R162"
+kind = "R"
+kohms = 100
+block = "Schmitt window"
+
+[[parts]]
+ref = "R163"
+kind = "R"
+kohms = 10
+
+[[parts]]
+ref = "D11"
+kind = "D"
+read = "partial"
+note = """
+In the path from the Schmitt's output to Q7's base. Whether it sits in series \
+with R163 or clamps the base is not established by the prose, and the two are \
+a different circuit, so both of its pins are unread rather than guessed."""
+unread = [
+  { pin = "a", why = "in the R163-to-Q7-base path; series or clamp is not established" },
+  { pin = "k", why = "in the R163-to-Q7-base path; series or clamp is not established" },
+]
+
+[[parts]]
+ref = "Q7"
+kind = "Q"
+device = "C1684"
+out = ["c"]
+unread = [
+  { pin = "e", why = "the emitter's return is not established by the prose; the drawing lumps Q7 with R160 into one block and states only base and collector" },
+]
+
+[[parts]]
+ref = "R160"
+kind = "R"
+kohms = 2.2
+read = "partial"
+note = """
+Known to exist and associated with Q7: the drawing this was transcribed from \
+lumps the two into one block labeled `Q7 C1684 / R160 2k2` and states only the \
+block's base and collector. Neither end of R160 is placed. The same 2.2k \
+appears beside the battleship's Q4 and Q5 as R87 and R97, so settling one \
+settles three."""
+unread = [
+  { pin = "a", why = "not placed; the block diagram it came from states only Q7's base and collector" },
+  { pin = "b", why = "not placed; the block diagram it came from states only Q7's base and collector" },
+]
+
+# ---------------------------------------------------------------------------
+# Out through the VCA. C94 is the part this whole design exists to make
+# findable: 680 pF on the pin the drawing labels RO, on every MB4391 channel on
+# these two sheets, in none of the prose, the old JSON or the device.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R164"
+kind = "R"
+mohms = 1
+block = "x0.18 divider"
+
+[[parts]]
+ref = "R165"
+kind = "R"
+kohms = 220
+block = "x0.18 divider"
+
+[[parts]]
+ref = "C93"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+ref = "U16"
+kind = "U"
+device = "MB4391"
+pins = ["1", "2", "14", "15"]
+out = ["15"]
+read = "partial"
+note = """
+Channel A. The drawing labels these four pins IN, CON, OUT and RO. The \
+package's second channel and its supply pins are on the sheet and are not in \
+this excerpt. The part has no datasheet on the open web and no SPICE model, so \
+what RO does quantitatively is a genuine unknown rather than an unread fact."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "14", "15"]
+role = "VCA"
+
+[[parts]]
+ref = "C94"
+kind = "C"
+pf = 680
+note = """
+On U16 pin 14, the RO pin, to ground. Not in the prose's transcription and not \
+in the device. A VCA's rolloff pin sets its bandwidth, and in a current-steering \
+VCA the resistance that capacitor works against moves with the control current, \
+so the corner falls as the voice decays. That is the shape of the board's \
+measured rolloff and the device has no mechanism that can do it. Found by \
+cropping this region of the sheet for an unrelated reason after six passes had \
+missed it, which is the whole argument for transcribing parts the device does \
+not model."""
+
+[[parts]]
+ref = "R203"
+kind = "R"
+kohms = 39
+block = "mix leg"
+
+[[parts]]
+ref = "R204"
+kind = "R"
+kohms = 8.2
+block = "mix leg"
+
+# ---------------------------------------------------------------------------
+# Nets. Endpoint order is reading order, and for a two-terminal part `a` is
+# the upstream end, which is what lets the generated drawing flow left to
+# right.
+# ---------------------------------------------------------------------------
+
+[[nets]]
+name = "PC0"
+port = "input"
+on = ["U21.1"]
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["R142.a", "R143.a"]
+
+[[nets]]
+name = "+6V"
+rail = true
+on = ["U19.3", "R161.a"]
+
+[[nets]]
+name = "+12V"
+rail = true
+on = ["R145.a", "R151.a", "U18.8"]
+
+[[nets]]
+name = "GND"
+rail = true
+on = [
+  "R148.b", "C89.b", "U18.1", "C90.b", "R155.b", "C91.b",
+  "R158.b", "R165.b", "C94.b", "R204.b",
+]
+
+[[nets]]
+name = "U21 Cext"
+on = ["C87.a", "U21.14"]
+note = """
+C87 spans pins 14 and 15, which is this part's timing configuration and is how \
+the prose reads it. Which end the electrolytic's positive terminal sits on is \
+not stated."""
+
+[[nets]]
+name = "U21 timing"
+on = ["R142.b", "C87.b", "U21.15"]
+
+[[nets]]
+name = "Qbar"
+on = ["U21.4", "R144.a"]
+
+[[nets]]
+name = "shaper node"
+on = ["R143.b", "R144.b", "C88.a", "D10.k"]
+
+[[nets]]
+name = "R145/R146 junction"
+on = ["R145.b", "R146.a"]
+
+[[nets]]
+name = "node X"
+on = ["C88.b", "R146.b", "R147.a", "U19.12"]
+
+[[nets]]
+name = "node Y"
+on = ["R147.b", "R148.a", "C89.a", "D10.a", "U20.3"]
+
+[[nets]]
+name = "U20a out"
+on = ["U20.1", "U20.2", "U16.2"]
+note = "the follower's output is also its own inverting input, which is what makes it one."
+
+[[nets]]
+name = "U19d out"
+on = ["U19.14", "U19.13", "R149.a"]
+note = "strapped output to inverting input: a unity follower of node X."
+
+[[nets]]
+name = "U19a in"
+on = ["R149.b", "R150.b", "U19.2"]
+
+[[nets]]
+name = "net 21"
+on = ["U19.1", "R150.a", "R154.a", "U18.5"]
+note = """
+Nothing else lands here. It is U19 section A's output, U18's pin 5 and R154, \
+and that was an open question the second reading closed: there is no fourth \
+thing."""
+
+[[nets]]
+name = "U18 discharge"
+on = ["R151.b", "R152.a", "U18.7"]
+
+[[nets]]
+name = "U18 timing"
+on = ["R152.b", "C90.a", "U18.6", "U18.2"]
+
+[[nets]]
+name = "U18 out"
+on = ["U18.3", "R153.a"]
+
+[[nets]]
+name = "node A"
+on = ["R153.b", "R154.b", "R155.a", "C91.a", "R156.a", "R157.a"]
+note = """
+Exactly these six. R153 from the 555's pin 3 and R154 up from net 21 are the \
+two sources; R155 and C91 are the load to ground; R156 and R157 are what the \
+oscillator reads. The device's traced peak here is 2.07 V where the board's has \
+to be near 0.5 V, and that gap is the voice's outstanding residual."""
+
+[[nets]]
+name = "A/2"
+on = ["R157.b", "R158.a", "U19.5"]
+
+[[nets]]
+name = "U19b summing node"
+on = ["R156.b", "C92.a", "R159.b", "U19.6"]
+note = """
+Pin 6, not pin 5. R156 and R159 both arrive here, which is what makes this an \
+integrator in a loop rather than a low-pass filter fed from a divider."""
+
+[[nets]]
+name = "U19b out"
+on = ["U19.7", "C92.b", "U19.9"]
+
+[[nets]]
+name = "Schmitt window"
+on = ["R161.b", "R162.b", "U19.10"]
+
+[[nets]]
+name = "Schmitt out"
+on = ["U19.8", "R162.a", "R163.a", "R164.a"]
+
+[[nets]]
+name = "Q7 base drive"
+on = ["R163.b", "Q7.b"]
+note = """
+D11 is in this path and its placement is unread, so this net is the topology \
+as far as the prose establishes it and not as far as the drawing goes. If D11 \
+is in series rather than a clamp, R163 does not reach the base directly and \
+this net splits in two."""
+
+[[nets]]
+name = "Q7 collector"
+on = ["Q7.c", "R159.a"]
+
+[[nets]]
+name = "x0.18"
+on = ["R164.b", "R165.a", "C93.a"]
+
+[[nets]]
+name = "U16 in"
+on = ["C93.b", "U16.1"]
+
+[[nets]]
+name = "U16 RO"
+on = ["U16.14", "C94.a"]
+note = """
+The pin the drawing labels RO, with 680 pF on it. Every MB4391 channel on these \
+two sheets has this part: C75 on U15 channel B and C77 on U13 channel B were \
+read at 400 dpi alongside this one, and C33 and C42 on the engine pair were \
+already known. None of them is in the device."""
+
+[[nets]]
+name = "U16 out"
+on = ["U16.15", "R203.a"]
+
+[[nets]]
+name = "shot leg"
+port = "output"
+on = ["R203.b", "R204.a"]
+note = "on to C23 and the 51k summing leg R205, which are outside this excerpt."
