@@ -1,8 +1,8 @@
 {
   "modules": {
-    "Zaxxon sound: so far: the shot voice (PC0) and the battleship (PB7), both on sheet 11, shot": {
+    "Zaxxon sound: both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file, shot": {
       "ports": {
-        "PC0": {
+        "SHOT": {
           "direction": "input",
           "bits": [
             2
@@ -19,14 +19,14 @@
         "u21a": {
           "type": "U21a one-shot",
           "port_directions": {
-            "PC0 (1)": "input",
+            "SHOT (1)": "input",
             "+5V (2,3)": "input",
             "U21 Cext (14)": "output",
             "U21 timing (15)": "output",
             "Qbar (4)": "output"
           },
           "connections": {
-            "PC0 (1)": [
+            "SHOT (1)": [
               2
             ],
             "+5V (2,3)": [
@@ -177,7 +177,7 @@
           "attributes": {}
         },
         "u20a": {
-          "type": "U20a follower",
+          "type": "U20a node Y follower",
           "port_directions": {
             "node Y (3)": "output",
             "U20a out (1,2)": "output"

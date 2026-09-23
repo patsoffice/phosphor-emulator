@@ -1,8 +1,8 @@
 # Design: Schematic Transcription
 
-> **Status: rungs 1 and 3 done, rung 4 cut, rung 2 open.** The kill criterion
-> is settled and its two questions disagreed; see the bottom of this file.
-> Make a board's transcription a single piece of data
+> **Status: rungs 1 and 3 done, rung 2 substantially done, rung 4 cut.** The
+> kill criterion is settled and its two questions disagreed; see the bottom of
+> this file. Make a board's transcription a single piece of data
 > rather than three prose copies of itself: a pin-level netlist per board, lints
 > over it, generated Rust constants, and an offline solver that can tell a
 > misreading from a modeling approximation. Scoped to a probe on one board with
@@ -261,6 +261,43 @@ This board is chosen because it was read six times and its reading is fresh, so
 a disagreement between the netlist and the device is most likely to be a real
 finding rather than a transcription slip in the new file.
 
+> **Substantially done: 370 parts across 308 symbols, about forty short.**
+> `docs/schematics/netlists/zaxxon-sound.toml`. Sheet 11 whole; on sheet 12 the
+> PPI and all twelve gates, the player ship level and its opto-tuned engine,
+> both missiles, the laser, both tone filters, the supply, the mute, all seven
+> MB4391 channels, all eleven mix legs and the path to the speaker. What is
+> missing is listed at the top of that file and every unread pin carries its
+> reason, so the transcription states its own gaps.
+>
+> **What the reading found, beyond confirming the prose.** These are the
+> return on transcribing at pin level rather than as blocks:
+>
+> - **The drawing is wrong on a pin number.** `U9`'s fourth-section output is
+>   labeled pin 11, which is the negative supply on a 14-pin quad. `U10`'s
+>   identical section says 14, and `U11`'s pin 11 is drawn going to ground two
+>   sheet-halves away. Both earlier transcriptions copied the 11 through.
+> - **The drawing uses one designator twice.** Two parts are labeled `R127`.
+>   `R129` is missing from the run and the device already calls the 47k one
+>   that. The loader refuses duplicates, so the file could not load until it
+>   was settled.
+> - **`LM324` is nowhere on the drawing.** It is a part-class inference, and it
+>   supplies the output swing that sets the shot's whole pitch range.
+> - **Crossings without junction dots are this drawing's commonest trap**, and
+>   there are at least three: `R10`/`R11` over the player ship ladder,
+>   `R96`/`R70` over the oscillators' pin-5 dividers, and `C30`/`C39` under the
+>   tone filters' nodes. Each is worth a factor or a whole topology.
+> - **The explosion and missile envelope followers tap a midpoint**, not the
+>   storage capacitor, so what reaches the VCA is `(5 V + V_cap) / 2`.
+> - **+6 V is an unregulated divider** that every op-amp reference on both
+>   sheets shares behind 500 ohms.
+> - **All seven `RO` capacitors** are now in the file, and the lint returns all
+>   seven.
+>
+> **Two format changes the reading forced**, both recorded in decision 3's
+> amendment and in the loader: a drawn pin may be `unread` with a reason, and
+> a part may carry `also` for the rest of a run drawn as one symbol, because
+> this board's bypass capacitors are 63 parts on three symbols.
+
 ### 3. Lints
 
 Cheap, and each one catches an error this board actually had:
@@ -357,6 +394,11 @@ answers, and neither takes more than an afternoon to settle.
 **One: yes.** `netlist lint --device machines/src/zaxxon_sound.rs` over the shot
 voice returns `C94` in a list of ten, knowing nothing about `RO` pins. Nine of
 the other rows are real gaps too. This is the answer the criterion wanted.
+
+The criterion asks for `C94` *and its siblings*, and rung 2 has since settled
+that half too: all seven `RO` capacitors on the board, `C33`, `C42`, `C52`,
+`C75`, `C77`, `C86` and `C94`, come back from the same query with nothing in
+the tool knowing that MB4391s have rolloff pins.
 
 **Two: no**, and it was traced rather than assumed. `battleship_hz()` already
 computes from `R93`, `R96`, `C58`, `R98` and `R99`, and its own test asserted

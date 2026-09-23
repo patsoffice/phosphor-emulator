@@ -1,156 +1,213 @@
 {
   "modules": {
-    "zaxxon engine tone A: a Sallen-Key low-pass, not a band-pass": {
+    "Zaxxon sound: both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file, engine": {
       "ports": {
-        "NOISE 1": { "direction": "input", "bits": [2] },
-        "PA2 / PA3": { "direction": "input", "bits": [21] },
-        "R174 15k -> SJ": { "direction": "output", "bits": [60] }
+        "NOISE 1": {
+          "direction": "input",
+          "bits": [
+            2
+          ]
+        },
+        "U8d out": {
+          "direction": "input",
+          "bits": [
+            3
+          ]
+        },
+        "tone A in": {
+          "direction": "input",
+          "bits": [
+            11
+          ]
+        }
       },
       "cells": {
-        "r18": {
-          "type": "R18 200k",
-          "port_directions": { "NOISE 1": "input", "-> pin 2": "output" },
-          "connections": { "NOISE 1": [2], "-> pin 2": [3] },
-          "attributes": {}
-        },
-        "u4": {
-          "type": "U4a x0.05",
+        "r17": {
+          "type": "R17 390",
           "port_directions": {
-            "- (2)": "input",
-            "+ (3) +6V": "input",
-            "out (1)": "output"
+            "GND": "input",
+            "PC1 LED return": "input"
           },
-          "connections": { "- (2)": [3], "+ (3) +6V": ["1"], "out (1)": [4] },
-          "attributes": {}
-        },
-        "r19": {
-          "type": "R19 10k",
-          "port_directions": { "out (1)": "input", "-> pin 2": "output" },
-          "connections": { "out (1)": [4], "-> pin 2": [3] },
-          "attributes": {}
-        },
-        "c28r20": {
-          "type": "C28 2u2 / R20 10k",
-          "port_directions": { "in": "input", "node X": "output" },
-          "connections": { "in": [4], "node X": [6] },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "PC1 LED return": [
+              4
+            ]
+          },
           "attributes": {}
         },
         "pc1": {
-          "type": "PC1 LDR",
-          "port_directions": { "+6V": "input", "node X": "output" },
-          "connections": { "+6V": ["1"], "node X": [6] },
+          "type": "PC1 MCD-725H",
+          "port_directions": {
+            "+6V (cell1)": "input",
+            "U8d out (led+)": "input",
+            "PC1 LED return (led-)": "output",
+            "engine tuning node (cell2)": "output"
+          },
+          "connections": {
+            "+6V (cell1)": [
+              "1"
+            ],
+            "U8d out (led+)": [
+              3
+            ],
+            "PC1 LED return (led-)": [
+              4
+            ],
+            "engine tuning node (cell2)": [
+              5
+            ]
+          },
           "attributes": {}
         },
-        "c26": {
-          "type": "C26 10n",
-          "port_directions": { "node X": "input", "- (2)": "output" },
-          "connections": { "node X": [6], "- (2)": [7] },
-          "attributes": {}
-        },
-        "c27": {
-          "type": "C27 10n",
-          "port_directions": { "node X": "input", "out (1)": "output" },
-          "connections": { "node X": [6], "out (1)": [9] },
+        "u5a": {
+          "type": "U5a resonator",
+          "port_directions": {
+            "+5V (3)": "input",
+            "U5a in (2)": "output",
+            "U5a out (1)": "output"
+          },
+          "connections": {
+            "+5V (3)": [
+              "1"
+            ],
+            "U5a in (2)": [
+              6
+            ],
+            "U5a out (1)": [
+              7
+            ]
+          },
           "attributes": {}
         },
         "r21": {
           "type": "R21 470k",
-          "port_directions": { "- (2)": "input", "out (1)": "output" },
-          "connections": { "- (2)": [7], "out (1)": [9] },
+          "port_directions": {
+            "U5a in": "input",
+            "U5a out": "input"
+          },
+          "connections": {
+            "U5a in": [
+              6
+            ],
+            "U5a out": [
+              7
+            ]
+          },
           "attributes": {}
         },
-        "u5a": {
-          "type": "U5a band-pass",
+        "engine_bridged_t": {
+          "type": "C26 10nF / C27 10nF",
           "port_directions": {
-            "- (2)": "input",
-            "+ (3) +5V": "input",
-            "out (1)": "output"
+            "engine tuning node": "output",
+            "U5a in": "input",
+            "U5a out": "input"
           },
-          "connections": { "- (2)": [7], "+ (3) +5V": ["1"], "out (1)": [9] },
+          "connections": {
+            "engine tuning node": [
+              5
+            ],
+            "U5a in": [
+              6
+            ],
+            "U5a out": [
+              7
+            ]
+          },
+          "attributes": {}
+        },
+        "r20": {
+          "type": "R20 10k",
+          "port_directions": {
+            "engine tuning node": "input",
+            "R20/C28 junction": "output"
+          },
+          "connections": {
+            "engine tuning node": [
+              5
+            ],
+            "R20/C28 junction": [
+              8
+            ]
+          },
+          "attributes": {}
+        },
+        "c28": {
+          "type": "C28 2.2uF",
+          "port_directions": {
+            "R20/C28 junction": "output",
+            "R19/C28 junction": "input"
+          },
+          "connections": {
+            "R20/C28 junction": [
+              8
+            ],
+            "R19/C28 junction": [
+              9
+            ]
+          },
+          "attributes": {}
+        },
+        "r19": {
+          "type": "R19 10k",
+          "port_directions": {
+            "R19/C28 junction": "output",
+            "U4a in": "input"
+          },
+          "connections": {
+            "R19/C28 junction": [
+              9
+            ],
+            "U4a in": [
+              10
+            ]
+          },
+          "attributes": {}
+        },
+        "r18": {
+          "type": "R18 200k",
+          "port_directions": {
+            "NOISE 1": "input",
+            "U4a in": "output"
+          },
+          "connections": {
+            "NOISE 1": [
+              2
+            ],
+            "U4a in": [
+              10
+            ]
+          },
+          "attributes": {}
+        },
+        "u4a": {
+          "type": "U4a engine input",
+          "port_directions": {
+            "U4a in (2)": "output"
+          },
+          "connections": {
+            "U4a in (2)": [
+              10
+            ]
+          },
           "attributes": {}
         },
         "c29": {
-          "type": "C29 2u2",
-          "port_directions": { "out (1)": "input", "-> R24": "output" },
-          "connections": { "out (1)": [9], "-> R24": [10] },
-          "attributes": {}
-        },
-        "r24": {
-          "type": "R24 100k",
-          "port_directions": { "in": "input", "node P": "output" },
-          "connections": { "in": [10], "node P": [11] },
-          "attributes": {}
-        },
-        "r25": {
-          "type": "R25 100k",
-          "port_directions": { "node P": "input", "+ (10)": "output" },
-          "connections": { "node P": [11], "+ (10)": [12] },
-          "attributes": {}
-        },
-        "c30": {
-          "type": "C30 2n2",
-          "port_directions": { "+ (10)": "input", "+6V": "output" },
-          "connections": { "+ (10)": [12], "+6V": ["1"] },
-          "attributes": {}
-        },
-        "c31": {
-          "type": "C31 2n2",
-          "port_directions": { "node P": "input", "out (8)": "output" },
-          "connections": { "node P": [11], "out (8)": [13] },
-          "attributes": {}
-        },
-        "u5c": {
-          "type": "U5c low-pass",
+          "type": "C29 2.2uF",
           "port_directions": {
-            "- (9)": "input",
-            "+ (10)": "input",
-            "out (8)": "output"
-          },
-          "connections": { "- (9)": [14], "+ (10)": [12], "out (8)": [13] },
-          "attributes": {}
-        },
-        "r22": {
-          "type": "R22 2k2",
-          "port_directions": { "+6V": "input", "- (9)": "output" },
-          "connections": { "+6V": ["1"], "- (9)": [14] },
-          "attributes": {}
-        },
-        "r23": {
-          "type": "R23 2k2",
-          "port_directions": { "out (8)": "input", "- (9)": "output" },
-          "connections": { "out (8)": [13], "- (9)": [14] },
-          "attributes": {}
-        },
-        "r26r27": {
-          "type": "R26 12k / R27 3k3",
-          "port_directions": { "out (8)": "input", "x0.216": "output" },
-          "connections": { "out (8)": [13], "x0.216": [15] },
-          "attributes": {}
-        },
-        "u14": {
-          "type": "U14a MB4391",
-          "port_directions": {
-            "C32 2u2 IN (1)": "input",
-            "CON (2)": "input",
-            "OUT (15)": "output"
+            "U5a out": "input",
+            "tone A in": "output"
           },
           "connections": {
-            "C32 2u2 IN (1)": [15],
-            "CON (2)": [16],
-            "OUT (15)": [60]
+            "U5a out": [
+              7
+            ],
+            "tone A in": [
+              11
+            ]
           },
-          "attributes": {}
-        },
-        "u31": {
-          "type": "U31 7417 / C34",
-          "port_directions": { "U32 Y0": "input", "CON (2)": "output" },
-          "connections": { "U32 Y0": [20], "CON (2)": [16] },
-          "attributes": {}
-        },
-        "u32": {
-          "type": "U32 74LS139",
-          "port_directions": { "PA2 / PA3": "input", "Y0 (4)": "output" },
-          "connections": { "PA2 / PA3": [21], "Y0 (4)": [20] },
           "attributes": {}
         }
       }

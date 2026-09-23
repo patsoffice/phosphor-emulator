@@ -196,8 +196,9 @@ node of a multiple-feedback band-pass built on `U5`:
 
 ![zaxxon engine resonator](zaxxon-engine-resonator.svg)
 
-[`zaxxon-engine-resonator.json`](zaxxon-engine-resonator.json), which draws tone
-A; tone B is the same twelve parts with different designators.
+Drawn from the `engine` group of
+[`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml), which draws tone A;
+tone B is the same twelve parts with different designators.
 
 | Part | Value | Role |
 |---|---|---|
@@ -1437,7 +1438,8 @@ has no envelope and nothing in it decays.
 
 ![zaxxon laser oscillator](zaxxon-laser-oscillator.svg)
 
-[`zaxxon-laser-oscillator.json`](zaxxon-laser-oscillator.json). `U8`(5,6,7) and
+Drawn from the `laser` group of
+[`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml). `U8`(5,6,7) and
 `U8`(9,10,8) around `Q3` are the **fourth** copy of the battleship's
 integrator-and-Schmitt oscillator on this board, and `R70` 47 kΩ lands on pin 6
 like `R85`, `R96` and `R159` before it. `R72` 51 kΩ and `R73` 100 kΩ are the

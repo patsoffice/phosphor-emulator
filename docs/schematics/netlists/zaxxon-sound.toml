@@ -5,11 +5,29 @@
 # noise sources all span voices and no per-voice file could say what is on
 # them.
 #
-# IN PROGRESS. `group` says which voice each part belongs to, and `board.excerpt`
-# below names what is covered so far. Until it covers both sheets in full the
-# file declares itself an excerpt, which is what makes `netlist lint`'s
-# "a constant with no part behind it" check decline to run: against a partial
-# board it would report every part not yet typed in.
+# IN PROGRESS, and deliberately so rather than by neglect. `group` says which
+# voice each part belongs to, `board.excerpt` below names what is covered, and
+# `netlist show` lists every pin the file admits it has not read. Until it
+# covers both sheets in full the file declares itself an excerpt, which is what
+# makes `netlist lint`'s "a constant with no part behind it" check decline to
+# run: against a partial board it would report every part not yet typed in.
+#
+# WHAT IS STILL MISSING, about forty parts, all of one kind: the sources that
+# sit between a gate and a VCA on the voices whose ends are already here.
+#
+#   - the homing missile's 555 source and its 4016B gate (U6, R48-R54, C45,
+#     C47, U17)
+#   - the base missile's source (C48, R56-R60, D2, C49, U22 section B,
+#     U20 section B)
+#   - the laser's 4016B gate (U17, R75-R78, C55)
+#   - the engine's path on into its VCA (R61-R64, C50, C137, U4 sections)
+#   - the medium explosion's noise band-pass on sheet 11 right (C68, R113,
+#     R116, C70, C71, U3 section D)
+#
+# Everything else outstanding is a pin, not a part, and each one is marked
+# `unread` with the reason. Most are a wire crossing the sheet whose far end
+# is in the list above; a handful are junctions that one more reading would
+# settle. `netlist show` prints the whole list, which is the to-do.
 #
 # Each voice is drawn on its own by cutting its group out, and a net crossing
 # the group's edge becomes a port of that drawing:
@@ -69,7 +87,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "sheet 11 nearly whole (shot, battleship, noise source, both explosions, cannon, alarms), all eleven mix legs, the output path through to the speaker, and the PPI with all twelve gates. Still missing: the medium explosion's noise band-pass on U3, U45 section A, and the front ends of the six voices on sheet 12 (player ship A and B, engine, homing missile, base missile, laser) with the supply decoupling"
+excerpt = "both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------

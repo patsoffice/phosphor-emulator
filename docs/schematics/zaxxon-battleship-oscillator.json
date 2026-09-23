@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: so far: the shot voice (PC0) and the battleship (PB7), both on sheet 11, battleship": {
+    "Zaxxon sound: both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file, battleship": {
       "ports": {
         "BATTLESHIP": {
           "direction": "input",

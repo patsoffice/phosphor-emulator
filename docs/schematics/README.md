@@ -213,16 +213,17 @@ section is there so that is obvious.
   twice is the player-ship level, where the issue's description of the ladder
   was wrong in three ways at once and `PA0` turns out to be the *more*
   significant bit. Also eleven summing legs that are all the same 51 kOhm, so
-  the board's entire balance is the attenuator in front of each one. Three of
-  its voices carry netlists, [`zaxxon-battleship-oscillator.json`](zaxxon-battleship-oscillator.json),
-  [`zaxxon-shot-oscillator.json`](zaxxon-shot-oscillator.json) and
-  [`zaxxon-laser-oscillator.json`](zaxxon-laser-oscillator.json), because all
-  three turn on which op-amp pin a resistor lands on and successive passes over
-  the prose got that wrong every time: they are the same integrator-and-Schmitt
-  oscillator drawn four times on one board, with only its reference changing,
-  and nothing short of pins says so. The laser's adds a second kind of pin fact
-  that prose kept losing: `U7`'s output pin is not on the drawing at all, and
-  the board reads its timing capacitor instead.
+  the board's entire balance is the attenuator in front of each one. The whole
+  board is now transcribed at pin level in
+  [`netlists/zaxxon-sound.toml`](netlists/zaxxon-sound.toml), and each of its
+  four drawings here is a group cut out of that one file. Pins are what the
+  voices turn on and successive passes over the prose got them wrong every
+  time: the same integrator-and-Schmitt oscillator is drawn four times on one
+  board with only its reference changing, and nothing short of pins says so.
+  The laser adds a second kind of pin fact that prose kept losing, `U7`'s
+  output pin not being on the drawing at all, and the transcription added a
+  third: the drawing labels one op-amp output with the pin number of its own
+  negative supply, and both earlier readings copied that through.
 - [`zaxxon-color-dac.md`](zaxxon-color-dac.md), the one entry here that is not
   about audio, and the one that changed a picture. Zaxxon's palette runs three
   resistor ladders into three equal 470 ohm pulldowns with no gain stage
