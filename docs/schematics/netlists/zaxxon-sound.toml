@@ -564,7 +564,7 @@ on = [
   "U44.10", "U44.11", "R166.b", "U46.2", "U46.3", "R167.b",
   "U50.14", "U50.4", "R168.a", "R170.a",
   "U23.26", "RP1.com", "RP2.com", "U5.3",
-  "C5.b", "C149.a",
+  "C5.b", "C149.a", "R3.a",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -592,7 +592,7 @@ on = [
   "U2.4", "C64.a", "C65.a", "R171.a",
   "C7.a", "U1.10", "R10.a", "R11.a", "R13.a",
   "R34.a", "C36.a", "R65.a", "U7.8", "U7.4",
-  "C1.a", "R1.a", "C3.a", "C139.a",
+  "C1.a", "R1.a", "C3.a", "C139.a", "Q1.c",
 ]
 
 [[nets]]
@@ -617,6 +617,7 @@ on = [
   "C1.b", "R2.b", "C4.b", "C139.b", "C140.b", "C149.b", "C5.a",
   "R27.b", "C33.b", "R41.b", "C42.b", "C52.b",
   "C30.b", "C39.b",
+  "C13.b", "R8.b", "R9.b", "Q2.e",
 ]
 
 [[nets]]
@@ -3129,7 +3130,7 @@ on = ["U23.6"]
 [[nets]]
 name = "RES"
 port = "input"
-on = ["U23.35"]
+on = ["U23.35", "U31.5"]
 
 # --- the twelve gates ---
 
@@ -3569,12 +3570,12 @@ block = "second divider decoupling"
 ref = "U31"
 kind = "U"
 device = "7417"
-pins = ["1", "2", "3", "4"]
-out = ["2", "4"]
+pins = ["1", "2", "3", "4", "5", "6"]
+out = ["2", "4", "6"]
 read = "partial"
 note = """
-Two sections of a hex open-collector buffer, non-inverting. Its other sections \
-are elsewhere on this sheet and are not transcribed yet."""
+Three sections of a hex open-collector buffer, non-inverting: the two missile \
+gates and the board's reset. Its other sections are not transcribed yet."""
 
 [[parts.sections]]
 name = "a"
@@ -3587,6 +3588,12 @@ name = "b"
 pins = ["3", "4"]
 role = "gate buffer"
 group = "base missile"
+
+[[parts.sections]]
+name = "c"
+pins = ["5", "6"]
+role = "reset buffer"
+group = "mute"
 
 [[parts]]
 group = "homing missile"
@@ -3946,6 +3953,106 @@ on = ["U14.10", "C52.a"]
 [[nets]]
 name = "homing missile out"
 on = ["U14.11", "R180.a"]
+
+# ===========================================================================
+# THE POWER-ON MUTE (sheet 12, right half).
+#
+# The board's reset, buffered, charging C13 through R7 so that the amplifier
+# stays muted for a moment after power-on and does not thump. Two transistors
+# in sequence: Q1 as an emitter follower of the delay node and Q2 as the
+# switch it drives.
+# ===========================================================================
+
+[[parts]]
+group = "mute"
+ref = "R3"
+kind = "R"
+ohms = 330
+note = "Pull-up for U31 section C's open-collector output."
+
+[[parts]]
+group = "mute"
+ref = "D1"
+kind = "D"
+note = "Anode on the buffered reset, cathode toward R7, so the delay node can only be pulled up."
+
+[[parts]]
+group = "mute"
+ref = "R7"
+kind = "R"
+kohms = 10
+block = "mute delay"
+
+[[parts]]
+group = "mute"
+ref = "C13"
+kind = "C"
+uf = 15
+block = "mute delay"
+note = "15 uF against R7's 10k and R8's 2.2M: the time the amplifier stays muted."
+
+[[parts]]
+group = "mute"
+ref = "R8"
+kind = "R"
+mohms = 2.2
+note = "Bleeds the delay node so the mute re-arms."
+
+[[parts]]
+group = "mute"
+ref = "Q1"
+kind = "Q"
+device = "C1684"
+out = ["e"]
+note = "An emitter follower of the delay node, collector on +12 V."
+
+[[parts]]
+group = "mute"
+ref = "R280"
+kind = "R"
+kohms = 1
+
+[[parts]]
+group = "mute"
+ref = "R9"
+kind = "R"
+kohms = 100
+note = "Q2's base pulldown."
+
+[[parts]]
+group = "mute"
+ref = "Q2"
+kind = "Q"
+device = "C1684"
+out = ["c"]
+note = """
+A common-emitter switch, emitter grounded. ITS COLLECTOR LEAVES UPWARD AND IS \
+NOT TRACED. It should be the LA4460's MUTE pin, which is the only thing on \
+this sheet that wants a power-on mute, but the wire has not been followed and \
+that pin is still marked unread on U1."""
+unread = [
+  { pin = "c", why = "leaves upward on the sheet; almost certainly the LA4460's MUTE pin, but not traced" },
+]
+
+[[nets]]
+name = "reset buffered"
+on = ["U31.6", "R3.b", "D1.a"]
+
+[[nets]]
+name = "mute delay"
+on = ["D1.k", "R7.a"]
+
+[[nets]]
+name = "mute node"
+on = ["R7.b", "C13.a", "R8.a", "Q1.b"]
+
+[[nets]]
+name = "Q1 emitter"
+on = ["Q1.e", "R280.a"]
+
+[[nets]]
+name = "Q2 base"
+on = ["R280.b", "R9.a", "Q2.b"]
 
 [[nets]]
 name = "R34/R35 midpoint"
