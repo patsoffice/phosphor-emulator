@@ -547,20 +547,42 @@ divider crossing that vertical and no dot, in both copies; `U10`(1,2,3) and
 carries a decoupling capacitor rather than a signal, so its ramp really is the
 part's own thirds. **Nothing is misread.**
 
-The measurement, in 25 ms windows, which is what a swept voice needs rather
-than one averaged fundamental:
+The measurement, from `disasm audiodiff`'s pitch track, which reports a
+percentile over per-window estimates rather than one averaged fundamental:
 
 | | ours | the board |
 |---|---|---|
-| battleship | 122.5 Hz | **132.0 Hz** |
-| laser, bottom of sweep | 322.6 Hz | **280.6 Hz** |
-| laser, top of sweep | 579.4 Hz | **493.3 Hz** |
-| laser, top over bottom | 1.80 | 1.76 |
+| battleship (50 ms windows) | **117.6 Hz** | **132.5 Hz** |
+| laser, `p10` of the sweep | **310.8 Hz** | **298.6 Hz** |
+| laser, median | **422.9 Hz** | **405.1 Hz** |
+| laser, `p90` of the sweep | **556.2 Hz** | **448.8 Hz** |
 
-The sweep's **shape agrees to 2 %**, which is what says the laser's disagreement
-is a clean scale factor rather than a wrong topology: ours is uniformly 16 %
-high, and the battleship is 7 % low. The battleship wants a Schmitt window of
-3.13 V and the laser wants 3.97 V.
+**Both of our columns used to be 4 % higher here, and that was stale rather than
+wrong.** The table read 122.5, 322.6 and 579.4 until the pitch track measured
+the captures directly; each of those is its current value times `10.4/10.0`,
+which is exactly the span change that
+[splitting the op-amp's rails](#the-op-amps-are-not-symmetric-and-one-constant-was-doing-three-jobs)
+made. That pass moved the span and updated `OUTPUT_GAIN` for it but never came
+back to this table. `battleship_hz()`'s own test asserts 117.6 Hz, so the device
+was always emitting what the table now says.
+
+It is also the pitch track's first use and a check on it: predicting the new
+values from the old ones and the span ratio gives 117.8 and 557.1 against a
+measured 117.6 and 556.2, which is agreement to better than 0.5 % with an
+instrument that knew nothing about either number.
+
+So ours is **11 % low** on the battleship rather than the 7 % this file used to
+carry, and that half is firm: a steady tone, two independent estimators
+agreeing, and the span ratio predicting it.
+
+**The laser's half is not, and the 26 % headline above is not re-derived here.**
+A percentile and an extreme are different statistics, and on this voice they
+disagree about more than an offset: ours spans `p90/p10` = **1.79** where the
+board spans **1.50**, against the 1.80 and 1.76 this file claims for top over
+bottom. So either the sweep's shape does not agree after all, which would make
+"a clean scale factor" wrong, or the two statistics are not comparable. Saying
+which needs the extremes measured the same way on both voices, and swapping in
+a second number of unknown provenance would not be an improvement on the first.
 
 So the gap is not the shared unknown, not a misread value, not a misread
 junction, and not `Q5`, which pushes the wrong way. What is left is **one

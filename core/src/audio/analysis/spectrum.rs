@@ -232,6 +232,183 @@ pub fn fundamental_hz(ac: &[f64], spec: &[f64], n: usize, sample_rate: f64) -> f
     }
 }
 
+/// The default analysis window for a [`PitchTrack`], 25 ms.
+///
+/// Short enough that a voice sweeping or warbling over tens of milliseconds is
+/// resolved rather than averaged, long enough to hold two periods of the lowest
+/// pitch the track can see. Those two facts are the same trade: see
+/// [`PitchTrack::LOW_HZ`].
+pub const PITCH_WINDOW_S: f64 = 0.025;
+
+/// A capture's fundamental measured **per window** rather than once.
+///
+/// [`fundamental_hz`] answers "what pitch is this capture", which is the wrong
+/// question for anything that moves. It estimates over the first few periods of
+/// whatever slice it is handed, so a swept voice reports wherever it happened to
+/// start and a warbled one reports an average of two pitches it never actually
+/// plays. Widening the window does not help; it averages harder.
+///
+/// This reports the trajectory instead, which is what a swept or gated voice has
+/// instead of a pitch. Read it as a range: `p10` to `p90` is where the voice
+/// lives, and the median is where it spends its time.
+///
+/// **Percentiles rather than min and max, deliberately.** An autocorrelation
+/// estimate that does slip an octave slips it on one window, and a minimum over
+/// a hundred windows would report that one. The percentiles need a tenth of the
+/// track to agree before they move.
+///
+/// # Read `voiced_fraction` before the percentiles
+///
+/// The percentiles are taken over the windows that could be called, so a track
+/// that is 10 % voiced is a percentile over almost nothing and the numbers move
+/// with the window length rather than with the signal. That is not a defect to
+/// tune away; it is the measurement telling you the voice has no pitch at this
+/// resolution.
+///
+/// A steady tone reads 95 % voiced and exact. **A voice that warbles faster
+/// than the window does not**, and Zaxxon's shot is the worked example: its
+/// oscillator is swept by a 555 at tens of Hz, so it never repeats inside a
+/// window, and it reads 10 % voiced at 25 ms and about 26 % at 10 ms with
+/// percentiles that disagree between the two. Shortening the window does not
+/// rescue it either, because [`PitchTrack::low_hz`] rises as the window
+/// shortens, and at 8 ms the 375 Hz floor hides the bottom of the sweep and
+/// drags the median up by excluding it. A voice like that needs a different
+/// instrument, and knowing that is worth more than a number that changes when
+/// you look at it differently.
+#[derive(Clone, Debug)]
+pub struct PitchTrack {
+    /// One estimate per window, `None` where the window is not periodic enough
+    /// to call. Silence, noise and the gap between two events all land here.
+    pub windows: Vec<Option<f64>>,
+    pub window_s: f64,
+}
+
+impl PitchTrack {
+    /// The highest pitch a window can call. Above this a lag is two samples at
+    /// 44.1 kHz and the estimate is quantization rather than measurement.
+    pub const HIGH_HZ: f64 = 8000.0;
+
+    /// The lowest pitch a window of `window_s` can call.
+    ///
+    /// The longest lag examined is a third of the window, because a normalized
+    /// correlation at a longer lag is computed from too few overlapping samples
+    /// to trust. So the window length *is* the low limit: 25 ms bottoms out at
+    /// 120 Hz, and tracking the battleship's 122 Hz drone wants 50 ms. A voice
+    /// below the limit reads as unvoiced rather than wrong, which is the failure
+    /// worth having.
+    pub fn low_hz(window_s: f64) -> f64 {
+        3.0 / window_s
+    }
+
+    /// Measure the DC-removed signal in fixed windows.
+    pub fn measure(ac: &[f64], sample_rate: f64, window_s: f64) -> Self {
+        let n = ((window_s * sample_rate) as usize).max(4);
+        let windows = ac
+            .chunks(n)
+            .map(|w| window_pitch(w, sample_rate, Self::low_hz(window_s)))
+            .collect();
+        Self { windows, window_s }
+    }
+
+    /// Windows that were periodic enough to call, as a fraction of all of them.
+    ///
+    /// Low is informative rather than a failure: a noise voice should be near
+    /// zero, and a tone that reads 0.2 is a tone the track mostly could not see.
+    pub fn voiced_fraction(&self) -> f64 {
+        if self.windows.is_empty() {
+            return 0.0;
+        }
+        self.windows.iter().filter(|w| w.is_some()).count() as f64 / self.windows.len() as f64
+    }
+
+    /// The `q`th percentile of the voiced windows, `q` in `[0, 1]`.
+    pub fn percentile(&self, q: f64) -> Option<f64> {
+        let mut hz: Vec<f64> = self.windows.iter().flatten().copied().collect();
+        if hz.is_empty() {
+            return None;
+        }
+        hz.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let i = ((hz.len() - 1) as f64 * q.clamp(0.0, 1.0)).round() as usize;
+        Some(hz[i])
+    }
+}
+
+/// One window's fundamental, or `None` when the window is not periodic.
+///
+/// Autocorrelation only, with **no spectral fallback**, which is the whole
+/// point. [`fundamental_hz`] falls back to the largest FFT bin when it finds no
+/// periodicity, and on a square wave whose third harmonic is the largest bin
+/// that fallback is exactly the octave error a pitch track exists to avoid. A
+/// window that cannot be called is worth more as `None` than as a guess.
+fn window_pitch(win: &[f64], sample_rate: f64, low_hz: f64) -> Option<f64> {
+    let min_lag = (sample_rate / PitchTrack::HIGH_HZ).max(2.0) as usize;
+    let max_lag = ((sample_rate / low_hz) as usize).min(win.len() / 3);
+    if min_lag + 1 >= max_lag {
+        return None;
+    }
+
+    // Normalized cross-correlation, **not** `fft::autocorrelation`.
+    //
+    // That helper divides every lag by the whole window's energy, so a longer
+    // lag overlaps fewer samples and reads systematically low. Correcting the
+    // taper afterwards does not work either: the correction approaches the
+    // window length over nothing at the far end, which amplifies exactly the
+    // noisiest estimates and picks sub-harmonics out of white noise. Dividing
+    // each lag by the energy of the two segments it actually compares is
+    // bounded in [-1, 1] and is unbiased with respect to lag by construction.
+    let n = win.len();
+    let corr: Vec<f64> = (0..=max_lag + 1)
+        .map(|lag| {
+            if lag >= n {
+                return 0.0;
+            }
+            let (mut num, mut ea, mut eb) = (0.0, 0.0, 0.0);
+            for i in 0..n - lag {
+                let (a, b) = (win[i], win[i + lag]);
+                num += a * b;
+                ea += a * a;
+                eb += b * b;
+            }
+            let den = (ea * eb).sqrt();
+            if den > 0.0 { num / den } else { 0.0 }
+        })
+        .collect();
+
+    // Peak picking, McLeod style: take the *first* peak that comes within 90 %
+    // of the best one rather than the best one itself.
+    //
+    // This is what keeps the estimate on the period. A periodic signal
+    // correlates nearly as well at twice and three times its period, so
+    // "strongest peak" drifts down an octave; taking the earliest peak that is
+    // nearly as good takes the period itself. Requiring it to be *nearly* as
+    // good is what stops it running the other way onto a harmonic.
+    let peaks: Vec<usize> = (min_lag..max_lag)
+        .filter(|&l| corr[l] > corr[l - 1] && corr[l] >= corr[l + 1])
+        .collect();
+    let best = peaks
+        .iter()
+        .copied()
+        .max_by(|&a, &b| corr[a].partial_cmp(&corr[b]).unwrap())?;
+    let lag = peaks.into_iter().find(|&l| corr[l] >= 0.9 * corr[best])?;
+
+    // A periodic window correlates with itself one period later.
+    //
+    // 0.45 is set by what has to pass rather than by what has to fail. A tone
+    // *sweeping* inside the window does not repeat exactly, so its correlation
+    // at the true period is well under a steady tone's, and a gate tight enough
+    // to look safe rejects every window of a swept voice: at 0.6 the shot reads
+    // 7 % voiced, which is a percentile over almost nothing. Noise has margin to
+    // spare either way, scoring far below both.
+    if corr[lag] < 0.45 {
+        return None;
+    }
+
+    // The lag is an integer number of samples, which at 44.1 kHz quantizes a
+    // 2 kHz tone to steps of 90 Hz. Interpolate.
+    let offset = parabolic_offset(corr[lag - 1], corr[lag], corr[lag + 1]);
+    Some(sample_rate / (lag as f64 + offset))
+}
+
 /// Fraction of total energy in each band of [`BAND_EDGES_HZ`], plus a final
 /// band above the last edge.
 ///
@@ -464,7 +641,12 @@ mod tests {
                 state = state
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                ((state >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+                // Scaled to [-1, 1). This used to subtract 1 from a [0, 1)
+                // value, so it was [-1, 0) and carried a -0.5 DC offset. Every
+                // existing caller routes it through `analyze`, which removes DC
+                // before measuring, so nothing noticed until a metric was
+                // written that takes the signal directly.
+                ((state >> 33) as f64 / (1u64 << 31) as f64) * 2.0 - 1.0
             })
             .collect()
     }
@@ -729,5 +911,83 @@ mod tests {
         assert!(a.spectrum.rolloff_hz.is_finite());
         assert!(a.level.rms_dbfs.is_finite());
         assert!(a.spectrum.band_ratios.iter().all(|v| v.is_finite()));
+    }
+
+    /// A linear sweep, which is the case the whole type exists for.
+    ///
+    /// [`fundamental_hz`] reports one number here and that number is near the
+    /// start, because it estimates over the first few periods. The track has to
+    /// span the sweep instead.
+    fn sweep(from: f64, to: f64, rate: f64, n: usize) -> Vec<f64> {
+        let mut phase = 0.0;
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / n as f64;
+                phase += (from + (to - from) * t) / rate;
+                if phase.fract() < 0.5 { 1.0 } else { -1.0 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pitch_track_spans_a_sweep_that_one_fundamental_reports_as_a_point() {
+        let s = sweep(300.0, 1600.0, 44100.0, 44100);
+        let t = PitchTrack::measure(&s, 44100.0, PITCH_WINDOW_S);
+
+        assert!(
+            t.voiced_fraction() > 0.9,
+            "a square sweep should be voiced throughout, got {}",
+            t.voiced_fraction()
+        );
+
+        // The sweep is uniform in time, so the qth quantile of the track is the
+        // pitch at time q: 430 Hz at p10, not 300. Asserting the endpoints here
+        // would be asserting a misreading of what a percentile is.
+        for q in [0.1, 0.5, 0.9] {
+            let want = 300.0 + 1300.0 * q;
+            let got = t.percentile(q).unwrap();
+            assert!(
+                (got - want).abs() < 0.08 * want,
+                "p{} of a 300-to-1600 Hz sweep should be {want} Hz, got {got}",
+                q * 100.0
+            );
+        }
+    }
+
+    /// The octave error the fallback in [`fundamental_hz`] exists to cause.
+    ///
+    /// A square's third harmonic can be the largest bin in a short window, so a
+    /// spectral estimate reports 3x the pitch. Autocorrelation locks to the
+    /// period, and this asserts it does so on every window rather than on
+    /// average.
+    #[test]
+    fn a_squares_track_locks_to_its_period_and_not_a_harmonic() {
+        let t = PitchTrack::measure(&square(440.0, 44100.0, 44100), 44100.0, PITCH_WINDOW_S);
+        for hz in t.windows.iter().flatten() {
+            assert!(
+                (hz - 440.0).abs() < 15.0,
+                "every window should read 440 Hz, got {hz}"
+            );
+        }
+        assert!(t.voiced_fraction() > 0.9);
+    }
+
+    /// Noise has no period, and the gate must say so rather than guess. This is
+    /// the half that makes a low `voiced_fraction` meaningful.
+    #[test]
+    fn noise_is_unvoiced_rather_than_wrong() {
+        let t = PitchTrack::measure(&remove_dc(&white_noise(44100)), 44100.0, PITCH_WINDOW_S);
+        assert!(
+            t.voiced_fraction() < 0.1,
+            "white noise should not be called, got {}",
+            t.voiced_fraction()
+        );
+    }
+
+    #[test]
+    fn a_sine_reads_its_own_pitch() {
+        let t = PitchTrack::measure(&sine(1000.0, 44100.0, 44100), 44100.0, PITCH_WINDOW_S);
+        let m = t.percentile(0.5).unwrap();
+        assert!((m - 1000.0).abs() < 10.0, "{m} Hz");
     }
 }

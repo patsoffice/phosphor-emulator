@@ -44,9 +44,9 @@ pub use level::{
     onset_index, onset_indices, rms, rms_dbfs, rms_envelope,
 };
 pub use spectrum::{
-    BAND_EDGES_HZ, Peak, Spectrum, band_energy_ratios, dominant_peaks, envelope_alignment,
-    envelope_distance, fundamental_hz, gain_ratio, harmonic_ratios, spectral_centroid,
-    spectral_flatness, spectral_rolloff, stft_distance,
+    BAND_EDGES_HZ, PITCH_WINDOW_S, Peak, PitchTrack, Spectrum, band_energy_ratios, dominant_peaks,
+    envelope_alignment, envelope_distance, fundamental_hz, gain_ratio, harmonic_ratios,
+    spectral_centroid, spectral_flatness, spectral_rolloff, stft_distance,
 };
 
 /// Convert 16-bit PCM to `f64` in `[-1, 1)`.

@@ -364,6 +364,17 @@ enum Command {
         /// Spectrogram height in pixels.
         #[arg(long, default_value_t = 512)]
         png_height: u32,
+        /// Window for the pitch track, in milliseconds.
+        ///
+        /// This is one trade and both ends of it bite. The window has to hold
+        /// three periods of the pitch you are after, so it sets the lowest note
+        /// the track can see at all: 25 ms bottoms out at 120 Hz and 10 ms at
+        /// 300 Hz. But a voice whose pitch moves *inside* one window does not
+        /// correlate with itself and reads as unvoiced, so a warbled voice needs
+        /// a window shorter than its warble. Watch `voiced %`: if it is low, the
+        /// window is too long for what the voice is doing.
+        #[arg(long, default_value_t = 25.0)]
+        pitch_window_ms: f64,
         /// Compare only `START:END` seconds of each input, e.g. `1.2:2.8`.
         ///
         /// A capture that walks through several effects averages them together,
@@ -668,6 +679,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             rms_tolerance,
             step_tolerance,
             png_height,
+            pitch_window_ms,
             range,
             range_b,
             write_to,
@@ -677,6 +689,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 b: b.as_deref(),
                 range: range.as_deref(),
                 range_b: range_b.as_deref(),
+                pitch_window_s: pitch_window_ms / 1000.0,
             },
             channels,
             audiodiff::Tolerance {
@@ -1126,6 +1139,9 @@ struct AudiodiffInputs<'a> {
     b: Option<&'a Path>,
     range: Option<&'a str>,
     range_b: Option<&'a str>,
+    /// Window for the pitch track, in seconds. An analysis knob like `range`
+    /// rather than a tolerance: it decides what the measurement can see.
+    pitch_window_s: f64,
 }
 
 /// What audiodiff writes, beyond the report it returns.
@@ -1159,6 +1175,7 @@ fn run_audiodiff(
         b,
         range,
         range_b,
+        pitch_window_s,
     } = inputs;
     let AudiodiffOutputs {
         png,
@@ -1200,7 +1217,7 @@ fn run_audiodiff(
     };
 
     let Some(b) = b else {
-        let mut out = audiodiff::describe(&ca, &label_a);
+        let mut out = audiodiff::describe(&ca, &label_a, pitch_window_s);
         if let Some(p) = png_for("") {
             out.push_str(&audiodiff::spectrogram(&ca, &p, png_height)?);
             out.push('\n');
@@ -1228,7 +1245,8 @@ fn run_audiodiff(
         audiodiff::write_wav(out, &diff)?;
         return Ok(wrote_line(&format!("{label_a} - {label_b}"), out, &diff));
     }
-    let (mut report, verdict) = audiodiff::compare(&ca, &cb, &label_a, &label_b, tol);
+    let (mut report, verdict) =
+        audiodiff::compare(&ca, &cb, &label_a, &label_b, tol, pitch_window_s);
 
     if let (Some(pa), Some(pb)) = (png_for("-a"), png_for("-b")) {
         report.push_str(&audiodiff::spectrogram(&ca, &pa, png_height)?);
@@ -1795,6 +1813,7 @@ mod tests {
                 b: None,
                 range: Some("1:2"),
                 range_b: None,
+                pitch_window_s: phosphor_core::audio::analysis::PITCH_WINDOW_S,
             },
             audiodiff::ChannelPolicy::Mono,
             audiodiff::Tolerance::default(),
@@ -1856,6 +1875,7 @@ mod tests {
                 b: Some(&b),
                 range: None,
                 range_b: None,
+                pitch_window_s: phosphor_core::audio::analysis::PITCH_WINDOW_S,
             },
             audiodiff::ChannelPolicy::Mono,
             audiodiff::Tolerance::default(),
@@ -1904,6 +1924,7 @@ mod tests {
                 b: Some(&a),
                 range: None,
                 range_b: None,
+                pitch_window_s: phosphor_core::audio::analysis::PITCH_WINDOW_S,
             },
             audiodiff::ChannelPolicy::Mono,
             audiodiff::Tolerance::default(),

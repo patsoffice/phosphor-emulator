@@ -21,7 +21,8 @@
 use std::path::Path;
 
 use phosphor_core::audio::analysis::{
-    self, BAND_EDGES_HZ, analyze, envelope_alignment, gain_ratio, remove_dc, stft_distance,
+    self, BAND_EDGES_HZ, PitchTrack, analyze, envelope_alignment, gain_ratio, remove_dc,
+    stft_distance,
 };
 
 /// How to fold a multi-channel WAV down to the mono the analysis works in.
@@ -349,6 +350,7 @@ pub fn compare(
     label_a: &str,
     label_b: &str,
     tol: Tolerance,
+    pitch_window_s: f64,
 ) -> (String, Verdict) {
     use std::fmt::Write;
 
@@ -610,6 +612,31 @@ pub fn compare(
         1,
     );
 
+    // The pitch *track*, which is the row to read on anything that moves. One
+    // fundamental describes a swept or warbled voice about as well as one
+    // temperature describes a year.
+    let (at, bt) = (
+        PitchTrack::measure(&remove_dc(&a.samples), a.sample_rate, pitch_window_s),
+        PitchTrack::measure(&remove_dc(&b.samples), b.sample_rate, pitch_window_s),
+    );
+    for (label, q) in [("  pitch p10 (Hz)", 0.1), ("  pitch median (Hz)", 0.5)] {
+        opt_row(&mut s, label, at.percentile(q), bt.percentile(q), 1);
+    }
+    opt_row(
+        &mut s,
+        "  pitch p90 (Hz)",
+        at.percentile(0.9),
+        bt.percentile(0.9),
+        1,
+    );
+    row(
+        &mut s,
+        "  pitch voiced (%)",
+        at.voiced_fraction() * 100.0,
+        bt.voiced_fraction() * 100.0,
+        1,
+    );
+
     // --- band energy: the column to read first ---
     let _ = writeln!(
         s,
@@ -804,7 +831,7 @@ fn opt_row(s: &mut String, label: &str, a: Option<f64>, b: Option<f64>, precisio
 }
 
 /// Analyze one capture on its own, for when there is nothing to compare against.
-pub fn describe(capture: &Capture, label: &str) -> String {
+pub fn describe(capture: &Capture, label: &str, pitch_window_s: f64) -> String {
     use std::fmt::Write;
     let a = analyze(&capture.samples, capture.sample_rate);
     let mut s = String::new();
@@ -834,12 +861,26 @@ pub fn describe(capture: &Capture, label: &str) -> String {
         a.spectrum.flatness,
         a.spectrum.fundamental_hz
     );
-    // The event line before the decay numbers, not after, because it is what
-    // says whether they describe one effect or a train of them.
     let fmt = |v: Option<f64>, p: usize| match v {
         Some(v) => format!("{v:.*}", p),
         None => "-".to_string(),
     };
+    let track = PitchTrack::measure(
+        &remove_dc(&capture.samples),
+        capture.sample_rate,
+        pitch_window_s,
+    );
+    let _ = writeln!(
+        s,
+        "  pitch {} / {} / {} Hz (p10/median/p90 over {:.0} ms windows)  voiced {:.0}%",
+        fmt(track.percentile(0.1), 1),
+        fmt(track.percentile(0.5), 1),
+        fmt(track.percentile(0.9), 1),
+        pitch_window_s * 1000.0,
+        track.voiced_fraction() * 100.0
+    );
+    // The event line before the decay numbers, not after, because it is what
+    // says whether they describe one effect or a train of them.
     let _ = writeln!(
         s,
         "  events {} spaced {} s  window {:.3} s  attack {} s",
@@ -979,6 +1020,7 @@ fn magma(t: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::audio::analysis::PITCH_WINDOW_S;
     use std::io::Write;
 
     /// Build a WAV in memory. Mirrors the writer in `main.rs` but parameterized,
@@ -1159,7 +1201,14 @@ mod tests {
             channels: 1,
             bits: 16,
         };
-        let (report, verdict) = compare(&cap(), &cap(), "a", "b", Tolerance::default());
+        let (report, verdict) = compare(
+            &cap(),
+            &cap(),
+            "a",
+            "b",
+            Tolerance::default(),
+            PITCH_WINDOW_S,
+        );
         assert!(verdict.is_clean(), "{}", verdict.summary());
         assert!(report.contains("STFT distance: 0.0000"), "{report}");
         assert_eq!(verdict.summary(), "within tolerance");
@@ -1182,7 +1231,14 @@ mod tests {
             channels: 1,
             bits: 16,
         };
-        let (_, verdict) = compare(&biased, &other, "a", "b", Tolerance::default());
+        let (_, verdict) = compare(
+            &biased,
+            &other,
+            "a",
+            "b",
+            Tolerance::default(),
+            PITCH_WINDOW_S,
+        );
         assert!(!verdict.is_clean());
         assert!(verdict.differences.is_empty(), "{:?}", verdict.differences);
         assert_eq!(verdict.defects.len(), 2, "{:?}", verdict.defects);
@@ -1205,7 +1261,14 @@ mod tests {
             channels: 1,
             bits: 16,
         };
-        let (_, verdict) = compare(&mk(loud), &mk(quiet), "loud", "quiet", Tolerance::default());
+        let (_, verdict) = compare(
+            &mk(loud),
+            &mk(quiet),
+            "loud",
+            "quiet",
+            Tolerance::default(),
+            PITCH_WINDOW_S,
+        );
         assert!(
             !verdict.differences.iter().any(|d| d.contains("band")),
             "a gain change moved a band ratio: {:?}",
@@ -1231,7 +1294,14 @@ mod tests {
             channels: 1,
             bits: 16,
         };
-        let (_, verdict) = compare(&mk(100.0), &mk(2000.0), "low", "high", Tolerance::default());
+        let (_, verdict) = compare(
+            &mk(100.0),
+            &mk(2000.0),
+            "low",
+            "high",
+            Tolerance::default(),
+            PITCH_WINDOW_S,
+        );
         assert!(
             verdict.differences.iter().any(|d| d.contains("band")),
             "moving a tone from 100 Hz to 2 kHz must move the bands: {:?}",

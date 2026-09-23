@@ -1288,20 +1288,37 @@ const OPAMP_V_HIGH: f64 = 10.5;
 /// followers, and `U7` pin 5 carries a capacitor rather than a signal. **No
 /// value is misread.**
 ///
-/// Measured in 25 ms windows, which is the comparison to make on a swept voice
-/// rather than one averaged fundamental:
+/// Measured with `disasm audiodiff`'s pitch track, which estimates per window
+/// and reports a percentile rather than one averaged fundamental:
 ///
 /// | | ours | the board |
 /// |---|---|---|
-/// | battleship | 122.5 Hz | **132.0 Hz** (`00.wav`) |
-/// | laser, bottom of sweep | 322.6 Hz | **280.6 Hz** (`01.wav`) |
-/// | laser, top of sweep | 579.4 Hz | **493.3 Hz** |
-/// | laser, top over bottom | 1.80 | 1.76 |
+/// | battleship (50 ms windows) | **117.6 Hz** | **132.5 Hz** (`00.wav`) |
+/// | laser, `p10` of the sweep | **310.8 Hz** | **298.6 Hz** (`01.wav`) |
+/// | laser, median | **422.9 Hz** | **405.1 Hz** |
+/// | laser, `p90` of the sweep | **556.2 Hz** | **448.8 Hz** |
 ///
-/// The sweep's *shape* agrees to 2 %, so the laser is uniformly 16 % high while
-/// the battleship is 7 % low. The battleship wants a window of 3.13 V and the
-/// laser wants 3.97 V, and since the window cancels in their ratio, **a ratio
-/// of read values is 26 % out**.
+/// **Our column used to read 4 % higher and that was stale, not wrong.** It
+/// carried 122.5, 322.6 and 579.4, each of which is its current value times
+/// `10.4/10.0`: exactly the span change that splitting [`OPAMP_V_LOW`] off made.
+/// That pass moved the span and re-derived [`OUTPUT_GAIN`] but never came back
+/// to this table. `both_battleship_oscillators_follow_from_the_drawing` asserts
+/// [`battleship_hz`] at 117.6 Hz, so the device always emitted what this now
+/// says, and predicting the new figures from the old ones and the span ratio
+/// lands within 0.5 % of what the track measures.
+///
+/// So ours is **11 % low** on the battleship, not the 7 % this comment used to
+/// carry, and that half is firm: it is a steady tone, two independent
+/// estimators agree on it, and the span ratio predicts it.
+///
+/// **The laser's half is not firm and the 26 % headline is not re-derived
+/// here.** A percentile and an extreme are different statistics, and on this
+/// voice they disagree about more than an offset: ours spans `p90/p10` = 1.79
+/// where the board spans 1.50, against the 1.80 and 1.76 this comment claims
+/// for top over bottom. Either the sweep's shape does not agree after all or
+/// the two statistics are not comparable, and saying which needs the extremes
+/// measured the same way on both, not a second number of unknown provenance
+/// swapped in for the first.
 ///
 /// `the_battleships_fast_stage_needs_a_near_perfect_switch` makes that worse
 /// rather than better: any real saturation on `Q5` slows the battleship, which
