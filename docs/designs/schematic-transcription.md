@@ -1,7 +1,8 @@
 # Design: Schematic Transcription
 
-> **Status: rung 1 done, rungs 2 and 3 open.** Make a board's transcription a
-> single piece of data
+> **Status: rungs 1 and 3 done, rung 4 cut, rung 2 open.** The kill criterion
+> is settled and its two questions disagreed; see the bottom of this file.
+> Make a board's transcription a single piece of data
 > rather than three prose copies of itself: a pin-level netlist per board, lints
 > over it, generated Rust constants, and an offline solver that can tell a
 > misreading from a modeling approximation. Scoped to a probe on one board with
@@ -151,6 +152,11 @@ on parts rather than as a separate hand-built file.
 
 ### 5. Codegen covers values, and that is the smallest of the three payoffs
 
+> **Withdrawn. Codegen is not being built.** The kill criterion asked whether
+> it would have caught the 122.5 Hz drift and the answer, traced rather than
+> assumed, is no. This decision's own last sentence is why. See the kill
+> criterion below for the working.
+
 Generated `const R156: f64 = 33_000.0` kills the drift class, which is real:
 it is what let 122.5 Hz survive a span change. But it does not touch the
 **derived** quantities, and those are where this board's real errors lived.
@@ -161,6 +167,13 @@ at the frequency in question. Codegen gives the inputs, not the derivation.
 Ranked by what they would have bought on this board: **lints first, oracle
 second, codegen third.** Plan accordingly, and do not let codegen lead because
 it is the easiest to picture.
+
+The claim in the first sentence is the one that did not survive contact. The
+drift was never in a *value*: `battleship_hz()` computed from its part
+constants the whole time and its test asserted the right answer throughout.
+What went stale was two Hz figures hand-copied into prose, against a change to
+`opamp_span`, which is an inferred part property rather than anything a netlist
+holds. Generated part constants sit outside that chain at both ends.
 
 ### 6. The oracle is offline and staged, and the cheap rung may be enough
 
@@ -262,7 +275,39 @@ Cheap, and each one catches an error this board actually had:
 
 The third row is the one that matters. It is the question nobody could ask.
 
+> **Done.** `netlist lint <file> --device <source>`. Against the shot voice the
+> third row returns ten parts and `C94` is one of them, found without being told
+> the `RO` capacitors exist. The other nine are all real: `C87`/`R142`, the
+> one-shot's timing network; `R157`/`R158`, the divider the device folds into a
+> factor of 0.5; `R160`/`R163`, `Q7`'s base drive, which the device treats as an
+> ideal switch; `C93`, the VCA coupling; and `R203`/`R204`, the mix leg the
+> device holds as one weight.
+>
+> **The device's part list comes from its constants' names and never from its
+> comments**, and on this board that is the entire result. `zaxxon_sound.rs`
+> mentions `C94` exactly once, in a doc comment saying it is *not* modeled. A
+> check that read comments would have counted that as coverage and reported
+> nothing.
+>
+> Rows two and five are not implemented, deliberately: the loader refuses a file
+> that breaks them, along with a pin on two nets. A rule the format carries beats
+> a rule a tool reports, so `lint` names them as enforced instead.
+>
+> Row four declines to run against an excerpt, where it would otherwise report
+> every part of every other voice.
+
 ### 4. Codegen
+
+> **Cut. Not being built.** The kill criterion asked whether this would have
+> caught the 122.5 Hz drift and the answer is no, for the reason decision 5
+> already gave: codegen supplies inputs, and the drift was in a derived figure
+> copied into prose. See the kill criterion.
+>
+> One consequence to carry: rung 3's device part list was specified as a
+> stopgap that codegen would retire. It is now permanent, so it has to stay
+> honest on its own. It derives from constant names rather than a hand-kept
+> manifest, which is what makes that acceptable: it cannot go stale, because it
+> *is* the code.
 
 Generated constants for one board, and `zaxxon_sound.rs` wired to them. See
 decision 5 for what this does and does not buy.
@@ -307,6 +352,44 @@ siblings without being told about them? Would the codegen design have caught the
 linger. Both are questions about this specific board, both have known right
 answers, and neither takes more than an afternoon to settle.
 
-The honest failure mode for this whole idea is that the netlist becomes a fourth
-copy rather than replacing three. Decision 4 and rung 4 are what prevent that,
-and if they slip, the kill criterion is what catches it.
+### Settled, and the two answers disagree
+
+**One: yes.** `netlist lint --device machines/src/zaxxon_sound.rs` over the shot
+voice returns `C94` in a list of ten, knowing nothing about `RO` pins. Nine of
+the other rows are real gaps too. This is the answer the criterion wanted.
+
+**Two: no**, and it was traced rather than assumed. `battleship_hz()` already
+computes from `R93`, `R96`, `C58`, `R98` and `R99`, and its own test asserted
+117.6 Hz throughout. The chain that broke was: `opamp_span` moved, the computed
+rate moved with it, and two Hz figures that had been hand-copied into prose did
+not. Codegen generates part values from the netlist. It does not generate
+`opamp_span`, which is an inferred part property rather than a value on any
+drawing, and it does not generate prose. It is absent from every link.
+
+### What that failure means, which is not what the criterion assumed
+
+The criterion treated its two questions as interchangeable tests of the same
+idea. They are not. The first asks whether a netlist can be queried, which is
+the epic's thesis. The second asks whether *codegen* would have caught a
+specific drift, and decision 5 had already worked out that codegen supplies
+inputs and not derivations, and ranked it third of three for that reason. The
+question tested the weakest rung against a failure mode outside the netlist's
+reach, and a no was close to predetermined.
+
+So the verdict is **cut rung 4, keep the epic**. The evidence kills codegen
+specifically and says nothing against rungs 2, 5 and 6. Reading it as a kill of
+the whole ladder would discard a passing first answer on the strength of a
+second question that was measuring something else.
+
+The general lesson is worth more than the specific one: a kill criterion with
+two questions joined by "if either answer is no" needs both questions to be
+tests of the same thing, and these were not written that way.
+
+### What still guards the honest failure mode
+
+The failure mode is that the netlist becomes a fourth copy rather than replacing
+three. Decision 4 and rung 4 were named as the two things preventing it, and
+rung 4 is now gone, so the guard rests entirely on decision 4: the `.json` is
+generated and `render.sh` regenerates it. That is holding for the one file that
+exists. It is worth re-checking when the fleet migration starts, because a
+hand-edited generated file is exactly how this would fail quietly.
