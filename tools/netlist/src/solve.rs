@@ -97,6 +97,15 @@ pub struct Mode {
     /// Node voltages in this mode, scaled so the largest is 1, largest first.
     /// A mode confined to one node has one entry near 1 and the rest near 0.
     pub shape: Vec<(String, f64)>,
+    /// How the mode's stored energy divides between the capacitors, as
+    /// fractions summing to 1, largest first.
+    ///
+    /// This is what a mode is *named* by. A mode belongs to the network rather
+    /// than to any one capacitor, but where one capacitor holds nearly all of
+    /// its energy, "the mode that lives in `C88`" is an exact description and
+    /// needs no time constant to find it. Identifying a mode by where its
+    /// time constant sits would be telling the solver the answer.
+    pub energy: Vec<(String, f64)>,
 }
 
 /// What the solver did with one analog-switch section, and why.
@@ -620,7 +629,18 @@ impl Network {
                 entry.1 = entry.1 * sign / peak;
             }
             shape.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
-            modes.push(Mode { tau, shape });
+            // The symmetrized eigenvector is `sqrt(C)` times the capacitor
+            // voltages, so its squared components are each capacitor's
+            // `C v^2`, and Jacobi keeps the vectors at unit length: the
+            // squares are already the energy fractions.
+            let mut energy: Vec<(String, f64)> = self
+                .capacitive
+                .iter()
+                .enumerate()
+                .map(|(j, branch)| (branch.part.clone(), vectors[j][m] * vectors[j][m]))
+                .collect();
+            energy.sort_by(|a, b| b.1.total_cmp(&a.1));
+            modes.push(Mode { tau, shape, energy });
         }
         modes.sort_by(|a, b| b.tau.total_cmp(&a.tau));
         Ok(modes)

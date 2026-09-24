@@ -12,6 +12,13 @@
 //! because they are about the board. Each pins one of the device's three
 //! numbers against the whole network solved at once, so a later change to
 //! either the transcription or the solver that moves the answer has to say so.
+//!
+//! **The device no longer computes those three numbers.** `shot_pitch_r`,
+//! `shot_vca_release_r` and `shot_pitch_from_y` were replaced by constants
+//! `netlist derive` solves out of this same network; see
+//! `zaxxon_derive_test.rs`. The tests here still stand, because the device
+//! still writes node X as two one-pole sections, and it is the one-capacitor
+//! reading landing within a few percent of the network that says it may.
 
 use phosphor_netlist::netlist::Netlist;
 use phosphor_netlist::solve::{Mode, Network, Setup};
@@ -84,7 +91,7 @@ fn parallel(a: f64, b: f64) -> f64 {
     a * b / (a + b)
 }
 
-/// The three figures `zaxxon_sound.rs` derives by reading one capacitor at a
+/// The three figures `zaxxon_sound.rs` derived by reading one capacitor at a
 /// time, recomputed from the same transcription the solver reads: the corner
 /// `shot_pitch_r` gives, the recovery `shot_vca_release_r` gives, and the
 /// share `shot_pitch_from_y` gives.

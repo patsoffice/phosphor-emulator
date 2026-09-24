@@ -880,7 +880,6 @@ const R144: f64 = 560.0; // U21's Qbar into the same node
 const R145_R146: f64 = 1_270_000.0; // +12 V down to node X, in series
 const R147: f64 = 1_000_000.0; // node X down to node Y
 const R148: f64 = 2_200_000.0; // node Y to ground
-const C88: f64 = 0.047e-6; // the shaper node into X
 const C89: f64 = 0.68e-6; // on node Y: the VCA's decay
 const R149: f64 = 5_600.0; // X's buffer into U19's inverting amp
 const R150: f64 = 33_000.0; // that amp's feedback: a gain of -5.9
@@ -930,67 +929,35 @@ fn shot_pitch_rest_v() -> f64 {
     rest + (V12 - rest) / (R145_R146 + R147) * R147
 }
 
-/// How much of node Y reaches node X, **0.560**: `R145`/`R146` up to +12 V
-/// against `R147` down to `Y`.
-///
-/// **`R147` 1 MOhm is on the sheet and this device was built without it**, and
-/// that is the whole of the shot's missing sweep. `Y` is the VCA's envelope,
-/// 4.1 V below its rest at the bottom of a trigger and back over hundreds of
-/// milliseconds; `X` is the oscillator's reference through `U19`'s buffer and
-/// inverting amplifier. `R147` joins them, so X slides from 8.42 V at rest to
-/// 6.12 V at the bottom of a trigger and back, and the amplifier sweeps with it
-/// instead of sitting on its floor from 40 ms onward.
-///
-/// The divider is the right way to compute it: solving the network gives node X
-/// **0.579** of the slow mode, which is this ratio to within 3 %. See
-/// [`shot_pitch_r`] for the run.
-fn shot_pitch_from_y() -> f64 {
-    R145_R146 / (R145_R146 + R147)
-}
-
-/// The resistance `C88` works against at node X: `R145`/`R146` up to +12 V in
-/// parallel with `R147` down to node Y, **0.56 MOhm**, so the step decays over
-/// **26 ms**.
-///
-/// **`R148` is not in this and this file used to put it here**, on the reading
-/// that `R147` and `R148` are a path from X to ground. They are, at DC. At the
-/// frequencies this corner describes, `C89` 680 nF holds node Y to ground with
-/// an impedance of 59 kOhm, two orders below `R148`, so `R147` lands on an AC
-/// ground and `R148` is not in the path at all. Including it made this 0.91
-/// MOhm and 43 ms.
-///
-/// See [`shot_vca_release_r`], which is the same argument run the other way.
-/// The two poles this pair of capacitors makes are **26 ms and 760 ms**, and
-/// twenty-nine to one is what lets each be written as its own RC: each
-/// capacitor sees the other as a short or as an open, with nothing in between
-/// for the approximation to lose.
-///
-/// **That separation is checked rather than asserted.** Solving the whole
-/// network out of the board's transcription gives 25.87 ms and 776.7 ms, so
-/// both readings here are within about two percent, and node Y moves only 4 %
-/// of node X in the fast mode, which is the AC ground this function's second
-/// paragraph rests on. `netlist solve --group shot`, pinned in
-/// `tools/netlist/tests/zaxxon_shot_test.rs`.
-fn shot_pitch_r() -> f64 {
-    R145_R146 * R147 / (R145_R146 + R147)
-}
-
-/// The resistance `C89` recovers through at node Y: `R148` to ground in
-/// parallel with `R147` plus `R145`/`R146` up to +12 V, **1.12 MOhm**, so the
-/// VCA's envelope recovers over **760 ms**.
-///
-/// **`R145`/`R146` are in this and this file used to leave them out**, on the
-/// reading that `R147` lands on a node that is held. It is not held: node X
-/// sits on `R145`/`R146` to +12 V and on `C88` 47 nF to the shaper, and at the
-/// frequencies of this recovery `C88` is 15 MOhm, an order above
-/// `R145`/`R146`, so it is an open and `R147` sees 1.27 MOhm in series rather
-/// than a ground. Leaving them out made this 0.69 MOhm and 468 ms, which is
-/// where this file's "the shot is 630 ms against the recording's 990" came
-/// from.
-fn shot_vca_release_r() -> f64 {
-    let up = R147 + R145_R146;
-    R148 * up / (R148 + up)
-}
+// Nodes X and Y, `C88` and `C89`: the three constants below are solved out of
+// the board's transcription rather than derived here, by `netlist derive` from
+// `docs/schematics/netlists/zaxxon-sound.derive.toml`.
+//
+// - `SHOT_C88_TAU`, **25.7 ms**: node X's corner. The step `C88` couples in
+//   from the shaper node decays at this rate, and node Y's sag arrives through
+//   it.
+// - `SHOT_C89_TAU`, **777 ms**: the VCA envelope's recovery at node Y.
+// - `SHOT_C89_X_PER_Y`, **0.579**: how far node X moves per volt of node Y
+//   while Y recovers. **`R147` 1 MOhm is what joins them and this device was
+//   once built without it**, which was the whole of the shot's missing sweep:
+//   X is the oscillator's reference through `U19`'s buffer and inverting
+//   amplifier, so without it the amplifier sat on its floor from 40 ms onward.
+//
+// Each was once written here as one capacitor against a parallel-resistor
+// expression, with a paragraph arguing which other capacitor was a short and
+// which an open. **That argument was wrong twice.** Node X's corner put `R148`
+// in the path, which is `C89` open, and gave 43 ms; node Y's recovery left
+// `R145`/`R146` out, which is `C88` shorted, and gave 468 ms, where this
+// file's "the shot is 630 ms against the recording's 990" came from. The
+// solver needs no such judgment, and handed those two wrong networks it gives
+// those two wrong answers (`tools/netlist/tests/zaxxon_derive_test.rs`).
+//
+// The corrected hand readings, 26.3 ms, 760 ms and 0.560, are within 3.4 % of
+// these. The gap is the coupling the one-capacitor reading throws away: each
+// mode keeps 97.7 % of its energy in its own capacitor, not all of it.
+#[path = "zaxxon_sound_derived.rs"]
+mod derived;
+use derived::{SHOT_C88_TAU, SHOT_C89_TAU, SHOT_C89_X_PER_Y};
 
 /// Node A's weights: the 555's output through `R153`, and `U19`'s inverting
 /// amplifier through `R154`, into `R155`'s 820 ohms to ground.
@@ -1422,7 +1389,7 @@ const C_BLOCK: f64 = 1e-6;
 /// crests coincide is a matter of phase, so a single trigger time measured the
 /// phase rather than the headroom. Found when a 2 % retune of the shot's `C88`
 /// corner moved that voice's phase and the one trigger time started clipping
-/// too. The worst of the ten now peaks at 0.957, fired 25 ms in.
+/// too. The worst of the ten now peaks at 0.965, fired 40 ms in.
 ///
 /// **Nothing about the board's internal balance moves with this.** It is one
 /// scalar on the output, after `SJ`, so every voice keeps the level its own
@@ -2297,7 +2264,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     // as a drop from rest rather than as an absolute voltage, so that the
     // circuit starts at its DC operating point instead of opening the VCA while
     // C89 charges. The attack is through D10 and R143/R144 in parallel, which is
-    // 479 ohms; the release is C89 against R147 in parallel with R148.
+    // 479 ohms; the release is C89's mode of the whole network, solved.
     let shot_drop_tgt = b.logic_levels(
         "SHOT_ENV_TGT",
         shot_pulse,
@@ -2308,7 +2275,7 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
         "SHOT_ENV_DROP",
         shot_drop_tgt,
         C89 * (R143 * R144 / (R143 + R144)),
-        C89 * shot_vca_release_r(),
+        SHOT_C89_TAU,
     );
     let shot_drop_neg = b.gain("SHOT_ENV_NEG", shot_drop, -1.0);
     let shot_rest = b.constant("SHOT_ENV_REST", shot_vca_rest_v());
@@ -2328,10 +2295,10 @@ fn build_circuit(board_clock_hz: u64) -> (DiscreteCircuit, ZaxxonInputs) {
     // X has moved only by what `C88` coupled into it, and it settles onto the
     // divider from the new `Y` afterwards. Without that lag the two terms fire
     // at once and X swings twice as far as the network allows.
-    let shot_x_step = b.rc_high_pass("U19_NODE_X", shot_shaper, shot_pitch_r(), C88);
+    let shot_x_step = b.high_pass_tau("U19_NODE_X", shot_shaper, SHOT_C88_TAU);
     let shot_x_rest = b.constant("U19_NODE_X_REST", shot_pitch_rest_v());
-    let shot_x_sag_dc = b.gain("U19_NODE_X_SAG_DC", shot_drop, -shot_pitch_from_y());
-    let shot_x_sag = b.rc_low_pass("U19_NODE_X_SAG", shot_x_sag_dc, shot_pitch_r(), C88);
+    let shot_x_sag_dc = b.gain("U19_NODE_X_SAG_DC", shot_drop, -SHOT_C89_X_PER_Y);
+    let shot_x_sag = b.low_pass_tau("U19_NODE_X_SAG", shot_x_sag_dc, SHOT_C88_TAU);
     let shot_x = b.add("U19_NODE_X_SUM", &[shot_x_step, shot_x_rest, shot_x_sag]);
     let shot_midrail_neg = b.constant("U19_MIDRAIL_NEG", -V6);
     let shot_x_dev = b.add("U19_NODE_X_DEV", &[shot_x, shot_midrail_neg]);
@@ -3424,10 +3391,6 @@ mod tests {
         let (w_555, w_amp) = shot_node_a_weights();
         assert!((w_555 - 0.216).abs() < 0.002, "R153's share: {w_555}");
         assert!((w_amp - 0.071).abs() < 0.002, "R154's share: {w_amp}");
-
-        // And the decay: C89 against R147 in parallel with R148.
-        let decay = C89 * (R147 * R148 / (R147 + R148));
-        assert!((decay - 0.468).abs() < 0.005, "{decay} s");
     }
 
     /// `Timer555` integrates its capacitor rather than being handed a rate, so

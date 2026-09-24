@@ -98,12 +98,18 @@ impl DeviceParts {
     /// *derived* quantity, and this deliberately does not try to evaluate one:
     /// `shot_pitch_r` is two resistors in parallel and comparing it against
     /// either of them would be nonsense.
+    ///
+    /// **Only a name made of nothing but designators is its part's value.**
+    /// `C88` and `R145_R146` are; `SHOT_C88_TAU` is a time constant of the
+    /// mode that lives in `C88`, which says the device models the part and
+    /// says nothing about its farads. Reading it as a value would report a
+    /// 25.7 ms "capacitor" disagreeing with a 47 nF one.
     pub fn from_source(source: &str) -> DeviceParts {
         let mut named = BTreeSet::new();
         let mut values: BTreeMap<String, Constant> = BTreeMap::new();
         let mut compound = Vec::new();
         for line in source.lines() {
-            let line = line.trim_start();
+            let line = strip_visibility(line.trim_start());
             let Some(rest) = line.strip_prefix("const ") else {
                 continue;
             };
@@ -112,15 +118,19 @@ impl DeviceParts {
             };
             let name = name.trim();
             let mut here: Vec<&str> = Vec::new();
+            let mut only_parts = true;
             for token in name.split('_') {
                 if is_designator(token) {
                     named.insert(token.to_string());
                     here.push(token);
+                } else {
+                    only_parts = false;
                 }
             }
             let literal = tail
                 .split_once('=')
-                .and_then(|(_, rhs)| numeric_literal(rhs));
+                .and_then(|(_, rhs)| numeric_literal(rhs))
+                .filter(|_| only_parts);
             match (here.as_slice(), literal) {
                 ([one], Some(value)) => {
                     values.entry((*one).to_string()).or_insert(Constant {
@@ -137,6 +147,50 @@ impl DeviceParts {
             values,
             compound,
         }
+    }
+
+    /// Read a device from its source file, and from any file it pulls in as a
+    /// module by `#[path = "..."]`.
+    ///
+    /// That is how a device takes constants `netlist derive` generated: they
+    /// are its code as much as the file that declares the module, so reading
+    /// only that file would report `C88` unmodeled on a device that models it
+    /// through `SHOT_C88_TAU`.
+    pub fn from_path(path: &std::path::Path) -> std::io::Result<DeviceParts> {
+        let mut source = std::fs::read_to_string(path)?;
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let pulled: Vec<String> = source
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("#[path = \"")?;
+                Some(rest.split_once('"')?.0.to_string())
+            })
+            .collect();
+        for file in pulled {
+            source.push('\n');
+            source.push_str(&std::fs::read_to_string(dir.join(file))?);
+        }
+        Ok(DeviceParts::from_source(&source))
+    }
+}
+
+/// `pub`, `pub(crate)`, `pub(super)` and the rest, off the front of a line: a
+/// generated module's constants have to be visible to the device using them.
+fn strip_visibility(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix("pub") else {
+        return line;
+    };
+    let rest = match rest.strip_prefix('(') {
+        Some(inner) => match inner.split_once(')') {
+            Some((_, after)) => after,
+            None => return line,
+        },
+        None => rest,
+    };
+    match rest.strip_prefix(' ') {
+        Some(rest) => rest.trim_start(),
+        // `pubfoo` is not a visibility.
+        None => line,
     }
 }
 
@@ -547,6 +601,33 @@ mod tests {
         assert!(device.named.contains("U12"));
         assert!(!device.named.contains("CANNON"));
         assert!(!device.named.contains("SWING"));
+    }
+
+    /// A generated constant is a property of its part and not its value.
+    /// `SHOT_C88_TAU` is a time constant in seconds, and reading it as `C88`'s
+    /// farads would report a disagreement a factor of half a million wide.
+    #[test]
+    fn a_name_with_words_beside_the_designator_names_the_part_but_is_not_its_value() {
+        let device = DeviceParts::from_source(
+            "pub(super) const SHOT_C88_TAU: f64 = 2.57412e-2;\n\
+             pub const C89: f64 = 0.68e-6;\n\
+             const U11_GAIN: f64 = -8.2;\n",
+        );
+        assert!(device.named.contains("C88"));
+        assert!(!device.values.contains_key("C88"));
+        assert!(device.named.contains("U11"));
+        assert!(!device.values.contains_key("U11"));
+        // Visibility does not hide a constant, and a bare name is still a value.
+        assert_eq!(device.values.get("C89").map(|c| c.value), Some(0.68e-6));
+    }
+
+    #[test]
+    fn visibility_is_stripped_and_nothing_else_is() {
+        assert_eq!(strip_visibility("pub const A"), "const A");
+        assert_eq!(strip_visibility("pub(super) const A"), "const A");
+        assert_eq!(strip_visibility("pub(in crate::x) const A"), "const A");
+        assert_eq!(strip_visibility("const A"), "const A");
+        assert_eq!(strip_visibility("public const A"), "public const A");
     }
 
     /// A two-part netlist and a device, wired enough to load, for the value

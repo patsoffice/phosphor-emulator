@@ -764,6 +764,39 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// First-order low-pass specified by its time constant (seconds).
+    ///
+    /// For a pole that is not any one resistor times any one capacitor: a
+    /// network with two capacitors has two modes, each set by both, and a time
+    /// constant solved out of the whole network has no `R` to hand to
+    /// [`rc_low_pass`](Self::rc_low_pass) except one computed backwards from it.
+    pub fn low_pass_tau(&mut self, name: &str, src: impl Into<NodeId>, tau: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::RcLowPass {
+                src: src.into(),
+                tau,
+                y: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// First-order high-pass specified by its time constant (seconds). See
+    /// [`low_pass_tau`](Self::low_pass_tau) for when this is the right form.
+    pub fn high_pass_tau(&mut self, name: &str, src: impl Into<NodeId>, tau: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::RcHighPass {
+                src: src.into(),
+                tau,
+                x_prev: 0.0,
+                y: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// First-order shelf: `r_series` from `src` to the output, and `r_shunt` in
     /// series with `c` from the output to ground.
     ///

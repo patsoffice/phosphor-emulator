@@ -5,6 +5,7 @@
 //! JSON beside the prose is a build product of this tool.
 
 use clap::{Parser, Subcommand};
+use phosphor_netlist::derive;
 use phosphor_netlist::lint as lints;
 use phosphor_netlist::netlist::{self, Netlist};
 use phosphor_netlist::solve as solver;
@@ -58,6 +59,17 @@ enum Command {
         #[arg(short, long, value_name = "NET=VOLTS")]
         rail: Vec<String>,
     },
+    /// Solve the networks a derive spec names and write the device constants
+    /// they give, as Rust. The spec says which capacitor's mode each constant
+    /// is and never what its value should be.
+    Derive {
+        /// The `.derive.toml` spec.
+        spec: PathBuf,
+        /// Write nothing; fail if the file on disk differs from what would be
+        /// written.
+        #[arg(long)]
+        check: bool,
+    },
     /// Generate netlistsvg input. `docs/schematics/render.sh` turns that into
     /// the SVG a document embeds.
     Svg {
@@ -80,6 +92,8 @@ fn main() -> ExitCode {
         | Command::Svg { file, .. }
         | Command::Lint { file, .. }
         | Command::Solve { file, .. } => file,
+        // A spec names its own transcription.
+        Command::Derive { spec, check } => return derive(spec, *check),
     };
     let netlist = match Netlist::load(path) {
         Ok(netlist) => netlist,
@@ -105,6 +119,47 @@ fn main() -> ExitCode {
         Command::Solve {
             group, drive, rail, ..
         } => solve(&netlist, group.as_deref(), drive, rail),
+        Command::Derive { .. } => unreachable!("dispatched before a netlist is loaded"),
+    }
+}
+
+/// Generate a device's derived constants, or check that they are current.
+fn derive(spec: &Path, check: bool) -> ExitCode {
+    let generated = match derive::generate(spec) {
+        Ok(generated) => generated,
+        Err(problems) => {
+            for problem in &problems {
+                eprintln!("{problem}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = generated.out.display();
+    if check {
+        return match std::fs::read_to_string(&generated.out) {
+            Ok(on_disk) if on_disk == generated.text => {
+                println!("{path}: current");
+                ExitCode::SUCCESS
+            }
+            Ok(_) => {
+                eprintln!("{path}: stale; run `netlist derive {}`", spec.display());
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("{path}: cannot read: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match std::fs::write(&generated.out, &generated.text) {
+        Ok(()) => {
+            println!("{path}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{path}: cannot write: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -230,6 +285,15 @@ fn solve(netlist: &Netlist, group: Option<&str>, drive: &[String], rail: &[Strin
             println!("\nnatural modes, one per capacitor:");
             for mode in &modes {
                 println!("\n  tau = {}", seconds(mode.tau));
+                // Which capacitor the mode lives in, which is how `derive`
+                // names one. Same one-percent floor as the shape below.
+                let held: Vec<String> = mode
+                    .energy
+                    .iter()
+                    .filter(|(_, e)| *e >= 0.01)
+                    .map(|(c, e)| format!("{c} {:.1} %", e * 100.0))
+                    .collect();
+                println!("    energy in {}", held.join(", "));
                 for (net, share) in &mode.shape {
                     // Below a percent a node is not taking part in the mode,
                     // and printing it would bury the two that are.
@@ -265,8 +329,8 @@ fn seconds(tau: f64) -> String {
 /// than a defect and does not fail the run.
 fn lint(netlist: &Netlist, device: Option<&Path>) -> ExitCode {
     let parts = match device {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(source) => Some(lints::DeviceParts::from_source(&source)),
+        Some(path) => match lints::DeviceParts::from_path(path) {
+            Ok(parts) => Some(parts),
             Err(e) => {
                 eprintln!("{}: cannot read device source: {e}", path.display());
                 return ExitCode::FAILURE;

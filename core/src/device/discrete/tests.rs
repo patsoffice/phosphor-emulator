@@ -510,6 +510,27 @@ fn rc_high_pass_blocks_dc_passes_transient() {
     assert!(c.value(hp).abs() < 0.01, "DC blocked");
 }
 
+/// The time-constant forms are the R·C forms with the product taken already,
+/// sample for sample. A solved mode has a `tau` and no `R`, and this is what
+/// lets a device use one without inventing a resistance to multiply back.
+#[test]
+fn the_tau_forms_match_the_rc_forms_exactly() {
+    let mut b = builder_1to1(RATE);
+    let gate = b.logic_input("GATE");
+    let lp_rc = b.rc_low_pass("LP_RC", gate, 1_000.0, 1e-6);
+    let lp_tau = b.low_pass_tau("LP_TAU", gate, 1e-3);
+    let hp_rc = b.rc_high_pass("HP_RC", gate, 1_000.0, 1e-6);
+    let hp_tau = b.high_pass_tau("HP_TAU", gate, 1e-3);
+    let mut c = b.build();
+
+    for i in 0..400 {
+        c.set_logic(gate, (i / 100) % 2 == 0);
+        c.tick(1);
+        assert_eq!(c.value(lp_rc), c.value(lp_tau), "low-pass, sample {i}");
+        assert_eq!(c.value(hp_rc), c.value(hp_tau), "high-pass, sample {i}");
+    }
+}
+
 #[test]
 fn rc_envelope_charges_fast_discharges_slow() {
     let mut b = builder_1to1(RATE);

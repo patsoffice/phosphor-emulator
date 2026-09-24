@@ -1,0 +1,44 @@
+# What `machines/src/zaxxon_sound.rs` takes from the solver rather than from
+# a hand derivation. Regenerate with
+#
+#     cargo run -p phosphor-netlist -- derive docs/schematics/netlists/zaxxon-sound.derive.toml
+#
+# and `tools/netlist/tests/zaxxon_derive_test.rs` fails while the output is
+# stale.
+#
+# A constant here names the capacitor whose mode it wants and never the value
+# it expects, a resistor, or which parts are in its path. Those were the three
+# places the hand derivations went wrong. See `docs/designs/
+# schematic-transcription.md`, "Derived constants".
+
+netlist = "zaxxon-sound.toml"
+out = "../../../machines/src/zaxxon_sound_derived.rs"
+device = "machines/src/zaxxon_sound.rs"
+
+# The shot recovering after a trigger. `Qbar` returns to +5 V, `D10` goes
+# reverse biased and drops out of the network, and node Y climbs back through
+# `C89` while node X follows it through `R147`. The one-shot's output is the
+# only drive: whether it is held or left open moves the answers by half a
+# percent (`holding_the_one_shots_output_barely_moves_the_answer`).
+[[scenarios]]
+group = "shot"
+drives = { Qbar = 5.0 }
+
+# Node X's corner: the step `C88` couples in from the shaper node decays at
+# this rate, and the sag from node Y arrives through it.
+[[scenarios.tau]]
+name = "SHOT_C88_TAU"
+mode_of = "C88"
+
+# The VCA envelope's recovery.
+[[scenarios.tau]]
+name = "SHOT_C89_TAU"
+mode_of = "C89"
+
+# How much of node Y's recovery node X carries, which is what sweeps the
+# pitch amplifier.
+[[scenarios.share]]
+name = "SHOT_C89_X_PER_Y"
+mode_of = "C89"
+node = "node X"
+per = "node Y"

@@ -1,8 +1,9 @@
 # Design: Schematic Transcription
 
-> **Status: rungs 1, 3 and 5 done, rung 2 substantially done, rung 4 cut.** The
+> **Status: rungs 1, 2, 3 and 5 done, rung 4 cut, rung 6 unstarted.** The
 > kill criterion is settled and its two questions disagreed; see the bottom of
-> this file. Make a board's transcription a single piece of data
+> this file. The probe that followed the cut, generating *derived* constants
+> rather than values, passed its own kill criterion; see "Derived constants". Make a board's transcription a single piece of data
 > rather than three prose copies of itself: a pin-level netlist per board, lints
 > over it, generated Rust constants, and an offline solver that can tell a
 > misreading from a modeling approximation. Scoped to a probe on one board with
@@ -539,6 +540,117 @@ schematic, and the fleet contains devices that are not. `not-modeled` now says
 so in one line when a device names nothing, so the twenty-three rows are read
 as the consequence they are. Any fleet migration has to expect both kinds, and
 for the second kind the netlist's value is the solver rather than the lints.
+
+## Derived constants
+
+`phosphor-emulator-kfby.2`. Rung 4 was cut because codegen supplies inputs and
+the errors lived in derivations. Rung 5 then made derivations available: the
+solver produces `shot_pitch_r`'s quantity with no argument about which resistor
+sits at an AC ground, and that argument had been wrong twice. So the probe asked
+whether the solver's outputs could replace the hand derivations on one voice,
+the shot, where three constants and two of the voice's known-wrong readings
+live.
+
+`netlist derive docs/schematics/netlists/zaxxon-sound.derive.toml` solves the
+shot's network and writes `machines/src/zaxxon_sound_derived.rs`, which the
+device takes as a module. `zaxxon_derive_test.rs` fails while that file differs
+from what the spec writes, which is decision 4's guard made a test rather than a
+habit: a generated file nobody regenerates is a fourth copy with a header
+claiming otherwise.
+
+### Two decisions the probe had to make first
+
+**The output is a time constant, not a resistance.** The device took an R and a
+C separately (`rc_high_pass(.., shot_pitch_r(), C88)`), so a generator could
+have emitted `tau / C88` and changed nothing downstream. That was rejected: a
+mode belongs to the network, not to `C88`, and an "R" computed backwards from it
+is a number no part on the sheet has, handed to a builder that multiplies it
+straight back. The builder already stored `tau` in all three node kinds, and
+`rc_envelope` already took one, so it gained `low_pass_tau` and `high_pass_tau`,
+and the device consumes what the generator emits without transforming it.
+
+**A mode is named by its capacitor, never by its time constant.** The rung 5
+tests found the fast mode as the one nearest 26 ms. A generator that did that
+would be told its answer, and the kill criterion below would test nothing. So
+`Mode` now carries how its stored energy divides between the capacitors (exact:
+the squared components of the symmetrized eigenvector), and a spec asks for "the
+mode of `C88`". The generator refuses a capacitor holding half or less of every
+mode's energy, since the network then has no mode that is that capacitor's and a
+one-pole section keyed to it is not something the solver can vouch for. On the
+shot each mode keeps **97.7 %** of its energy in its own capacitor, which is the
+separation argument measured rather than asserted.
+
+### Kill criterion: settled, and both answers are yes
+
+Both questions test one thing: whether the generator derives or transcribes.
+
+**Does it agree with the hand derivation where that is believed right?** Yes,
+to within the coupling the one-capacitor reading discards:
+
+| | hand, one capacitor at a time | generated | out by |
+|---|---|---|---|
+| `SHOT_C88_TAU` | 26.30 ms | **25.74 ms** | 2.1 % |
+| `SHOT_C89_TAU` | 759.9 ms | **776.7 ms** | 2.2 % |
+| `SHOT_C89_X_PER_Y` | 0.560 | **0.579** | 3.4 % |
+
+The fast mode is 25.74 ms rather than rung 5's 25.87 because the spec holds
+`Qbar` at 5 V, as rung 5's pinned tests do; its prose quoted the undriven run.
+No part moved.
+
+**Does it reproduce the two corrections without being told them?** Yes, and it
+was asked more sharply than "is the answer not 43". Each superseded reading was
+a judgment that one capacitor is a short or an open, so the same spec was run
+on the two networks those judgments describe:
+
+| | old hand reading | generated, on the network it assumed | generated, as drawn |
+|---|---|---|---|
+| `C88`'s mode | 42.73 ms | 42.75 ms, `C89` removed | **25.74 ms** |
+| `C89`'s mode | 467.5 ms | 467.7 ms, `C88` shorted | **776.7 ms** |
+
+A generator handed an answer would print the same number in all three columns.
+This one prints each wrong answer on the wrong network and the right one on the
+drawing, so the number is coming from the network. The residue in the middle
+column is the 479 ohms the shaper node puts in series, which the hand formula
+omits.
+
+### What it found on the way
+
+- **The superseded 468 ms reading was still asserted.** A device test computed
+  `C89 * (R147 || R148)` and pinned it at 0.468 under the heading "And the
+  decay", and the comment at the envelope's call site still gave the release as
+  `R147` in parallel with `R148`. Both outlived the correction they contradicted,
+  which is "copies drift" again, and both went with the derivation.
+- **`nothing_saturates` was passing on phase.** Wiring in a fast corner 2 %
+  shorter made the every-voice mix clip, with the shot's own level unchanged.
+  Sweeping the trigger time showed the mix at `OUTPUT_GAIN` 4.3 already clipped
+  at six of eight nearby trigger times, *before* this change; the one the test
+  used happened to miss. The test now sweeps ten, and `OUTPUT_GAIN` is 3.8, by
+  that constant's own rule that the conservative bound is the one to keep. That
+  is a separate commit, ahead of the probe.
+- **`lint --device` needed one rule it did not have**: only a name made of
+  nothing but designators is a part's value. `SHOT_C88_TAU` says the device
+  models `C88` and says nothing about its farads. Value coverage went from 102
+  of 105 literals to 101 of 101: the three dropped from the denominator
+  (`PC1_LED_VF`, `CANNON_R_Q6_ON`, `U11_GAIN`) name parts with no quantity and
+  were never compared, and the one comparison lost is `C88`'s, which is
+  inherent, because the device no longer holds that value and cannot disagree
+  with the sheet about it. The lint also follows a `#[path]` module now, or
+  `C88` would have been reported unmodeled on the device that models it most
+  exactly.
+
+### What it does not cover, said again
+
+The solver handles linear passive networks. `opamp_span`, `OPAMP_V_LOW`, the
+555's duty and the `MB4391`'s rolloff are part properties or nonlinear, and it
+produces none of them; those are rung 6 or they stay inferences. On the shot
+itself, `D10`'s clamp (`shot_vca_rest_v`) and the attack through it stay
+hand-written for the same reason. **The 122.5 Hz drift lived in `opamp_span`,
+and nothing here would have caught it.**
+
+Whether to extend this past the shot is a separate decision. The probe says the
+mechanism works where a voice's derivation is a passive network the
+transcription holds; it does not say how many voices on this board or the fleet
+are that shape.
 
 ## Kill criterion
 
