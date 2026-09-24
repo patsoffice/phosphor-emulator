@@ -462,6 +462,10 @@ question and a part-property question is still blocking a board.
 >
 > Nothing about this touches the runtime non-goal: source out, the tool run by
 > hand, nothing linked.
+>
+> **Filed as `phosphor-emulator-kfby.4`**, scoped as a probe on the shot, whose
+> residual rung 5 has narrowed to exactly the part properties this rung can
+> test.
 
 ## The second board
 
