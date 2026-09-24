@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, every part this file knows of transcribed and three pins still unread: U15.2 and U14.6, two MB4391 control pins on sheet 12, and C67.a, the source of the second explosion's band-pass. See the warning about the word complete at the top of this file, laser": {
+    "Zaxxon sound: laser": {
       "ports": {
         "SJ": {
           "direction": "input",

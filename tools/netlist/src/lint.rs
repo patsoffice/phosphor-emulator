@@ -152,14 +152,25 @@ fn numeric_literal(rhs: &str) -> Option<f64> {
     cleaned.parse::<f64>().ok()
 }
 
-/// `R156`, `C94`, `U19`: one to three letters then digits, which is how every
-/// designator on these sheets is written. `OPAMP` and `SWING` are not, and
-/// neither is `CANNON`, so a compound constant name contributes only the parts
-/// of it that are parts.
+/// `R156`, `C94`, `U19`: a reference-designator prefix then digits, which is
+/// how every designator on these sheets is written. `OPAMP` and `SWING` are
+/// not, and neither is `CANNON`, so a compound constant name contributes only
+/// the parts of it that are parts.
+///
+/// **The prefix has to be a known one**, and that is not fussiness. The first
+/// run of the `no-part` check against a whole board reported `MB4391`,
+/// `MM5837` and `K74123`, which are part numbers, and `V5`, `V6` and `V12`,
+/// which are rail voltages. All six match "letters then digits" and none is a
+/// designator. Six false positives against one real finding is the ratio at
+/// which a check stops being read, so the rule is the prefix list a schematic
+/// actually uses rather than the shape of the token.
 fn is_designator(token: &str) -> bool {
+    const PREFIXES: [&str; 12] = [
+        "R", "C", "L", "D", "Q", "U", "X", "J", "P", "VR", "RP", "PC",
+    ];
     let letters = token.chars().take_while(|c| c.is_ascii_uppercase()).count();
     let digits = token.len() - letters;
-    (1..=3).contains(&letters)
+    PREFIXES.contains(&&token[..letters])
         && digits >= 1
         && token[letters..].chars().all(|c| c.is_ascii_digit())
 }
@@ -510,8 +521,17 @@ mod tests {
         for yes in ["R156", "C94", "U19", "D11", "Q7", "R203"] {
             assert!(is_designator(yes), "{yes}");
         }
+        for yes in ["VR1", "RP2", "PC1"] {
+            assert!(is_designator(yes), "{yes}");
+        }
         for no in ["OPAMP", "SWING", "CANNON", "REF", "R", "123", "Rx1", "HZ"] {
             assert!(!is_designator(no), "{no}");
+        }
+        // The six the first whole-board run of `no-part` reported. Three are
+        // part numbers and three are rail voltages, and every one of them is
+        // "letters then digits".
+        for no in ["MB4391", "MM5837", "K74123", "V5", "V6", "V12"] {
+            assert!(!is_designator(no), "{no} is not a designator");
         }
     }
 

@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, every part this file knows of transcribed and three pins still unread: U15.2 and U14.6, two MB4391 control pins on sheet 12, and C67.a, the source of the second explosion's band-pass. See the warning about the word complete at the top of this file, engine": {
+    "Zaxxon sound: engine": {
       "ports": {
         "NOISE 1": {
           "direction": "input",
@@ -8,90 +8,26 @@
             2
           ]
         },
-        "NOISE 2": {
+        "U8d out": {
           "direction": "input",
           "bits": [
             3
           ]
         },
-        "base missile attenuated": {
-          "direction": "input",
-          "bits": [
-            4
-          ]
-        },
-        "U8d out": {
-          "direction": "input",
-          "bits": [
-            5
-          ]
-        },
         "U5a out": {
           "direction": "output",
           "bits": [
-            9
+            7
           ]
         },
         "tone A in": {
           "direction": "input",
           "bits": [
-            13
-          ]
-        },
-        "U14 ch B in": {
-          "direction": "input",
-          "bits": [
-            14
-          ]
-        },
-        "U14 ch B RO": {
-          "direction": "input",
-          "bits": [
-            15
-          ]
-        },
-        "engine out": {
-          "direction": "input",
-          "bits": [
-            16
-          ]
-        },
-        "R62/C50 junction": {
-          "direction": "input",
-          "bits": [
-            18
-          ]
-        },
-        "U4c out": {
-          "direction": "input",
-          "bits": [
-            19
-          ]
-        },
-        "R63/R64 junction": {
-          "direction": "input",
-          "bits": [
-            20
+            11
           ]
         }
       },
       "cells": {
-        "engine_leg": {
-          "type": "R183 39k",
-          "port_directions": {
-            "base missile attenuated": "output",
-            "engine out": "input"
-          },
-          "connections": {
-            "base missile attenuated": [
-              4
-            ],
-            "engine out": [
-              16
-            ]
-          },
-          "attributes": {}
-        },
         "r17": {
           "type": "R17 390",
           "port_directions": {
@@ -103,7 +39,7 @@
               "0"
             ],
             "PC1 LED return": [
-              6
+              4
             ]
           },
           "attributes": {}
@@ -121,13 +57,13 @@
               "1"
             ],
             "U8d out (led+)": [
-              5
+              3
             ],
             "PC1 LED return (led-)": [
-              6
+              4
             ],
             "engine tuning node (cell2)": [
-              7
+              5
             ]
           },
           "attributes": {}
@@ -144,10 +80,10 @@
               "1"
             ],
             "U5a in (2)": [
-              8
+              6
             ],
             "U5a out (1)": [
-              9
+              7
             ]
           },
           "attributes": {}
@@ -160,10 +96,10 @@
           },
           "connections": {
             "U5a in": [
-              8
+              6
             ],
             "U5a out": [
-              9
+              7
             ]
           },
           "attributes": {}
@@ -177,13 +113,13 @@
           },
           "connections": {
             "engine tuning node": [
-              7
+              5
             ],
             "U5a in": [
-              8
+              6
             ],
             "U5a out": [
-              9
+              7
             ]
           },
           "attributes": {}
@@ -196,10 +132,10 @@
           },
           "connections": {
             "engine tuning node": [
-              7
+              5
             ],
             "R20/C28 junction": [
-              10
+              8
             ]
           },
           "attributes": {}
@@ -212,10 +148,10 @@
           },
           "connections": {
             "R20/C28 junction": [
-              10
+              8
             ],
             "U4a out": [
-              11
+              9
             ]
           },
           "attributes": {}
@@ -228,10 +164,10 @@
           },
           "connections": {
             "U4a out": [
-              11
+              9
             ],
             "U4a in": [
-              12
+              10
             ]
           },
           "attributes": {}
@@ -247,7 +183,7 @@
               2
             ],
             "U4a in": [
-              12
+              10
             ]
           },
           "attributes": {}
@@ -264,10 +200,10 @@
               "1"
             ],
             "U4a out (1)": [
-              11
+              9
             ],
             "U4a in (2)": [
-              12
+              10
             ]
           },
           "attributes": {}
@@ -280,138 +216,10 @@
           },
           "connections": {
             "U5a out": [
-              9
+              7
             ],
             "tone A in": [
-              13
-            ]
-          },
-          "attributes": {}
-        },
-        "c51": {
-          "type": "C51 22uF",
-          "port_directions": {
-            "U14 ch B in": "output",
-            "U4c out": "input"
-          },
-          "connections": {
-            "U14 ch B in": [
-              14
-            ],
-            "U4c out": [
-              19
-            ]
-          },
-          "attributes": {}
-        },
-        "c52": {
-          "type": "C52 680pF",
-          "port_directions": {
-            "GND": "input",
-            "U14 ch B RO": "input"
-          },
-          "connections": {
-            "GND": [
-              "0"
-            ],
-            "U14 ch B RO": [
-              15
-            ]
-          },
-          "attributes": {}
-        },
-        "r61": {
-          "type": "R61 15k",
-          "port_directions": {
-            "NOISE 2": "input",
-            "R61/R62 junction": "output"
-          },
-          "connections": {
-            "NOISE 2": [
-              3
-            ],
-            "R61/R62 junction": [
-              17
-            ]
-          },
-          "attributes": {}
-        },
-        "r62": {
-          "type": "R62 15k",
-          "port_directions": {
-            "R61/R62 junction": "input",
-            "R62/C50 junction": "output"
-          },
-          "connections": {
-            "R61/R62 junction": [
-              17
-            ],
-            "R62/C50 junction": [
-              18
-            ]
-          },
-          "attributes": {}
-        },
-        "c50": {
-          "type": "C50 22nF",
-          "port_directions": {
-            "GND": "input",
-            "R62/C50 junction": "input"
-          },
-          "connections": {
-            "GND": [
-              "0"
-            ],
-            "R62/C50 junction": [
-              18
-            ]
-          },
-          "attributes": {}
-        },
-        "c137": {
-          "type": "C137 22nF",
-          "port_directions": {
-            "R61/R62 junction": "input",
-            "U4c out": "output"
-          },
-          "connections": {
-            "R61/R62 junction": [
-              17
-            ],
-            "U4c out": [
-              19
-            ]
-          },
-          "attributes": {}
-        },
-        "r63": {
-          "type": "R63 50k",
-          "port_directions": {
-            "U4c out": "input",
-            "R63/R64 junction": "output"
-          },
-          "connections": {
-            "U4c out": [
-              19
-            ],
-            "R63/R64 junction": [
-              20
-            ]
-          },
-          "attributes": {}
-        },
-        "r64": {
-          "type": "R64 100k",
-          "port_directions": {
-            "+5V": "input",
-            "R63/R64 junction": "input"
-          },
-          "connections": {
-            "+5V": [
-              "1"
-            ],
-            "R63/R64 junction": [
-              20
+              11
             ]
           },
           "attributes": {}
