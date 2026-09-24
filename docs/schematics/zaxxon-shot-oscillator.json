@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, every part transcribed and nine pins still unread: the three MB4391 channel A control pins, two sources and the cannon's gain stage on sheet 11 left, and which alarm one-shot drives which 7426 section. `netlist show` prints the list, shot": {
+    "Zaxxon sound: both sheets, every part this file knows of transcribed and three pins still unread: U15.2 and U14.6, two MB4391 control pins on sheet 12, and C67.a, the source of the second explosion's band-pass. See the warning about the word complete at the top of this file, shot": {
       "ports": {
         "SHOT": {
           "direction": "input",

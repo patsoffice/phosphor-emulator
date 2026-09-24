@@ -5,18 +5,24 @@
 # noise sources all span voices and no per-voice file could say what is on
 # them.
 #
-# EVERY PART IS NOW IN. The five groups this file used to list as missing are
-# transcribed: the homing missile's 555 source, warble oscillator and 4016B
-# gate; the base missile's one-shot and envelope; the laser's 4016B gate; the
-# engine's Sallen-Key low-pass on into its VCA; and the explosion band-pass on
-# sheet 11 right. 417 parts across 355 symbols.
+# 429 PARTS ACROSS 367 SYMBOLS, and THREE unread pins, down from twenty-five.
 #
-# WHAT REMAINS IS NINE PINS, down from twenty-five, each marked `unread` with
-# its reason: the three MB4391 channel A control pins, two sources and the
-# cannon's gain stage on sheet 11 left, and which alarm one-shot drives which
-# 7426 section. `netlist show` prints the list. The file still declares itself
-# an excerpt for them, so `netlist lint`'s "a constant with no part behind it"
-# check still declines to run.
+# A WARNING ABOUT "COMPLETE", because this file has claimed it once already and
+# was wrong. The five groups it used to list as missing are in: the homing
+# missile's 555, warble oscillator and 4016B gate; the base missile's one-shot
+# and envelope; the laser's 4016B gate; the engine's Sallen-Key low-pass on
+# into its VCA; and one explosion band-pass. It then said every part was
+# transcribed. TRACING C76's SOURCE FOUND TWELVE MORE: the second explosion's
+# whole chain, C67 and R117 through R123 and R124. Nothing had noticed, because
+# every pin that chain touches was either wired to something else or already
+# marked unread, and the one pin that would have caught it was `C76.a`.
+#
+# So what this file can honestly say is that every part it knows of is in, and
+# that the remaining unread pins are where the next one would be found. There
+# are three: `U15.2` and `U14.6`, the two MB4391 control pins on sheet 12, and
+# `C67.a`, the source of the chain just described. The file still declares
+# itself an excerpt for them, so `netlist lint`'s "a constant with no part
+# behind it" check still declines to run.
 #
 # SIX THINGS THE FINISHING PASS CORRECTED, all of them readings this file had
 # already committed to:
@@ -36,7 +42,9 @@
 #     homing missile and base missile gate bits. Those three bits each run
 #     straight down the sheet to their own destination and none turns toward
 #     `U31`. So the whole `U31`/`R28`/`C34`/`U11` chain is the PLAYER SHIP
-#     LEVEL, and what it opens is the engine's VCA.
+#     LEVEL, and its first follower opens `U14` channel A, the tone A VCA.
+#     That pin was got wrong twice by reasoning from the far end before it was
+#     traced; see the note on `player ship tone A CON`.
 #   - Both player ship tone filters return their gain pair to the `R34`/`R35`
 #     midpoint, a second 6 V reference at a tenth the impedance of the shared
 #     one, and its wire crosses two others with NO JUNCTION DOT.
@@ -115,7 +123,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "both sheets, every part transcribed and nine pins still unread: the three MB4391 channel A control pins, two sources and the cannon's gain stage on sheet 11 left, and which alarm one-shot drives which 7426 section. `netlist show` prints the list"
+excerpt = "both sheets, every part this file knows of transcribed and three pins still unread: U15.2 and U14.6, two MB4391 control pins on sheet 12, and C67.a, the source of the second explosion's band-pass. See the warning about the word complete at the top of this file"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -634,7 +642,7 @@ on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
   "U11.3", "PC1.cell1", "R30.a", "R33.a",
   "R72.a", "R1.b", "R2.a", "C3.b", "C4.a", "C140.a",
-  "R42.a", "U4.5", "R114.a", "U4.3",
+  "R42.a", "U4.5", "R114.a", "U4.3", "U3.5", "R120.a",
 ]
 note = """
 NOT A REGULATED RAIL. R1 and R2 are a plain 1k divider from +12 V to ground \
@@ -678,7 +686,7 @@ on = [
   "C13.b", "R8.b", "R9.b", "Q2.e",
   "C43.b", "C45.b", "R52.b", "R54.b", "U6.1",
   "C49.b", "R76.b", "R78.b", "C50.b", "C70.b",
-  "U1.3",
+  "U1.3", "C72.b", "R124.b",
 ]
 
 [[nets]]
@@ -1439,10 +1447,10 @@ out = ["11", "15"]
 read = "partial"
 note = """
 Both channels used, by two different voices. This is why a drawing is cut \
-along a section rather than a part."""
-unread = [
-  { pin = "2", why = "CON for channel A, driven by the cannon's envelope on sheet 11 left; not transcribed yet" },
-]
+along a section rather than a part.
+
+Channel A's control on pin 2 is the cannon's envelope, inverted onto a \
+reference by U12 section C."""
 
 [[parts.sections]]
 name = "a"
@@ -1505,9 +1513,7 @@ group = "medium explosion"
 ref = "C76"
 kind = "C"
 uf = 2.2
-unread = [
-  { pin = "a", why = "the medium explosion's source on sheet 11 left; not transcribed yet" },
-]
+note = "taps the R123/R124 halving divider on the second band-pass's output."
 
 [[parts]]
 group = "medium explosion"
@@ -1552,9 +1558,7 @@ group = "cannon"
 ref = "C84"
 kind = "C"
 uf = 4.7
-unread = [
-  { pin = "a", why = "the cannon's source on sheet 11 left; not transcribed yet" },
-]
+note = "couples the cannon's band-pass across the sheet overlap into its VCA, through R134."
 
 [[parts]]
 group = "cannon"
@@ -1767,15 +1771,20 @@ ref = "U3"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3", "12", "13", "14"]
-out = ["1", "14"]
-read = "partial"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
 note = """
-Two of its four sections. Section A on 1/2/3 is the noise input stage; section \
-D on 12/13/14 is the Sallen-Key low-pass that follows it, with R113 and R116 \
-in series, C70 to ground and C71 from their junction back to the output. \
-Sections B and C are elsewhere on this sheet and are not transcribed. The part \
-number is not printed; see the note on U19.
+ALL FOUR SECTIONS, and they build two band-passes of the same shape for two \
+different explosion voices. Section A on 1/2/3 is the noise input stage that \
+both read. Section D on 12/13/14 is one Sallen-Key low-pass, with R113 and \
+R116 in series, C70 to ground and C71 from their junction back to the output. \
+Sections B and C are the other: B is an inverting stage on R117 and R118, and \
+C is the same Sallen-Key built from R119, R122, C72 and C73.
+
+The difference between the two chains is worth recording, because it is the \
+only thing that distinguishes them: the second has an amplifier in front of \
+its filter and a 33k/33k divider behind it, and the first has neither. The \
+part number is not printed; see the note on U19.
 
 WHICH VOICE THIS IS, recorded because two sources disagree. Section D feeds \
 C74, which this file has always put in the `small explosion` group along with \
@@ -2250,9 +2259,7 @@ group = "cannon"
 ref = "R134"
 kind = "R"
 kohms = 100
-unread = [
-  { pin = "b", why = "leaves upward and to the right across the sheet; where the band-pass output goes on to its VCA is not traced yet" },
-]
+note = "carries the band-pass across the sheet overlap into C84 and the VCA."
 
 [[parts]]
 group = "cannon"
@@ -2260,9 +2267,7 @@ ref = "R136"
 kind = "R"
 kohms = 51
 block = "cannon gain"
-unread = [
-  { pin = "a", why = "the gain stage's input, arriving from the left along a horizontal that is not traced yet" },
-]
+note = "the envelope follower's second load: U12 section B drives Q6 through R131 and this stage through R136."
 
 [[parts]]
 group = "cannon"
@@ -2318,8 +2323,13 @@ on = ["D9.k", "C79.a", "R127.a", "U12.5"]
 
 [[nets]]
 name = "U12b out"
-on = ["U12.7", "U12.6", "R131.a"]
-note = "strapped output to inverting input: a follower of the envelope."
+on = ["U12.7", "U12.6", "R131.a", "R136.a"]
+note = """
+Strapped output to inverting input: a follower of the envelope. IT DRIVES TWO \
+THINGS, which is what places R136: R131 takes it to Q6's base, where it sets \
+the band-pass's gain, and R136 takes it into the inverting stage below, whose \
+output is the VCA's control. So one follower both opens the filter and opens \
+the VCA."""
 
 [[nets]]
 name = "Q6 base"
@@ -2353,6 +2363,16 @@ name = "C83/R134 junction"
 on = ["C83.b", "R134.a"]
 
 [[nets]]
+name = "cannon band-pass out"
+on = ["R134.b", "C84.a"]
+note = """
+R134's far end turns up and runs right across the overlap into C84, which is \
+the cannon VCA's signal input. Both ends were followed to their sheet edges; \
+which of the two wires crossing there is which is forced by the pins they land \
+on, since a VCA's IN takes the audio and its CON takes the envelope, and R134 \
+carries the band-pass while U12 section C carries the follower."""
+
+[[nets]]
 name = "cannon gain in"
 on = ["R136.b", "R137.a", "U12.9"]
 
@@ -2362,11 +2382,11 @@ on = ["R139.b", "R141.a", "C85.a", "U12.10"]
 
 [[nets]]
 name = "cannon gain out"
-on = ["U12.8", "R137.b"]
+on = ["U12.8", "R137.b", "U13.2"]
 note = """
-Where this goes next is not traced. It should be U13 channel A's control pin, \
-which is still marked unread on that part, but the wire has not been \
-followed."""
+The envelope inverted about the R139/R141 reference, into U13 channel A's \
+control pin. R136 and R137 are both 51k, so the stage is unity and its whole \
+job is the level shift onto that reference rather than any gain."""
 
 # ===========================================================================
 # THE ALARMS (sheet 11, both halves).
@@ -2523,14 +2543,12 @@ kind = "U"
 device = "7426"
 pins = ["1", "2", "3", "4", "5", "6"]
 out = ["3", "6"]
-read = "partial"
 note = """
 Two NAND sections of an open-collector quad, whose outputs are wired together \
-onto R171's pull-up. That wired-OR is why the two alarms share one mix leg."""
-unread = [
-  { pin = "1", why = "one of the two alarm one-shot outputs; which alarm drives which section is not traced" },
-  { pin = "4", why = "the other alarm one-shot output; which alarm drives which section is not traced" },
-]
+onto R171's pull-up. That wired-OR is why the two alarms share one mix leg.
+
+Alarm 2's one-shot drives pin 1 and alarm 3's drives pin 4, which was traced \
+rather than guessed: see the note on `alarm 2 Q`."""
 
 [[parts.sections]]
 name = "a"
@@ -2595,11 +2613,14 @@ on = ["R166.a", "C95.b", "U44.7"]
 
 [[nets]]
 name = "alarm 2 Q"
-on = ["U44.5"]
-port = "output"
+on = ["U44.5", "U67.1"]
 note = """
-Leaves for one of U67's gate sections. Which of the two it reaches is not \
-traced, so it is recorded as leaving rather than guessed onto a gate."""
+Into the first of U67's two gate sections. The pairing was traced rather than \
+guessed: the two one-shot outputs leave sheet 11's left half on horizontals \
+about thirty pixels apart, and they arrive on the right half in the same \
+order, the upper on pin 1 and the lower on pin 4. The two halves of sheet 11 \
+line up to a pixel or two, which is what makes that reading safe here and \
+would not make it safe on sheet 12."""
 
 [[nets]]
 name = "U46 Cext"
@@ -2611,9 +2632,13 @@ on = ["R167.a", "C96.b", "U46.15"]
 
 [[nets]]
 name = "alarm 3 Q"
-on = ["U46.13"]
-port = "output"
-note = "As with alarm 2's: it reaches one of U67's sections and which is not traced."
+on = ["U46.13", "U67.4"]
+note = """
+Into U67's second section, the lower of the two. See the note on `alarm 2 Q` \
+for how the pairing was settled.
+
+BOTH GATE OUTPUTS ARE TIED TOGETHER, which is the point of a 7426: it is open \
+collector, so the two alarms wire-OR onto one node and share R171's pull-up."""
 
 [[nets]]
 name = "556 discharge"
@@ -3792,11 +3817,14 @@ pins = ["1", "2", "5", "6", "10", "11", "14", "15"]
 out = ["11", "15"]
 note = """
 Both channels used, by two different voices: player ship tone A on channel A \
-and the homing missile on channel B. Channel B's output runs to R180, which \
-the mix table gives as the homing missile's leg, and channel A's to R174, \
-which it gives as player ship tone A's."""
+and THE ENGINE on channel B. Channel A's output runs to R174, which the mix \
+table gives as player ship tone A's; channel B's runs to R183, past the R180 \
+row that this file used to send it to.
+
+Channel A's control on pin 2 is the player ship level, through U11's first \
+follower. Channel B's, on pin 6, leaves that pin downward and is not traced."""
 unread = [
-  { pin = "2", why = "CON for channel A, the player ship tone's control; the filter that drives it is on the right half and is not transcribed yet" },
+  { pin = "6", why = "CON for channel B, the engine's control. The wire leaves pin 6 downward on the right half of sheet 12 and its far end is not followed. U11's second follower is the obvious candidate, since it is the only level output with nowhere else to go, but that is an argument from elimination and this file has been wrong twice on exactly this pin by reasoning from the far end" },
 ]
 
 [[parts.sections]]
@@ -4242,18 +4270,24 @@ Halfway between the envelope and +6 V, which is the same midpoint shape the two 
 explosions use."""
 
 [[nets]]
-name = "engine CON"
-on = ["U11.8", "U11.9", "U14.6"]
+name = "player ship tone A CON"
+on = ["U11.8", "U11.9", "U14.2"]
 note = """
 The follower's output, strapped to its own inverting input, driving U14 channel \
-B's control pin. So THE PLAYER SHIP LEVEL IS WHAT OPENS THE ENGINE'S VCA, and \
-the whole chain reads: U32 decodes player ship C and D, U31 buffers one output, \
-R28 and C34 smooth it, R29 against R30 halves it toward +6 V, and this follower \
-drives the VCA whose input is the engine's own low-pass.
+A's control pin. So the chain reads: U32 decodes player ship C and D, U31 \
+buffers one output, R28 and C34 smooth it, R29 against R30 halves it toward \
++6 V, and this follower opens the VCA that carries the first tone filter.
 
-THIS FILE USED TO CALL IT THE HOMING MISSILE'S, and said so on the reasoning \
-that channel B's output runs to R180. It runs to R183. The homing missile has \
-no VCA at all, so there was never a CON pin for it to be."""
+THIS PIN HAS BEEN WRONG TWICE AND IS NOW TRACED RATHER THAN REASONED. The file \
+first called the net the homing missile's, on the reasoning that U14 channel \
+B's output runs to R180; that reading was corrected to R183, and the net was \
+then renamed the engine's by the same indirect argument one step along. Both \
+were inferences from the far end. Following the wire itself settles it: it \
+leaves the strap, runs right, drops down a column at the right edge of the \
+left half and continues across the overlap to U14 PIN 2, which is channel A.
+
+Channel B's control on pin 6 is a different wire, leaving that pin downward, \
+and it is still unread."""
 
 [[nets]]
 name = "base missile buffered"
@@ -5045,3 +5079,134 @@ on = ["R114.b", "R115.a", "U3.13"]
 [[nets]]
 name = "U3d out"
 on = ["U3.14", "C71.b", "R115.b", "C74.a"]
+
+# ---------------------------------------------------------------------------
+# THE SECOND EXPLOSION'S BAND-PASS (sheet 11, right half).
+#
+# The same Sallen-Key as above with an inverting stage in front of it and a
+# halving divider behind. FOUND BY TRACING C76's SOURCE: this file claimed
+# every part was transcribed and these twelve were not, which is exactly the
+# class of gap the format exists to make visible.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+group = "medium explosion"
+ref = "C67"
+kind = "C"
+uf = 10
+read = "partial"
+unread = [
+  { pin = "a", why = "the source this chain reads. It leaves left along a horizontal on sheet 11 left and meets a vertical bus that was not followed. The bus carries at least one op-amp output arriving from below, so which of them this is has not been settled" },
+]
+
+[[parts]]
+group = "medium explosion"
+ref = "R117"
+kind = "R"
+kohms = 330
+
+[[parts]]
+group = "medium explosion"
+ref = "R118"
+kind = "R"
+kohms = 100
+note = "feedback around U3 section B, so the stage is -100/330 about +6 V."
+
+[[parts]]
+group = "medium explosion"
+ref = "C69"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "medium explosion"
+ref = "R119"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "medium explosion"
+ref = "R122"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "medium explosion"
+ref = "C72"
+kind = "C"
+uf = 0.047
+note = "to ground from the non-inverting input."
+
+[[parts]]
+group = "medium explosion"
+ref = "C73"
+kind = "C"
+uf = 0.047
+note = """
+From the R119/R122 junction back to the output. With the pairs equal the corner \
+is 226 Hz, a little below the other chain's 321."""
+
+[[parts]]
+group = "medium explosion"
+ref = "R120"
+kind = "R"
+kohms = 100
+
+[[parts]]
+group = "medium explosion"
+ref = "R121"
+kind = "R"
+kohms = 150
+note = "with R120 a gain of 1 + 150/100 = 2.5, the same as R114 and R115 give the other chain."
+
+[[parts]]
+group = "medium explosion"
+ref = "R123"
+kind = "R"
+kohms = 33
+
+[[parts]]
+group = "medium explosion"
+ref = "R124"
+kind = "R"
+kohms = 33
+note = """
+With R123 a plain halving divider on the filter's output, which is what C76 \
+taps. The other chain has no divider at all and hands its full output to C74, \
+so this voice sits 6 dB below its sibling before either reaches a VCA."""
+
+[[nets]]
+name = "C67/R117 junction"
+on = ["C67.b", "R117.a"]
+
+[[nets]]
+name = "U3b in"
+on = ["R117.b", "R118.a", "U3.6"]
+
+[[nets]]
+name = "U3b out"
+on = ["U3.7", "R118.b", "C69.a"]
+
+[[nets]]
+name = "C69/R119 junction"
+on = ["C69.b", "R119.a"]
+
+[[nets]]
+name = "R119/R122 junction"
+on = ["R119.b", "R122.a", "C73.a"]
+
+[[nets]]
+name = "R122/C72 junction"
+on = ["R122.b", "C72.a", "U3.10"]
+
+[[nets]]
+name = "R120/R121 junction"
+on = ["R120.b", "R121.a", "U3.9"]
+
+[[nets]]
+name = "U3c out"
+on = ["U3.8", "C73.b", "R121.b", "R123.a"]
+
+[[nets]]
+name = "R123/R124 junction"
+on = ["R123.b", "R124.a", "C76.a"]
