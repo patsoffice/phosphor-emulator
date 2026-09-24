@@ -463,9 +463,32 @@ question and a part-property question is still blocking a board.
 > Nothing about this touches the runtime non-goal: source out, the tool run by
 > hand, nothing linked.
 >
-> **Filed as `phosphor-emulator-kfby.4`**, scoped as a probe on the shot, whose
-> residual rung 5 has narrowed to exactly the part properties this rung can
-> test.
+> **Checked, and the paragraph above is wrong about the one part that
+> mattered.** nltool 0.14 (nixpkgs `mame` 0.289's `tools` output, cached, runs
+> netlist files) has the `74123`, the `555`, the `4016B` as `CD4016_DIP` and the
+> `MM5837`. Its `LM324` is not a macromodel. Driven low and swept across loads,
+> both `OPAMP(.., "LM324")` and `LM324_DIP` sit at 0.0930 V sinking 8 uA and
+> 0.1168 V sinking 24 mA: a fixed floor behind about one ohm. The real part
+> sinks 12 to 50 uA at 200 mV. So `OPAMP_V_LOW` would come out of nltool as a
+> model parameter, the same kind of inference as ours, and never as an output.
+> Two more: its `74139` aborts on instantiation, on the same truth-table check
+> that cuts `list-devices` short, and it has no `MB4391` at all rather than a
+> guessed one.
+>
+> **The candidates narrow by arithmetic before any tool runs.** Node A takes
+> about 0.216 of the 555's output, so 0.5 V needs a 555 high of about 2.3 V,
+> which a 555 sourcing 3 mA does not do: its loaded output high is out. What
+> survives is the op-amp's sink into the 555's control pin, a 3.33 kOhm load
+> returned to 8 V. The device clamps that pin at 0.1 V, where its 555 runs fast
+> and node A averages rather than peaks; a real `LM324` cannot sink 2.4 mA at
+> 0.1 V, so the real 555 runs slower. Which way that moves node A is not known,
+> and answering it properly needs a transistor-level `LM324`, which means
+> ngspice after all.
+>
+> **Filed as `phosphor-emulator-kfby.4` and deferred**, with the cheapest next
+> step written into it: read the datasheet's output voltage at 2.4 mA sink, set
+> it as that stage's floor in the device, and compare the shot against the
+> recording before building anything.
 
 ## The second board
 
