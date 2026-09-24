@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list, engine": {
+    "Zaxxon sound: both sheets, every part transcribed and nine pins still unread: the three MB4391 channel A control pins, two sources and the cannon's gain stage on sheet 11 left, and which alarm one-shot drives which 7426 section. `netlist show` prints the list, engine": {
       "ports": {
         "NOISE 1": {
           "direction": "input",
@@ -24,6 +24,12 @@
           "direction": "input",
           "bits": [
             5
+          ]
+        },
+        "U5a out": {
+          "direction": "output",
+          "bits": [
+            9
           ]
         },
         "tone A in": {
@@ -202,13 +208,13 @@
           "type": "C28 2.2uF",
           "port_directions": {
             "R20/C28 junction": "output",
-            "R19/C28 junction": "input"
+            "U4a out": "input"
           },
           "connections": {
             "R20/C28 junction": [
               10
             ],
-            "R19/C28 junction": [
+            "U4a out": [
               11
             ]
           },
@@ -217,11 +223,11 @@
         "r19": {
           "type": "R19 10k",
           "port_directions": {
-            "R19/C28 junction": "output",
+            "U4a out": "input",
             "U4a in": "input"
           },
           "connections": {
-            "R19/C28 junction": [
+            "U4a out": [
               11
             ],
             "U4a in": [
@@ -249,9 +255,17 @@
         "u4a": {
           "type": "U4a engine input",
           "port_directions": {
+            "+6V (3)": "input",
+            "U4a out (1)": "output",
             "U4a in (2)": "output"
           },
           "connections": {
+            "+6V (3)": [
+              "1"
+            ],
+            "U4a out (1)": [
+              11
+            ],
             "U4a in (2)": [
               12
             ]

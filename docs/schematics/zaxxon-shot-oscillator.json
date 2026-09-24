@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list, shot": {
+    "Zaxxon sound: both sheets, every part transcribed and nine pins still unread: the three MB4391 channel A control pins, two sources and the cannon's gain stage on sheet 11 left, and which alarm one-shot drives which 7426 section. `netlist show` prints the list, shot": {
       "ports": {
         "SHOT": {
           "direction": "input",

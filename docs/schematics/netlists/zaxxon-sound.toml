@@ -11,13 +11,14 @@
 # engine's Sallen-Key low-pass on into its VCA; and the explosion band-pass on
 # sheet 11 right. 417 parts across 355 symbols.
 #
-# WHAT REMAINS IS PINS, NOT PARTS: 21 of them, each marked `unread` with its
-# reason, and `netlist show` prints the list. They are wires that cross a sheet
-# to a destination nobody has followed rather than parts nobody has typed in,
-# so the file still declares itself an excerpt and `netlist lint`'s "a constant
-# with no part behind it" check still declines to run.
+# WHAT REMAINS IS NINE PINS, down from twenty-five, each marked `unread` with
+# its reason: the three MB4391 channel A control pins, two sources and the
+# cannon's gain stage on sheet 11 left, and which alarm one-shot drives which
+# 7426 section. `netlist show` prints the list. The file still declares itself
+# an excerpt for them, so `netlist lint`'s "a constant with no part behind it"
+# check still declines to run.
 #
-# THREE THINGS THE FINISHING PASS CORRECTED, all of them readings this file had
+# SIX THINGS THE FINISHING PASS CORRECTED, all of them readings this file had
 # already committed to:
 #
 #   - `U14` channel B's output goes to `R183`, not `R180`. Its wire runs down
@@ -31,6 +32,16 @@
 #     side on the left half and its output side on the right, and `R61` and
 #     `R62` appear twice with the same junction dot. Reading the halves as
 #     disjoint is how a part gets transcribed twice; this file counts each once.
+#   - `U31`'s two buffers are driven by `U32`'s decoder outputs, NOT by the
+#     homing missile and base missile gate bits. Those three bits each run
+#     straight down the sheet to their own destination and none turns toward
+#     `U31`. So the whole `U31`/`R28`/`C34`/`U11` chain is the PLAYER SHIP
+#     LEVEL, and what it opens is the engine's VCA.
+#   - Both player ship tone filters return their gain pair to the `R34`/`R35`
+#     midpoint, a second 6 V reference at a tenth the impedance of the shared
+#     one, and its wire crosses two others with NO JUNCTION DOT.
+#   - Both tone filters are fed from ONE source, the opto-tuned resonator's
+#     output: `C29` into filter A and `C38` into filter B.
 #
 # Each voice is drawn on its own by cutting its group out, and a net crossing
 # the group's edge becomes a port of that drawing:
@@ -104,7 +115,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list"
+excerpt = "both sheets, every part transcribed and nine pins still unread: the three MB4391 channel A control pins, two sources and the cannon's gain stage on sheet 11 left, and which alarm one-shot drives which 7426 section. `netlist show` prints the list"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -623,7 +634,7 @@ on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
   "U11.3", "PC1.cell1", "R30.a", "R33.a",
   "R72.a", "R1.b", "R2.a", "C3.b", "C4.a", "C140.a",
-  "R42.a", "U4.5", "R114.a",
+  "R42.a", "U4.5", "R114.a", "U4.3",
 ]
 note = """
 NOT A REGULATED RAIL. R1 and R2 are a plain 1k divider from +12 V to ground \
@@ -667,6 +678,7 @@ on = [
   "C13.b", "R8.b", "R9.b", "Q2.e",
   "C43.b", "C45.b", "R52.b", "R54.b", "U6.1",
   "C49.b", "R76.b", "R78.b", "C50.b", "C70.b",
+  "U1.3",
 ]
 
 [[nets]]
@@ -2871,11 +2883,12 @@ note = """
 The power amplifier, bridge-tied: OUT1 on pin 9 and OUT2 on pin 7 drive the \
 speaker in antiphase, which is why the board has no output coupling capacitor. \
 C8 and C9 are its bootstrap capacitors, and each output carries a Zobel network \
-to ground."""
-unread = [
-  { pin = "3", why = "arrives from the left on the same sheet; not traced" },
-  { pin = "6", why = "MUTE, leaving downward; not traced" },
-]
+to ground.
+
+Pin 3 is grounded directly, with no part on it: the wire leaves pin 3, turns \
+down and reaches a ground symbol a few millimeters away. Pin 6 is MUTE and Q2's \
+collector pulls it down, which this file used to carry as two separate unread \
+pins that were probably the same wire. They are."""
 
 [[parts]]
 group = "output"
@@ -3127,16 +3140,19 @@ kind = "U"
 device = "74LS139"
 pins = ["1", "2", "3", "4", "5", "6", "7"]
 out = ["4", "5", "6", "7"]
-read = "partial"
 note = """
 One half of a dual 2-to-4 decoder, taking player ship C and D and selecting \
 one of four active-low outputs. Its enable on pin 1 is grounded, so it is \
-always decoding. The second half is not transcribed yet."""
-unread = [
-  { pin = "4", why = "decoded output 0, into the player ship circuit on this sheet; not transcribed yet" },
-  { pin = "5", why = "decoded output 1, into the player ship circuit on this sheet; not transcribed yet" },
-  { pin = "6", why = "decoded output 2, into the player ship circuit on this sheet; not transcribed yet" },
-  { pin = "7", why = "decoded output 3, into the player ship circuit on this sheet; not transcribed yet" },
+always decoding. The second half is not drawn, so its pins are absent from \
+`pins` rather than listed open.
+
+ONLY TWO OF THE FOUR OUTPUTS ARE USED, and that is what makes this a level \
+rather than a four-way select: outputs 0 and 1 drive U31's two buffers and \
+through them the R28/C34 and R31/C35 networks, and outputs 2 and 3 are drawn \
+with their bubbles and no wire at all."""
+nc = [
+  { pin = "6", why = "decoded output 2, drawn with its inversion bubble and reaching nothing" },
+  { pin = "7", why = "decoded output 3, drawn with its inversion bubble and reaching nothing" },
 ]
 
 [[parts.sections]]
@@ -3237,18 +3253,25 @@ on = ["U23.1", "RP1.4", "U32.3"]
 
 [[nets]]
 name = "HOMING MISSILE"
-on = ["U23.40", "RP1.5", "U31.1", "U30.1"]
+on = ["U23.40", "RP1.5", "U30.1"]
 note = """
-PA4, pulled up and active low. It goes two ways: into U31's buffer, which \
-drives the envelope this voice does not otherwise have, and into U30's \
-inverter, which is the 4016B's control."""
+PA4, pulled up and active low, into the inverter that controls its 4016B
+switch.
+
+THIS FILE USED TO PUT U31 PIN 1 HERE AND IT IS NOT. U31's two buffers are
+driven by U32's decoder outputs, which are the player ship level, and the
+three gate bits each run straight down the sheet to their own destination:
+this one to U30 pin 1, the base missile to U22 pin 9, the laser to U30 pin 3.
+Traced at 650 percent, where the three verticals leave their labels at three
+distinct positions and none of them turns toward U31."""
 
 [[nets]]
 name = "BASE MISSILE"
-on = ["U23.39", "RP1.6", "U31.3", "U22.9"]
+on = ["U23.39", "RP1.6", "U22.9"]
 note = """
-PA5, pulled up and active low. Into U31's buffer and into U22 section B's A \
-input, whose falling edge fires the one-shot."""
+PA5, pulled up and active low, into U22 section B's A input, whose falling \
+edge fires the one-shot. U31 pin 3 used to be listed here and is not: see the \
+note on HOMING MISSILE."""
 
 [[nets]]
 name = "LASER"
@@ -3473,10 +3496,6 @@ follower through R45 against noise through R46 into R47, about +6 V, and drives 
 the 555's control pin through C46.
 
 The part number is not printed; see the note on U19."""
-unread = [
-  { pin = "3", why = "the non-inverting reference; every other stage here sits on +6 V but this one is not traced" },
-  { pin = "1", why = "the output, leaving downward; not traced" },
-]
 
 [[parts.sections]]
 name = "a"
@@ -3516,15 +3535,25 @@ on = ["U5.2", "R21.a", "C26.a"]
 
 [[nets]]
 name = "U5a out"
-on = ["U5.1", "R21.b", "C27.b", "C29.a"]
+on = ["U5.1", "R21.b", "C27.b", "C29.a", "C38.a"]
+note = """
+THE OPTO-TUNED RESONATOR FEEDS BOTH PLAYER SHIP TONE FILTERS, not one each. \
+C29 takes it into filter A and C38 into filter B, so the two differ only in \
+their own values and in which MB4391 channel they reach. This file used to \
+carry C38's source as unread and the two filters as unrelated."""
 
 [[nets]]
 name = "R20/C28 junction"
 on = ["R20.b", "C28.b"]
 
 [[nets]]
-name = "R19/C28 junction"
-on = ["C28.a", "R19.b"]
+name = "U4a out"
+on = ["C28.a", "R19.b", "U4.1"]
+note = """
+The engine input stage's output, with R19 closing the feedback around it and \
+C28 carrying it on. This file used to call the net `R19/C28 junction` and mark \
+the op-amp's own output unread, which had the stage drawn with no amplifier in \
+it."""
 
 [[nets]]
 name = "U4a in"
@@ -3878,9 +3907,7 @@ ref = "R22"
 kind = "R"
 kohms = 2.2
 block = "tone A gain"
-unread = [
-  { pin = "a", why = "the reference this gain pair returns to, arriving from the left; not traced" },
-]
+note = "returns to the R34/R35 midpoint, a second 6 V reference beside this stage rather than the board-wide one."
 
 [[parts]]
 group = "player ship A"
@@ -3923,9 +3950,10 @@ group = "player ship B"
 ref = "C38"
 kind = "C"
 uf = 2.2
-unread = [
-  { pin = "a", why = "the tone B source, arriving from the left half of this sheet; not traced" },
-]
+note = """
+Takes the opto-tuned resonator's output into filter B, which is the same node \
+C29 takes into filter A. The wire runs down the left edge of the right half \
+beside the R34/R35 reference and crosses R36 with no junction dot."""
 
 [[parts]]
 group = "player ship B"
@@ -3933,9 +3961,7 @@ ref = "R36"
 kind = "R"
 kohms = 2.2
 block = "tone B gain"
-unread = [
-  { pin = "a", why = "the reference this gain pair returns to, arriving from the left; not traced" },
-]
+note = "returns to the R34/R35 midpoint, the same second 6 V reference R22 does."
 
 [[parts]]
 group = "player ship B"
@@ -4137,13 +4163,11 @@ kind = "Q"
 device = "C1684"
 out = ["c"]
 note = """
-A common-emitter switch, emitter grounded. ITS COLLECTOR LEAVES UPWARD AND IS \
-NOT TRACED. It should be the LA4460's MUTE pin, which is the only thing on \
-this sheet that wants a power-on mute, but the wire has not been followed and \
-that pin is still marked unread on U1."""
-unread = [
-  { pin = "c", why = "leaves upward on the sheet; almost certainly the LA4460's MUTE pin, but not traced" },
-]
+A common-emitter switch, emitter grounded. ITS COLLECTOR IS THE LA4460'S MUTE \
+PIN, which this file used to record as a guess. Traced: the collector's wire \
+runs straight up the right side of the sheet, turns left below the speaker \
+connector and arrives at U1 pin 6. So the power-on delay on C13 holds the \
+amplifier muted until Q1 turns Q2 on."""
 
 [[nets]]
 name = "reset buffered"
@@ -4166,36 +4190,70 @@ name = "Q2 base"
 on = ["R280.b", "R9.a", "Q2.b"]
 
 [[nets]]
-name = "R34/R35 midpoint"
-on = ["R34.b", "R35.a", "C36.b", "C37.a"]
+name = "MUTE"
+on = ["Q2.c", "U1.6"]
 note = """
-The second divider's output, which leaves to the right on the sheet. WHERE IT \
-GOES IS NOT TRACED. The drawing does not label it, unlike the R1/R2 midpoint \
-it resembles, so this file does not claim the two are the same node."""
+The power-on mute, and the two ends of it used to be two unread pins in this \
+file with a note saying they were probably the same wire. They are: Q2's \
+collector runs up the right side of the sheet, turns left below the speaker \
+connector and lands on the LA4460's MUTE pin."""
 
 [[nets]]
-name = "homing missile buffered"
+name = "R34/R35 midpoint"
+on = ["R34.b", "R35.a", "C36.b", "C37.a", "R22.a", "R36.a"]
+note = """
+A SECOND 6 V REFERENCE, AND THE TWO TONE FILTERS ARE WHAT IT IS FOR. R34 and \
+R35 are 390 ohms each from +12 V to ground with 100 uF across each half, which \
+is the R1/R2 divider built again at a tenth the impedance and beside the stage \
+that uses it. Both player ship tone filters return their gain pair here rather \
+than to the board-wide +6 V: R22 from one and R36 from the other.
+
+The drawing does not label it, so this file still does not claim it is the same \
+node as +6 V. It is not: R1/R2 sit behind 500 ohms shared by every op-amp on \
+both sheets, and this one is 195 ohms serving two stages.
+
+THE WIRE THAT CARRIES IT CROSSES TWO OTHERS WITH NO JUNCTION DOT, once under \
+C29's input on the left half and once under the tone B source on the right. \
+Both were settled at 1300 percent. Reading either as a junction shorts a \
+filter's input to its own reference."""
+
+[[nets]]
+name = "player ship level 0"
+on = ["U32.4", "U31.1"]
+note = "the decoder's first output into its buffer. This used to be read as the homing missile's gate."
+
+[[nets]]
+name = "player ship level 1"
+on = ["U32.5", "U31.3"]
+
+[[nets]]
+name = "player ship level 0 buffered"
 on = ["U31.2", "R28.a"]
 
 [[nets]]
-name = "homing missile envelope"
+name = "player ship level 0 envelope"
 on = ["R28.b", "C34.a", "R29.a"]
 
 [[nets]]
-name = "homing missile reference"
+name = "player ship level 0 reference"
 on = ["R29.b", "R30.b", "U11.10"]
 note = """
 Halfway between the envelope and +6 V, which is the same midpoint shape the two \
 explosions use."""
 
 [[nets]]
-name = "homing missile CON"
+name = "engine CON"
 on = ["U11.8", "U11.9", "U14.6"]
 note = """
 The follower's output, strapped to its own inverting input, driving U14 channel \
-B's control pin. The wire itself is not traced across the sheet; what places it \
-is that channel B's output runs to R180, which the mix table gives as the \
-homing missile's leg, and a VCA's CON has no other driver."""
+B's control pin. So THE PLAYER SHIP LEVEL IS WHAT OPENS THE ENGINE'S VCA, and \
+the whole chain reads: U32 decodes player ship C and D, U31 buffers one output, \
+R28 and C34 smooth it, R29 against R30 halves it toward +6 V, and this follower \
+drives the VCA whose input is the engine's own low-pass.
+
+THIS FILE USED TO CALL IT THE HOMING MISSILE'S, and said so on the reasoning \
+that channel B's output runs to R180. It runs to R183. The homing missile has \
+no VCA at all, so there was never a CON pin for it to be."""
 
 [[nets]]
 name = "base missile buffered"
