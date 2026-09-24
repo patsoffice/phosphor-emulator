@@ -1410,19 +1410,26 @@ const C_BLOCK: f64 = 1e-6;
 /// being quiet, and the medium explosion is where it gets noticed because the
 /// board's loudest leg is on it.
 ///
-/// 4.4 puts the loudest single voice at **0.27** rather than the third this
-/// comment used to claim outright, and the difference is not slack: the binding
-/// constraint is `nothing_saturates`, every voice sounding at once, which clips
-/// at 4.8. The game never does that, so the bound is conservative, but a model
-/// that clips is worse than one that is quiet and the conservative bound is the
-/// one to keep.
+/// 3.8 puts the loudest single voice, the medium explosion, at **0.41** of full
+/// scale, and the binding constraint is `nothing_saturates`: every voice sounding
+/// at once, triggered at ten different moments. The game never does that, so the
+/// bound is conservative, but a model that clips is worse than one that is quiet
+/// and the conservative bound is the one to keep.
+///
+/// **It was 4.3, and that held at one trigger time only.** The test fired every
+/// voice 20 ms in, where the mix peaked at 0.96 of full scale; fired 17, 19, 21,
+/// 23, 25 or 30 ms in, the same mix clipped. Where the free-running oscillators'
+/// crests coincide is a matter of phase, so a single trigger time measured the
+/// phase rather than the headroom. Found when a 2 % retune of the shot's `C88`
+/// corner moved that voice's phase and the one trigger time started clipping
+/// too. The worst of the ten now peaks at 0.957, fired 25 ms in.
 ///
 /// **Nothing about the board's internal balance moves with this.** It is one
 /// scalar on the output, after `SJ`, so every voice keeps the level its own
 /// source amplitude and its own leg give it. If a voice sounds wrong relative to
 /// its neighbors, this is not the constant that is wrong, and
 /// `voice_levels_follow_the_leg_table` is the test that speaks to that.
-const OUTPUT_GAIN: f64 = 4.3;
+const OUTPUT_GAIN: f64 = 3.8;
 
 /// How many legs meet at `SJ`. Eleven, because alarms 2 and 3 share one.
 const LEG_COUNT: usize = 11;
@@ -2999,18 +3006,31 @@ mod tests {
         );
     }
 
+    /// Everything at once, which the game never does, as the loudest case the
+    /// mix has to survive.
+    ///
+    /// **Over a spread of trigger times, not one.** The free-running
+    /// oscillators are somewhere in their cycles when every voice fires, and
+    /// the peak is where their crests happen to coincide. This used to trigger
+    /// at 20 ms only, and at the gain it then allowed the mix clipped at six of
+    /// eight nearby trigger times and passed at that one. A retune of a single
+    /// voice that moved its phase was enough to fail it, which is a test
+    /// reporting on luck rather than on headroom.
     #[test]
     fn nothing_saturates() {
-        // Everything at once, which the game never does, as the loudest case the
-        // mix has to survive.
+        for lead in [15, 17, 19, 20, 21, 23, 25, 30, 40, 55] {
+            let mut snd = ZaxxonSound::new(CPU_HZ);
+            let _ = render(&mut snd, lead, IDLE);
+            let out = render(&mut snd, 500, (0x00, 0x00, 0x00));
+            assert!(
+                peak(&out) < 32_000,
+                "every voice at once, triggered {lead} ms in, must not clip (peak={})",
+                peak(&out)
+            );
+        }
         let mut snd = ZaxxonSound::new(CPU_HZ);
         let _ = render(&mut snd, 20, IDLE);
         let out = render(&mut snd, 500, (0x00, 0x00, 0x00));
-        assert!(
-            peak(&out) < 32_000,
-            "every voice at once must not clip (peak={})",
-            peak(&out)
-        );
         assert!(
             rms(&out) > 100.0,
             "every voice at once should be loud (rms={})",
@@ -3981,7 +4001,7 @@ mod tests {
     #[test]
     fn a_leg_probe_is_the_voices_share_of_the_mix() {
         assert!(
-            (leg_to_output() - 0.4977).abs() < 1e-3,
+            (leg_to_output() - 0.4399).abs() < 1e-3,
             "one leg volt reaches the output at {}",
             leg_to_output()
         );
