@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file, battleship": {
+    "Zaxxon sound: both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list, battleship": {
       "ports": {
         "BATTLESHIP": {
           "direction": "input",
@@ -12,6 +12,42 @@
           "direction": "input",
           "bits": [
             31
+          ]
+        },
+        "C47/U17 junction": {
+          "direction": "input",
+          "bits": [
+            32
+          ]
+        },
+        "homing missile gate": {
+          "direction": "input",
+          "bits": [
+            33
+          ]
+        },
+        "homing missile gate out": {
+          "direction": "output",
+          "bits": [
+            34
+          ]
+        },
+        "C55/U17 junction": {
+          "direction": "input",
+          "bits": [
+            35
+          ]
+        },
+        "laser gate": {
+          "direction": "input",
+          "bits": [
+            36
+          ]
+        },
+        "laser gate out": {
+          "direction": "output",
+          "bits": [
+            37
           ]
         }
       },
@@ -592,6 +628,38 @@
             ],
             "battleship leg (2)": [
               28
+            ]
+          },
+          "attributes": {}
+        },
+        "u17": {
+          "type": "U17 4016B",
+          "port_directions": {
+            "C47/U17 junction (11)": "output",
+            "homing missile gate (12)": "output",
+            "homing missile gate out (10)": "output",
+            "C55/U17 junction (8)": "output",
+            "laser gate (6)": "output",
+            "laser gate out (9)": "output"
+          },
+          "connections": {
+            "C47/U17 junction (11)": [
+              32
+            ],
+            "homing missile gate (12)": [
+              33
+            ],
+            "homing missile gate out (10)": [
+              34
+            ],
+            "C55/U17 junction (8)": [
+              35
+            ],
+            "laser gate (6)": [
+              36
+            ],
+            "laser gate out (9)": [
+              37
             ]
           },
           "attributes": {}

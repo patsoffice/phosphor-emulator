@@ -1,11 +1,29 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file, laser": {
+    "Zaxxon sound: both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list, laser": {
       "ports": {
         "SJ": {
           "direction": "input",
           "bits": [
             2
+          ]
+        },
+        "C55/U17 junction": {
+          "direction": "input",
+          "bits": [
+            18
+          ]
+        },
+        "laser gate": {
+          "direction": "input",
+          "bits": [
+            19
+          ]
+        },
+        "laser gate out": {
+          "direction": "input",
+          "bits": [
+            20
           ]
         }
       },
@@ -14,7 +32,8 @@
           "type": "R186 47k / R187 8.2k",
           "port_directions": {
             "GND": "input",
-            "laser attenuated": "output"
+            "laser attenuated": "output",
+            "laser gate out": "input"
           },
           "connections": {
             "GND": [
@@ -22,6 +41,9 @@
             ],
             "laser attenuated": [
               3
+            ],
+            "laser gate out": [
+              20
             ]
           },
           "attributes": {}
@@ -374,6 +396,102 @@
             ],
             "Q3 base": [
               15
+            ]
+          },
+          "attributes": {}
+        },
+        "r75": {
+          "type": "R75 10k",
+          "port_directions": {
+            "U8c out": "input",
+            "R75/R76 junction": "output"
+          },
+          "connections": {
+            "U8c out": [
+              13
+            ],
+            "R75/R76 junction": [
+              17
+            ]
+          },
+          "attributes": {}
+        },
+        "r76": {
+          "type": "R76 2.2k",
+          "port_directions": {
+            "GND": "input",
+            "R75/R76 junction": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "R75/R76 junction": [
+              17
+            ]
+          },
+          "attributes": {}
+        },
+        "c55": {
+          "type": "C55 2.2uF",
+          "port_directions": {
+            "R75/R76 junction": "input",
+            "C55/U17 junction": "output"
+          },
+          "connections": {
+            "R75/R76 junction": [
+              17
+            ],
+            "C55/U17 junction": [
+              18
+            ]
+          },
+          "attributes": {}
+        },
+        "r77": {
+          "type": "R77 51k",
+          "port_directions": {
+            "+12V": "input",
+            "laser gate out": "output"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "laser gate out": [
+              20
+            ]
+          },
+          "attributes": {}
+        },
+        "r78": {
+          "type": "R78 51k",
+          "port_directions": {
+            "GND": "input",
+            "laser gate out": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "laser gate out": [
+              20
+            ]
+          },
+          "attributes": {}
+        },
+        "r79": {
+          "type": "R79 10k",
+          "port_directions": {
+            "+12V": "input",
+            "laser gate": "output"
+          },
+          "connections": {
+            "+12V": [
+              "1"
+            ],
+            "laser gate": [
+              19
             ]
           },
           "attributes": {}

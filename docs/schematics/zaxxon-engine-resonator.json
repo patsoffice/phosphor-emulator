@@ -1,6 +1,6 @@
 {
   "modules": {
-    "Zaxxon sound: both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file, engine": {
+    "Zaxxon sound: both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list, engine": {
       "ports": {
         "NOISE 1": {
           "direction": "input",
@@ -8,20 +8,84 @@
             2
           ]
         },
-        "U8d out": {
+        "NOISE 2": {
           "direction": "input",
           "bits": [
             3
           ]
         },
+        "base missile attenuated": {
+          "direction": "input",
+          "bits": [
+            4
+          ]
+        },
+        "U8d out": {
+          "direction": "input",
+          "bits": [
+            5
+          ]
+        },
         "tone A in": {
           "direction": "input",
           "bits": [
-            11
+            13
+          ]
+        },
+        "U14 ch B in": {
+          "direction": "input",
+          "bits": [
+            14
+          ]
+        },
+        "U14 ch B RO": {
+          "direction": "input",
+          "bits": [
+            15
+          ]
+        },
+        "engine out": {
+          "direction": "input",
+          "bits": [
+            16
+          ]
+        },
+        "R62/C50 junction": {
+          "direction": "input",
+          "bits": [
+            18
+          ]
+        },
+        "U4c out": {
+          "direction": "input",
+          "bits": [
+            19
+          ]
+        },
+        "R63/R64 junction": {
+          "direction": "input",
+          "bits": [
+            20
           ]
         }
       },
       "cells": {
+        "engine_leg": {
+          "type": "R183 39k",
+          "port_directions": {
+            "base missile attenuated": "output",
+            "engine out": "input"
+          },
+          "connections": {
+            "base missile attenuated": [
+              4
+            ],
+            "engine out": [
+              16
+            ]
+          },
+          "attributes": {}
+        },
         "r17": {
           "type": "R17 390",
           "port_directions": {
@@ -33,7 +97,7 @@
               "0"
             ],
             "PC1 LED return": [
-              4
+              6
             ]
           },
           "attributes": {}
@@ -51,13 +115,13 @@
               "1"
             ],
             "U8d out (led+)": [
-              3
+              5
             ],
             "PC1 LED return (led-)": [
-              4
+              6
             ],
             "engine tuning node (cell2)": [
-              5
+              7
             ]
           },
           "attributes": {}
@@ -74,10 +138,10 @@
               "1"
             ],
             "U5a in (2)": [
-              6
+              8
             ],
             "U5a out (1)": [
-              7
+              9
             ]
           },
           "attributes": {}
@@ -90,10 +154,10 @@
           },
           "connections": {
             "U5a in": [
-              6
+              8
             ],
             "U5a out": [
-              7
+              9
             ]
           },
           "attributes": {}
@@ -107,13 +171,13 @@
           },
           "connections": {
             "engine tuning node": [
-              5
+              7
             ],
             "U5a in": [
-              6
+              8
             ],
             "U5a out": [
-              7
+              9
             ]
           },
           "attributes": {}
@@ -126,10 +190,10 @@
           },
           "connections": {
             "engine tuning node": [
-              5
+              7
             ],
             "R20/C28 junction": [
-              8
+              10
             ]
           },
           "attributes": {}
@@ -142,10 +206,10 @@
           },
           "connections": {
             "R20/C28 junction": [
-              8
+              10
             ],
             "R19/C28 junction": [
-              9
+              11
             ]
           },
           "attributes": {}
@@ -158,10 +222,10 @@
           },
           "connections": {
             "R19/C28 junction": [
-              9
+              11
             ],
             "U4a in": [
-              10
+              12
             ]
           },
           "attributes": {}
@@ -177,7 +241,7 @@
               2
             ],
             "U4a in": [
-              10
+              12
             ]
           },
           "attributes": {}
@@ -189,7 +253,7 @@
           },
           "connections": {
             "U4a in (2)": [
-              10
+              12
             ]
           },
           "attributes": {}
@@ -202,10 +266,138 @@
           },
           "connections": {
             "U5a out": [
-              7
+              9
             ],
             "tone A in": [
-              11
+              13
+            ]
+          },
+          "attributes": {}
+        },
+        "c51": {
+          "type": "C51 22uF",
+          "port_directions": {
+            "U14 ch B in": "output",
+            "U4c out": "input"
+          },
+          "connections": {
+            "U14 ch B in": [
+              14
+            ],
+            "U4c out": [
+              19
+            ]
+          },
+          "attributes": {}
+        },
+        "c52": {
+          "type": "C52 680pF",
+          "port_directions": {
+            "GND": "input",
+            "U14 ch B RO": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "U14 ch B RO": [
+              15
+            ]
+          },
+          "attributes": {}
+        },
+        "r61": {
+          "type": "R61 15k",
+          "port_directions": {
+            "NOISE 2": "input",
+            "R61/R62 junction": "output"
+          },
+          "connections": {
+            "NOISE 2": [
+              3
+            ],
+            "R61/R62 junction": [
+              17
+            ]
+          },
+          "attributes": {}
+        },
+        "r62": {
+          "type": "R62 15k",
+          "port_directions": {
+            "R61/R62 junction": "input",
+            "R62/C50 junction": "output"
+          },
+          "connections": {
+            "R61/R62 junction": [
+              17
+            ],
+            "R62/C50 junction": [
+              18
+            ]
+          },
+          "attributes": {}
+        },
+        "c50": {
+          "type": "C50 22nF",
+          "port_directions": {
+            "GND": "input",
+            "R62/C50 junction": "input"
+          },
+          "connections": {
+            "GND": [
+              "0"
+            ],
+            "R62/C50 junction": [
+              18
+            ]
+          },
+          "attributes": {}
+        },
+        "c137": {
+          "type": "C137 22nF",
+          "port_directions": {
+            "R61/R62 junction": "input",
+            "U4c out": "output"
+          },
+          "connections": {
+            "R61/R62 junction": [
+              17
+            ],
+            "U4c out": [
+              19
+            ]
+          },
+          "attributes": {}
+        },
+        "r63": {
+          "type": "R63 50k",
+          "port_directions": {
+            "U4c out": "input",
+            "R63/R64 junction": "output"
+          },
+          "connections": {
+            "U4c out": [
+              19
+            ],
+            "R63/R64 junction": [
+              20
+            ]
+          },
+          "attributes": {}
+        },
+        "r64": {
+          "type": "R64 100k",
+          "port_directions": {
+            "+5V": "input",
+            "R63/R64 junction": "input"
+          },
+          "connections": {
+            "+5V": [
+              "1"
+            ],
+            "R63/R64 junction": [
+              20
             ]
           },
           "attributes": {}

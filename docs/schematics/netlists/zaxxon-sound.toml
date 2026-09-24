@@ -5,29 +5,32 @@
 # noise sources all span voices and no per-voice file could say what is on
 # them.
 #
-# IN PROGRESS, and deliberately so rather than by neglect. `group` says which
-# voice each part belongs to, `board.excerpt` below names what is covered, and
-# `netlist show` lists every pin the file admits it has not read. Until it
-# covers both sheets in full the file declares itself an excerpt, which is what
-# makes `netlist lint`'s "a constant with no part behind it" check decline to
-# run: against a partial board it would report every part not yet typed in.
+# EVERY PART IS NOW IN. The five groups this file used to list as missing are
+# transcribed: the homing missile's 555 source, warble oscillator and 4016B
+# gate; the base missile's one-shot and envelope; the laser's 4016B gate; the
+# engine's Sallen-Key low-pass on into its VCA; and the explosion band-pass on
+# sheet 11 right. 417 parts across 355 symbols.
 #
-# WHAT IS STILL MISSING, about forty parts, all of one kind: the sources that
-# sit between a gate and a VCA on the voices whose ends are already here.
+# WHAT REMAINS IS PINS, NOT PARTS: 21 of them, each marked `unread` with its
+# reason, and `netlist show` prints the list. They are wires that cross a sheet
+# to a destination nobody has followed rather than parts nobody has typed in,
+# so the file still declares itself an excerpt and `netlist lint`'s "a constant
+# with no part behind it" check still declines to run.
 #
-#   - the homing missile's 555 source and its 4016B gate (U6, R48-R54, C45,
-#     C47, U17)
-#   - the base missile's source (C48, R56-R60, D2, C49, U22 section B,
-#     U20 section B)
-#   - the laser's 4016B gate (U17, R75-R78, C55)
-#   - the engine's path on into its VCA (R61-R64, C50, C137, U4 sections)
-#   - the medium explosion's noise band-pass on sheet 11 right (C68, R113,
-#     R116, C70, C71, U3 section D)
+# THREE THINGS THE FINISHING PASS CORRECTED, all of them readings this file had
+# already committed to:
 #
-# Everything else outstanding is a pin, not a part, and each one is marked
-# `unread` with the reason. Most are a wire crossing the sheet whose far end
-# is in the list above; a handful are junctions that one more reading would
-# settle. `netlist show` prints the whole list, which is the to-do.
+#   - `U14` channel B's output goes to `R183`, not `R180`. Its wire runs down
+#     PAST the R180 row; what reaches R180 comes from above, off `U17`'s homing
+#     missile switch and its R53/R54 bias. Settled at 800 percent.
+#   - So `C51`, `C52` and `R183` are the ENGINE's, not the homing missile's.
+#     What feeds U14 channel B had never been traced, and it is the engine's
+#     low-pass. The homing missile reaches the mix through a 4016B and has no
+#     VCA at all, which is why nothing was missing from its end.
+#   - THE TWO HALVES OF SHEET 12 OVERLAP. `U6` is drawn on both, its timing
+#     side on the left half and its output side on the right, and `R61` and
+#     `R62` appear twice with the same junction dot. Reading the halves as
+#     disjoint is how a part gets transcribed twice; this file counts each once.
 #
 # Each voice is drawn on its own by cutting its group out, and a net crossing
 # the group's edge becomes a port of that drawing:
@@ -101,7 +104,7 @@ sheets = "11-12"
 # this drawing can recover. See the note at the top of this file: rendering the
 # page at a higher number does not add detail, it only resamples.
 dpi = 150
-excerpt = "both sheets, about forty parts short of complete. Sheet 11 whole; on sheet 12 the PPI and all twelve gates, the player ship level and the engine it tunes, both missiles, the laser, both tone filters, the supply and the mute. All seven MB4391 channels, all eleven mix legs and the whole path to the speaker. What is missing is listed at the top of this file"
+excerpt = "both sheets, every part transcribed and 21 pins still unread. What is left is wires whose far end nobody has followed, not parts nobody has typed in: the alarm one-shots' pairing, the cannon's gain stage, the power-on mute into the LA4460, the tone filters' references and the player ship decode. `netlist show` prints the list"
 prose = "docs/schematics/zaxxon-discrete-sound.md"
 
 # ---------------------------------------------------------------------------
@@ -243,14 +246,15 @@ ref = "U20"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3", "8", "9", "10", "12", "13", "14"]
-out = ["1", "8", "14"]
-read = "partial"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
 note = """
-Three of its four sections, serving three different voices, and every one of \
-them is the same thing: strapped output to inverting input, so a unity \
-follower of whatever its non-inverting input taps, driving an MB4391's control \
-pin. Section B on 5/6/7 is not transcribed yet.
+ALL FOUR SECTIONS, serving four different voices, and every one of them is the \
+same thing: strapped output to inverting input, so a unity follower of whatever \
+its non-inverting input taps, driving an MB4391's control pin. Section B on \
+5/6/7 is the base missile's, and it taps the R59/R60 midpoint rather than C49 \
+itself, so what reaches the VCA is (5 V + V_C49) / 2. That is the same \
+midpoint tap the explosion followers use.
 
 The part number is NOT printed on the drawing. Every op-amp on these two sheets \
 is an unlabeled 14-pin quad wired on pins 1/2/3, 5/6/7, 8/9/10 and 12/13/14, \
@@ -261,6 +265,12 @@ name = "a"
 pins = ["1", "2", "3"]
 role = "node Y follower"
 group = "shot"
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "envelope follower"
+group = "base missile"
 
 [[parts.sections]]
 name = "c"
@@ -597,6 +607,9 @@ on = [
   "U50.14", "U50.4", "R168.a", "R170.a",
   "U23.26", "RP1.com", "RP2.com", "U5.3",
   "C5.b", "C149.a", "R3.a",
+  "R48.a", "R50.a", "U6.4", "U6.8",
+  "R56.a", "R57.a", "R59.a", "R64.b",
+  "U22.10", "U22.11",
 ]
 note = """
 Every 74123 on this board has its B and clear inputs strapped high, so each \
@@ -610,6 +623,7 @@ on = [
   "U19.3", "R161.a", "R86.a", "R98.a", "U3.3", "U12.3", "R139.a", "U12.12",
   "U11.3", "PC1.cell1", "R30.a", "R33.a",
   "R72.a", "R1.b", "R2.a", "C3.b", "C4.a", "C140.a",
+  "R42.a", "U4.5", "R114.a",
 ]
 note = """
 NOT A REGULATED RAIL. R1 and R2 are a plain 1k divider from +12 V to ground \
@@ -625,6 +639,7 @@ on = [
   "C7.a", "U1.10", "R10.a", "R11.a", "R13.a",
   "R34.a", "C36.a", "R65.a", "U7.8", "U7.4",
   "C1.a", "R1.a", "C3.a", "C139.a", "Q1.c",
+  "R53.a", "R55.a", "R77.a", "R79.a",
 ]
 
 [[nets]]
@@ -650,6 +665,8 @@ on = [
   "R27.b", "C33.b", "R41.b", "C42.b", "C52.b",
   "C30.b", "C39.b",
   "C13.b", "R8.b", "R9.b", "Q2.e",
+  "C43.b", "C45.b", "R52.b", "R54.b", "U6.1",
+  "C49.b", "R76.b", "R78.b", "C50.b", "C70.b",
 ]
 
 [[nets]]
@@ -1095,13 +1112,15 @@ uf = 2.2
 ref = "U30"
 kind = "U"
 device = "7406"
-pins = ["5", "6", "10", "11", "12", "13"]
-out = ["6", "10", "12"]
-read = "partial"
+pins = ["1", "2", "3", "4", "5", "6", "10", "11", "12", "13"]
+out = ["2", "4", "6", "10", "12"]
 note = """
-Three inverters of a hex open-collector part, serving three different voices. \
-Open collector is why each one needs a pull-up. Its other sections are \
-elsewhere on sheet 12 and are not transcribed yet."""
+FIVE INVERTERS OF A HEX OPEN-COLLECTOR PART, serving five different voices. \
+Open collector is why each one needs a pull-up: R55 for the homing missile on \
+1 and 2, R79 for the laser on 3 and 4, and the three already here.
+
+The sixth inverter, on pins 8 and 9, is not drawn anywhere on these two \
+sheets, so those pins are absent from `pins` rather than listed open."""
 
 [[parts.sections]]
 name = "c"
@@ -1133,14 +1152,35 @@ group = "battleship"
 ref = "U17"
 kind = "U"
 device = "4016B"
-pins = ["1", "2", "13"]
-out = ["2"]
-read = "partial"
+pins = ["1", "2", "6", "8", "9", "10", "11", "12", "13"]
+out = ["2", "9", "10"]
 note = """
-One switch of a quad bilateral part. Pin 13 is this switch's control, driven \
-by the inverted BATTLESHIP gate, so the voice passes while the PPI bit is \
-low. The package's other three switches gate other voices and are not in this \
-group."""
+THREE OF THE FOUR SWITCHES IN A QUAD BILATERAL PART, GATING THREE VOICES. Pin \
+13 controls the battleship's switch on 1 and 2, pin 6 the laser's on 8 and 9, \
+and pin 12 the homing missile's on 11 and 10. Each control is an inverted PPI \
+gate, so a voice passes while its bit is low.
+
+The fourth switch, on pins 3, 4 and 5, is not drawn anywhere on these two \
+sheets. That is a statement about the drawing rather than a gap here, so those \
+pins are absent from `pins` rather than listed open.
+
+A switch is the one element whose topology the drawing does not fix, which is \
+why each is declared below rather than left as three unrelated pins."""
+
+[[parts.switches]]
+name = "a"
+pins = ["1", "2"]
+control = "13"
+
+[[parts.switches]]
+name = "c"
+pins = ["8", "9"]
+control = "6"
+
+[[parts.switches]]
+name = "d"
+pins = ["11", "10"]
+control = "12"
 
 [[parts.sections]]
 name = "a"
@@ -1411,9 +1451,7 @@ group = "small explosion"
 ref = "C74"
 kind = "C"
 uf = 2.2
-unread = [
-  { pin = "a", why = "the small explosion's source on sheet 11 left; not transcribed yet" },
-]
+note = "couples the Sallen-Key low-pass on U3 section D into the VCA."
 
 [[parts]]
 group = "small explosion"
@@ -1717,13 +1755,22 @@ ref = "U3"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3"]
-out = ["1"]
+pins = ["1", "2", "3", "12", "13", "14"]
+out = ["1", "14"]
 read = "partial"
 note = """
-Section A only. Its other sections are elsewhere on these sheets, including \
-the medium explosion's band-pass, and are not transcribed yet. The part \
-number is not printed; see the note on U19."""
+Two of its four sections. Section A on 1/2/3 is the noise input stage; section \
+D on 12/13/14 is the Sallen-Key low-pass that follows it, with R113 and R116 \
+in series, C70 to ground and C71 from their junction back to the output. \
+Sections B and C are elsewhere on this sheet and are not transcribed. The part \
+number is not printed; see the note on U19.
+
+WHICH VOICE THIS IS, recorded because two sources disagree. Section D feeds \
+C74, which this file has always put in the `small explosion` group along with \
+the mix leg R194 that follows it, so that is the group used here. \
+`phosphor-emulator-427y` called the same six parts the medium explosion's. The \
+topology below is what the drawing shows either way, and the label is \
+downstream of it."""
 
 [[parts.sections]]
 name = "a"
@@ -1733,11 +1780,11 @@ group = "noise"
 
 [[nets]]
 name = "NOISE 1"
-on = ["U2.3", "C66.a", "R18.a"]
+on = ["U2.3", "C66.a", "R18.a", "C44.a"]
 note = """
 The raw generator output, feeding the noise amplifier on sheet 11 and crossing \
-to sheet 12, where the engine's input stage reads it through R18. Other voices \
-on sheet 12 read it too; those endpoints join as they are transcribed."""
+to sheet 12, where the engine's input stage reads it through R18 and the \
+homing missile's summing stage through C44."""
 
 [[nets]]
 name = "C66/R111 junction"
@@ -1749,11 +1796,11 @@ on = ["R111.b", "R112.b", "U3.2"]
 
 [[nets]]
 name = "NOISE 2"
-on = ["U3.1", "R112.a", "C80.a"]
+on = ["U3.1", "R112.a", "C80.a", "C68.a", "R61.a"]
 note = """
-Feeds the cannon's band-pass through C80, and also crosses to sheet 12 and \
-reaches the medium explosion's band-pass through C68 on sheet 11 right. \
-Neither of those is transcribed yet."""
+Feeds the cannon's band-pass through C80, the explosion band-pass on sheet 11 \
+right through C68, and the engine's Sallen-Key low-pass on sheet 12 through \
+R61. Three voices read one noise node."""
 
 # ===========================================================================
 # THE TWO EXPLOSIONS (sheet 11, left half).
@@ -1775,12 +1822,19 @@ group = "small explosion"
 ref = "U22"
 kind = "U"
 device = "74123"
-pins = ["1", "2", "3", "4", "13", "14", "15"]
-out = ["4"]
-read = "partial"
-note = "Section A. Section B is not transcribed yet."
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["4", "12"]
+note = """
+BOTH HALVES USED, BY TWO DIFFERENT VOICES: section A is the small explosion \
+and section B is the base missile. As on every other 74123 here the A input \
+carries an inversion bubble and the clear is strapped high, so each one-shot \
+fires on the falling edge of its gate.
+
+Section B's period is R56 36k against C48 15 uF, and its Qbar on pin 12 pulls \
+the base missile's envelope down through D2 and R58."""
 nc = [
   { pin = "13", why = "Q is drawn on the symbol with no pin number and no wire, as on every other 74123 here. Qbar on pin 4 is the driver." },
+  { pin = "5", why = "Section B's Q, drawn on the symbol with no pin number and no wire, exactly as section A's is. Qbar on pin 12 is what drives D2." },
 ]
 
 [[parts.sections]]
@@ -2680,14 +2734,15 @@ kind = "R"
 kohms = 51
 
 [[parts]]
-group = "base missile"
+group = "engine"
 ref = "R183"
 kind = "R"
 kohms = 39
-block = "base missile leg"
-unread = [
-  { pin = "a", why = "the base missile on sheet 12 left; not transcribed yet" },
-]
+block = "engine leg"
+note = """
+THE ENGINE'S LEG, NOT THE BASE MISSILE'S. It is fed by U14 channel B, whose \
+input is the engine's Sallen-Key low-pass through C51. See the note on `engine \
+out` for how the two were swapped and how it was settled."""
 
 [[parts]]
 group = "base missile"
@@ -2714,9 +2769,7 @@ ref = "R186"
 kind = "R"
 kohms = 47
 block = "laser leg"
-unread = [
-  { pin = "a", why = "the laser on sheet 12 left; not transcribed yet" },
-]
+note = "fed by U17's laser switch and its R77/R78 bias, not by a VCA."
 
 [[parts]]
 group = "laser"
@@ -3184,18 +3237,23 @@ on = ["U23.1", "RP1.4", "U32.3"]
 
 [[nets]]
 name = "HOMING MISSILE"
-on = ["U23.40", "RP1.5", "U31.1"]
-note = "PA4, pulled up and active low, into its open-collector buffer."
+on = ["U23.40", "RP1.5", "U31.1", "U30.1"]
+note = """
+PA4, pulled up and active low. It goes two ways: into U31's buffer, which \
+drives the envelope this voice does not otherwise have, and into U30's \
+inverter, which is the 4016B's control."""
 
 [[nets]]
 name = "BASE MISSILE"
-on = ["U23.39", "RP1.6", "U31.3"]
-note = "PA5, pulled up and active low, into its open-collector buffer."
+on = ["U23.39", "RP1.6", "U31.3", "U22.9"]
+note = """
+PA5, pulled up and active low. Into U31's buffer and into U22 section B's A \
+input, whose falling edge fires the one-shot."""
 
 [[nets]]
 name = "LASER"
-on = ["U23.38", "RP1.7"]
-note = "On to the laser on this sheet, which is not transcribed yet."
+on = ["U23.38", "RP1.7", "U30.3"]
+note = "PA6, pulled up and active low, into the inverter that controls its 4016B switch."
 
 # ===========================================================================
 # THE PLAYER SHIP LEVEL (sheet 12, left half).
@@ -3322,13 +3380,16 @@ ref = "U5"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3", "8", "9", "10", "12", "13", "14"]
-out = ["1", "8", "14"]
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
 read = "partial"
 note = """
-Three sections: the engine's resonator on the left half of this sheet, and the \
-two player ship tone filters on the right half. Section B is not transcribed \
-yet. The part number is not printed; see the note on U19."""
+All four sections: the engine's resonator on the left half of this sheet, the \
+two player ship tone filters on the right half, and section B, which is the \
+homing missile's warble oscillator. That one is a relaxation oscillator rather \
+than a filter: R43 is positive feedback from the output to the non-inverting \
+input, R44 charges C43 from the output, and pin 6 watches the capacitor. The \
+part number is not printed; see the note on U19."""
 
 [[parts.sections]]
 name = "a"
@@ -3399,13 +3460,19 @@ ref = "U4"
 kind = "U"
 device = "LM324"
 device_inferred = true
-pins = ["1", "2", "3"]
-out = ["1"]
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
 read = "partial"
 note = """
-Section A, the engine's input stage. Its other sections are elsewhere on this \
-sheet and are not transcribed yet. The part number is not printed; see the \
-note on U19."""
+All four sections, serving two voices. Section A on 1/2/3 is the engine's \
+input stage. Section C on 8/9/10 is the engine's Sallen-Key low-pass, R61 and \
+R62 in series with C50 to ground and C137 from their junction to the output, \
+gain 1 + R63/R64 = 1.5 about +5 V. Section D on 12/13/14 is a unity follower \
+of the homing missile's warble capacitor C43, and section B on 5/6/7 sums that \
+follower through R45 against noise through R46 into R47, about +6 V, and drives \
+the 555's control pin through C46.
+
+The part number is not printed; see the note on U19."""
 unread = [
   { pin = "3", why = "the non-inverting reference; every other stage here sits on +6 V but this one is not traced" },
   { pin = "1", why = "the output, leaving downward; not traced" },
@@ -3770,16 +3837,18 @@ pf = 680
 note = "680 pF on U15 pin 14, the RO pin, to ground. C94's sibling."
 
 [[parts]]
-group = "homing missile"
+group = "engine"
 ref = "C51"
 kind = "C"
 uf = 22
-unread = [
-  { pin = "a", why = "the homing missile's source on this sheet; not transcribed yet" },
-]
+note = """
+Couples the engine's Sallen-Key low-pass into U14 channel B. This file used to \
+put it in the homing missile's group with its source unread; the source is \
+U4 section C's output and the voice is the engine. See the note on `engine \
+out`."""
 
 [[parts]]
-group = "homing missile"
+group = "engine"
 ref = "C52"
 kind = "C"
 pf = 680
@@ -3983,8 +4052,18 @@ name = "U14 ch B RO"
 on = ["U14.10", "C52.a"]
 
 [[nets]]
-name = "homing missile out"
-on = ["U14.11", "R180.a"]
+name = "engine out"
+on = ["U14.11", "R183.a"]
+note = """
+THIS FILE USED TO SAY R180 AND IT IS R183. U14 channel B's output runs down \
+PAST the R180 row and turns into R183 39k; the wire that reaches R180 comes \
+from above, off U17's homing missile switch and its R53/R54 bias. Settled at \
+800 percent, where the two verticals and their landings are unambiguous.
+
+The same correction renames this net and moves C51 and C52 into the engine's \
+group. What fed U14 channel B was never traced before, and it is the engine's \
+Sallen-Key low-pass through C51, not the homing missile: that voice reaches \
+the mix through a 4016B and has no VCA at all."""
 
 # ===========================================================================
 # THE POWER-ON MUTE (sheet 12, right half).
@@ -4344,10 +4423,10 @@ on = ["R72.b", "R73.a", "U8.10"]
 
 [[nets]]
 name = "U8c out"
-on = ["U8.8", "R73.b", "R74.a"]
+on = ["U8.8", "R73.b", "R74.a", "R75.a"]
 note = """
-The oscillator's square. It also leaves to the right half of this sheet, where \
-a 4016B gates it into the laser's leg, and that path is NOT traced."""
+The oscillator's square. R75 carries it to the right half of this sheet, where \
+R76 divides it and a 4016B gates it into the laser's leg."""
 
 [[nets]]
 name = "R74/D4 junction"
@@ -4360,3 +4439,551 @@ on = ["D4.k", "Q3.b", "R71.a"]
 [[nets]]
 name = "Q3 collector"
 on = ["Q3.c", "R70.a"]
+
+# ===========================================================================
+# THE HOMING MISSILE (sheet 12, across the overlap).
+#
+# A 555 whose pitch is swept by a slow relaxation oscillator, gated by a 4016B
+# rather than by a VCA. That is the difference from every other voice here:
+# there is no MB4391 on this path at all, so the gate is the whole envelope
+# and the voice has no decay.
+#
+# THE TWO HALVES OF SHEET 12 OVERLAP, so U6 is drawn on both: its timing side
+# on the left half and its output side on the right. R61 and R62 appear twice
+# the same way, with the same junction dot. Reading the halves as disjoint is
+# how a part gets transcribed twice.
+# ===========================================================================
+
+[[parts]]
+group = "homing missile"
+ref = "R42"
+kind = "R"
+kohms = 51
+note = "from +6 V into the warble oscillator's hysteresis node."
+
+[[parts]]
+group = "homing missile"
+ref = "R43"
+kind = "R"
+kohms = 100
+note = """
+POSITIVE feedback, output to non-inverting input, which is what makes U5 \
+section B an oscillator rather than an amplifier. Against R42's 51k it sets a \
+window of a third of the output swing."""
+
+[[parts]]
+group = "homing missile"
+ref = "R44"
+kind = "R"
+kohms = 6.8
+
+[[parts]]
+group = "homing missile"
+ref = "C43"
+kind = "C"
+uf = 6.8
+note = "the warble's timing capacitor, charged from U5 section B's output through R44. 46 ms."
+
+[[parts]]
+group = "homing missile"
+ref = "C44"
+kind = "C"
+uf = 1
+note = "couples NOISE 1 into the summing stage, so the swept tone carries a little noise."
+
+[[parts]]
+group = "homing missile"
+ref = "R45"
+kind = "R"
+kohms = 6.8
+note = "the warble's leg into the summing stage."
+
+[[parts]]
+group = "homing missile"
+ref = "R46"
+kind = "R"
+kohms = 200
+note = "the noise leg, 29 times weaker than the warble's."
+
+[[parts]]
+group = "homing missile"
+ref = "R47"
+kind = "R"
+kohms = 10
+note = "the summing stage's feedback."
+
+[[parts]]
+group = "homing missile"
+ref = "C46"
+kind = "C"
+uf = 3.3
+note = "couples the summed sweep into the 555's control pin, which is what moves the pitch."
+
+[[parts]]
+group = "homing missile"
+ref = "R48"
+kind = "R"
+kohms = 47
+note = "+5 V to the 555's discharge pin: the charge leg."
+
+[[parts]]
+group = "homing missile"
+ref = "R49"
+kind = "R"
+kohms = 6.8
+note = "discharge pin to the timing node: the leg both halves of the cycle use."
+
+[[parts]]
+group = "homing missile"
+ref = "C45"
+kind = "C"
+uf = 0.01
+note = """
+The 555's timing capacitor. With R48 47k and R49 6.8k it free-runs near 2.4 \
+kHz, and C46 on the control pin sweeps that."""
+
+[[parts]]
+group = "homing missile"
+ref = "U6"
+kind = "U"
+device = "555"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8"]
+out = ["3"]
+note = """
+An astable on +5 V with pins 2 and 6 strapped, which is the ordinary way to \
+run one. Pin 4 (reset) sits on +5 V with pin 8, so it free-runs and the gating \
+is entirely downstream at U17.
+
+DRAWN ON BOTH HALVES OF SHEET 12, because the scans overlap: pins 7, 6, 2 and \
+the parts on them are on the left half and pins 3, 5 and 1 on the right."""
+
+[[parts]]
+group = "homing missile"
+ref = "R50"
+kind = "R"
+kohms = 3.3
+note = "+5 V above the 555's output, the top of the divider that sets the gated level."
+
+[[parts]]
+group = "homing missile"
+ref = "R51"
+kind = "R"
+kohms = 12
+
+[[parts]]
+group = "homing missile"
+ref = "R52"
+kind = "R"
+kohms = 3.3
+note = "R51 against this takes about a fifth of the 555's swing on to the gate."
+
+[[parts]]
+group = "homing missile"
+ref = "C47"
+kind = "C"
+uf = 10
+note = "couples the divided square into the 4016B, so the switch passes AC about its own bias."
+
+[[parts]]
+group = "homing missile"
+ref = "R53"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "homing missile"
+ref = "R54"
+kind = "R"
+kohms = 51
+note = """
+With R53 a plain halving divider on +12 V. It biases the 4016B's output at 6 V, \
+which is what lets a switch pass a signal that swings both ways on a single \
+supply."""
+
+[[parts]]
+group = "homing missile"
+ref = "R55"
+kind = "R"
+kohms = 10
+note = "the pull-up U30's open collector needs. Every gate inverter on this board has one."
+
+[[nets]]
+name = "R42/R43 junction"
+on = ["R42.b", "R43.a", "U5.5"]
+note = "the hysteresis node: +6 V through R42 against the output through R43."
+
+[[nets]]
+name = "U5b out"
+on = ["U5.7", "R43.b", "R44.a"]
+
+[[nets]]
+name = "C43 node"
+on = ["R44.b", "C43.a", "U5.6", "U4.12"]
+note = """
+The warble itself. U5 section B watches it on pin 6 and U4 section D follows \
+it, so the same ramp both sustains the oscillation and leaves as the sweep."""
+
+[[nets]]
+name = "U4d out"
+on = ["U4.14", "U4.13", "R45.a"]
+note = "strapped output to inverting input: a unity follower of C43."
+
+[[nets]]
+name = "C44/R46 junction"
+on = ["C44.b", "R46.a"]
+
+[[nets]]
+name = "U4b summing node"
+on = ["R45.b", "R46.b", "R47.a", "U4.6"]
+
+[[nets]]
+name = "U4b out"
+on = ["U4.7", "R47.b", "C46.a"]
+
+[[nets]]
+name = "U6 control"
+on = ["C46.b", "U6.5"]
+note = """
+The 555's control pin, which is its upper threshold. This is the same trick \
+the shot uses on U18, and here the modulation is the warble rather than an \
+envelope."""
+
+[[nets]]
+name = "U6 discharge"
+on = ["R48.b", "R49.a", "U6.7"]
+
+[[nets]]
+name = "U6 timing"
+on = ["R49.b", "U6.6", "U6.2", "C45.a"]
+note = "threshold and trigger strapped, which is the ordinary 555 astable."
+
+[[nets]]
+name = "U6 out"
+on = ["U6.3", "R50.b", "R51.a"]
+
+[[nets]]
+name = "R51/R52 junction"
+on = ["R51.b", "R52.a", "C47.a"]
+
+[[nets]]
+name = "C47/U17 junction"
+on = ["C47.b", "U17.11"]
+
+[[nets]]
+name = "homing missile gate"
+on = ["U30.2", "R55.b", "U17.12"]
+note = "the open-collector inverter and its pull-up, driving the switch's control."
+
+[[nets]]
+name = "homing missile gate out"
+on = ["U17.10", "R53.b", "R54.a", "R180.a"]
+note = """
+THE SWITCH'S OUTPUT AND ITS BIAS ON ONE NODE, and then straight to the mix \
+leg. This voice has no VCA: R180 is the leg and the 4016B is the whole \
+envelope."""
+
+# ===========================================================================
+# THE BASE MISSILE (sheet 12, left half).
+#
+# A one-shot, a diode that discharges a storage capacitor, and a follower that
+# taps a MIDPOINT rather than the capacitor, which is the same shape the two
+# explosions use.
+# ===========================================================================
+
+[[parts]]
+group = "base missile"
+ref = "C48"
+kind = "C"
+uf = 15
+note = "the one-shot's timing capacitor, on U22 pins 6 and 7, positive plate on the pin 7 side."
+
+[[parts]]
+group = "base missile"
+ref = "R56"
+kind = "R"
+kohms = 36
+note = "with C48 a one-shot period near 240 ms."
+
+[[parts]]
+group = "base missile"
+ref = "R57"
+kind = "R"
+kohms = 1
+note = "the pull-up on Qbar's node, which is what lets the diode pull it down."
+
+[[parts]]
+group = "base missile"
+ref = "D2"
+kind = "D"
+note = """
+Cathode on the one-shot's Qbar, anode toward R58. So the envelope capacitor \
+discharges INTO the one-shot while it is low, and the diode blocks when Qbar \
+returns high, which is what makes the recovery slow and the attack fast."""
+
+[[parts]]
+group = "base missile"
+ref = "R58"
+kind = "R"
+ohms = 470
+note = "the discharge leg. With C49 it empties in about 7 ms."
+
+[[parts]]
+group = "base missile"
+ref = "C49"
+kind = "C"
+uf = 15
+note = "the envelope store."
+
+[[parts]]
+group = "base missile"
+ref = "R59"
+kind = "R"
+kohms = 220
+
+[[parts]]
+group = "base missile"
+ref = "R60"
+kind = "R"
+kohms = 220
+note = """
+R59 and R60 are equal, so the follower's tap is exactly halfway between +5 V \
+and the capacitor: what reaches the VCA is (5 V + V_C49) / 2. They are also \
+the only charging path, so the recovery the VCA sees is C49 against 440k, \
+about 6.6 s."""
+
+[[nets]]
+name = "U22b Cext"
+on = ["C48.a", "U22.6"]
+
+[[nets]]
+name = "U22b timing"
+on = ["C48.b", "R56.b", "U22.7"]
+
+[[nets]]
+name = "base missile Qbar"
+on = ["U22.12", "R57.b", "D2.k"]
+
+[[nets]]
+name = "D2/R58 junction"
+on = ["D2.a", "R58.a"]
+
+[[nets]]
+name = "C49 node"
+on = ["R58.b", "C49.a", "R60.b"]
+
+[[nets]]
+name = "R59/R60 junction"
+on = ["R59.b", "R60.a", "U20.5"]
+note = "the midpoint the follower taps, which is the finding on this voice."
+
+[[nets]]
+name = "U20b out"
+on = ["U20.7", "U20.6"]
+note = """
+Strapped output to inverting input, so a unity follower of the midpoint. Where \
+it goes on to is NOT TRACED: it leaves downward on the left half of sheet 12 \
+and the MB4391 control pin it reaches was not followed."""
+
+# ===========================================================================
+# THE LASER'S GATE (sheet 12, right half).
+#
+# The oscillator is already transcribed above; this is the 4016B between it
+# and the mix, built exactly like the homing missile's.
+# ===========================================================================
+
+[[parts]]
+group = "laser"
+ref = "R75"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "laser"
+ref = "R76"
+kind = "R"
+kohms = 2.2
+note = "R75 against this takes about a fifth of the oscillator's square on to the gate, as R51/R52 do for the homing missile."
+
+[[parts]]
+group = "laser"
+ref = "C55"
+kind = "C"
+uf = 2.2
+
+[[parts]]
+group = "laser"
+ref = "R77"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "laser"
+ref = "R78"
+kind = "R"
+kohms = 51
+note = "the same halving divider on +12 V that biases the homing missile's switch."
+
+[[parts]]
+group = "laser"
+ref = "R79"
+kind = "R"
+kohms = 10
+note = "the pull-up on this voice's open-collector gate inverter."
+
+[[nets]]
+name = "R75/R76 junction"
+on = ["R75.b", "R76.a", "C55.a"]
+
+[[nets]]
+name = "C55/U17 junction"
+on = ["C55.b", "U17.8"]
+
+[[nets]]
+name = "laser gate"
+on = ["U30.4", "R79.b", "U17.6"]
+
+[[nets]]
+name = "laser gate out"
+on = ["U17.9", "R77.b", "R78.a", "R186.a"]
+note = "switch output and bias on one node, then the mix leg. No VCA on this voice either."
+
+# ===========================================================================
+# THE ENGINE'S FILTER (sheet 12, across the overlap).
+#
+# A Sallen-Key low-pass between the engine's input stage and its VCA. The same
+# topology as the explosion band-pass on sheet 11 right, with different values.
+# ===========================================================================
+
+[[parts]]
+group = "engine"
+ref = "R61"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "engine"
+ref = "R62"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "engine"
+ref = "C50"
+kind = "C"
+uf = 0.022
+note = "to ground from the non-inverting input: the second pole."
+
+[[parts]]
+group = "engine"
+ref = "C137"
+kind = "C"
+uf = 0.022
+note = """
+From the R61/R62 junction back to the output, which is what makes this a \
+Sallen-Key rather than two independent RCs. With the four values equal in \
+pairs the corner is 482 Hz."""
+
+[[parts]]
+group = "engine"
+ref = "R63"
+kind = "R"
+kohms = 50
+
+[[parts]]
+group = "engine"
+ref = "R64"
+kind = "R"
+kohms = 100
+note = "with R63 a gain of 1 + 50/100 = 1.5, referred to +5 V rather than to ground."
+
+[[nets]]
+name = "R61/R62 junction"
+on = ["R61.b", "R62.a", "C137.a"]
+
+[[nets]]
+name = "R62/C50 junction"
+on = ["R62.b", "C50.a", "U4.10"]
+
+[[nets]]
+name = "U4c out"
+on = ["U4.8", "C137.b", "R63.a", "C51.a"]
+
+[[nets]]
+name = "R63/R64 junction"
+on = ["R63.b", "R64.a", "U4.9"]
+
+# ===========================================================================
+# THE EXPLOSION BAND-PASS (sheet 11, right half).
+#
+# NOISE 2 through a Sallen-Key low-pass into U15 channel B. The same shape as
+# the engine's filter above, which is the argument for transcribing both: one
+# topology, four sets of values, and the drawing draws it four times.
+# ===========================================================================
+
+[[parts]]
+group = "small explosion"
+ref = "C68"
+kind = "C"
+uf = 2.2
+note = "couples NOISE 2 in, positive plate on the noise side."
+
+[[parts]]
+group = "small explosion"
+ref = "R113"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "small explosion"
+ref = "R116"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "small explosion"
+ref = "C70"
+kind = "C"
+uf = 0.033
+note = "to ground from the non-inverting input."
+
+[[parts]]
+group = "small explosion"
+ref = "C71"
+kind = "C"
+uf = 0.033
+note = """
+From the R113/R116 junction back to the output. With the pairs equal the \
+corner is 321 Hz, which is where this voice's noise band sits."""
+
+[[parts]]
+group = "small explosion"
+ref = "R114"
+kind = "R"
+kohms = 100
+
+[[parts]]
+group = "small explosion"
+ref = "R115"
+kind = "R"
+kohms = 150
+note = "with R114 a gain of 1 + 150/100 = 2.5, referred to +6 V."
+
+[[nets]]
+name = "C68/R113 junction"
+on = ["C68.b", "R113.a"]
+
+[[nets]]
+name = "R113/R116 junction"
+on = ["R113.b", "R116.a", "C71.a"]
+
+[[nets]]
+name = "R116/C70 junction"
+on = ["R116.b", "C70.a", "U3.12"]
+
+[[nets]]
+name = "R114/R115 junction"
+on = ["R114.b", "R115.a", "U3.13"]
+
+[[nets]]
+name = "U3d out"
+on = ["U3.14", "C71.b", "R115.b", "C74.a"]
