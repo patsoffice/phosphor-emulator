@@ -82,6 +82,14 @@ Use these for anything that is a level, an envelope or a decay.
 Each drives ONE voice, asserted once, on the timeline of the matching scenario
 under `tools/sound-compare/scenarios/`, and each honours `SND_VERIFY`.
 
+### Traces of what a game writes
+
+`trace_llander_writes.lua` drives nothing but a coin and a start, leaves the
+game running, and logs every change it makes to Lunar Lander's sound latch. Use
+it when the question is how the game uses a circuit rather than what the circuit
+does; it is how the crash was found to step the throttle down under the
+explosion instead of holding it.
+
 ### Multi-effect drivers, for a listen
 
 `drive_asteroid_sound.lua`, `drive_dkong_sound.lua`, `drive_galaxian_sound.lua`,

@@ -231,8 +231,8 @@ The drawing says this in words:
 
 | Leg | Path | Gain |
 |---|---|---|
-| thrust | band-pass -> R28 6.8 k -> pin 9 | R31/R28, doubled by the differential pair |
-| explosion | common node -> R21 1.5 k -> C91 0.047 uF -> pin 9 | R31/R21 above 2.3 kHz, doubled |
+| thrust | band-pass -> R28 6.8 k -> pin 9 | (R31 parallel C27)/R28, doubled by the differential pair |
+| explosion | common node -> R21 1.5 k -> C91 0.047 uF -> pin 9 | C91/C27 = 0.47 from 159 Hz to 2.3 kHz, doubled; see "C27 makes the explosion leg a band-pass" |
 | 3 kHz | N6 LS00 -> R29 390 k -> pin 13 | R34/R29, single-ended |
 | 6 kHz | N6 LS00 -> R30 390 k -> pin 13 | R34/R30, single-ended |
 
@@ -273,7 +273,9 @@ each, pull the two gate outputs up.
   common node the throttle resistors drive. Enabling the explosion with the
   throttle at zero is silence.
 - **The mixer balance is R28/R21/R29/R30 against R31 and R34**, with a factor of
-  two for the two noise legs and not for the tones.
+  two for the two noise legs and not for the tones. *C27 across R31 makes that
+  balance frequency-dependent for the two noise legs; see "C27 makes the
+  explosion leg a band-pass".*
 - **The board does not clip.** The noise legs' nominal swing through R28 into
   R31 is about 11 V peak-to-peak differential, against roughly 20 V available
   from an LM324 biased at +5 V on a +22 V rail. The reference netlist's output
@@ -302,6 +304,15 @@ each, pull the two gate outputs up.
   or `0x3E00` was taken, so how long a crash holds the explosion, and whether it
   holds full throttle while it does, are unknown. The scenarios assume it does
   because the circuit gives no alternative, not because anything was traced.
+  *Now traced, with `tools/sound-reference/trace_llander_writes.lua`, over
+  three crashes that agree to within a few milliseconds. The game does not hold
+  full throttle. It writes `0x0f` (explosion and throttle 7), steps the throttle
+  down one notch every 0.41 s (the first after 0.32 s) to `0x08` at 2.81 s,
+  holds the explosion bit with every leg open, and so silent, for 3.5 s more,
+  then writes `0x01`. In flight with the pedal released it holds throttle 1,
+  not 0, so the throttle-1 rumble plays for the whole descent. Low fuel blinks
+  the 3 kHz tone at about 1.25 Hz. `0x3E00` is written three times at the start
+  of a game and never during a crash.*
 
 ## What the netlist added
 
@@ -334,17 +345,74 @@ separates them with a 1000-against-600 level, where this drawing has
 `R31`/`R21` against `R31`/`R28`. **Transcribed, the question turns out to be
 the wrong shape.** Neither leg is a flat gain, and they scarcely overlap:
 
-| | path from the common node | midband | at 89.5 Hz | at 5 kHz |
+| | path from the common node | peak | at 89.5 Hz | at 5 kHz |
 |---|---|---|---|---|
-| thrust | band-pass, then `R28` 6.8 k into `R31` | 4.22 | **4.22** | 0.01 |
-| explosion | `R21` 1.5 k and `C91` into `R31` | 6.67 above 2.3 kHz | **0.26** | 6.08 |
+| thrust | band-pass, then `R28` 6.8 k into `R31` with `C27` across it | 3.68 at 89.5 Hz | **3.68** | 0.0003 |
+| explosion | `R21` 1.5 k and `C91` into the same | 0.44 near 600 Hz | **0.23** | 0.19 |
 
-The thrust leg is a band-pass at 89.5 Hz with Q 7.6; the explosion leg is a
-high-pass cornering at `1/(2*pi*R21*C91)` = **2258 Hz**. At the thrust's own
+*Corrected 2026-09-25.* This table first read `R31` as a flat 10 k and gave
+4.22, 6.67, 0.26 and 6.08; the gains above include `C27`, which was always in
+the drawing and in the netlist and was left out of the arithmetic. The ratios
+between the legs are unchanged, since `C27` scales both. What changes is each
+leg's absolute gain and the explosion's shape. See the next section.
+
+The thrust leg is a band-pass at 89.5 Hz with Q 7.6. At the thrust's own
 center the explosion is sixteen times down, and at 5 kHz the explosion is some
 six hundred times up. A single balance number describes neither, so "their
 ratio" has no value to resolve and the two parameterizations are not comparing
 the same quantity.
+
+### C27 makes the explosion leg a band-pass, and a quiet one
+
+`C27`, 0.1 uF across `R31`, makes the summing amplifier a low-pass at
+`1/(2*pi*R31*C27)` = **159 Hz** for both legs. The explosion leg is therefore
+not a high-pass at 2258 Hz. Its gain rises below 159 Hz, sits at
+`C91/C27` = **0.47** from 159 Hz to 2258 Hz, and falls above. Read again at
+400 dpi on 2026-09-25, `P5` pin 1 leaves the junction dot on the throttle's
+common node, `C15` sits on the same wire, and `R21` and `C91` read 1.5 k and
+.047, so all of this is as drawn.
+
+Put together with the common node's own low-pass, which is 73 Hz at full
+throttle, and taking the noise as white with ideal op-amps:
+
+| at full throttle | explosion against thrust | explosion centroid | explosion energy below 150 Hz |
+|---|---|---|---|
+| as drawn | **-11.1 dB** | 392 Hz | 31.5 % |
+| as drawn without `C27` | -0.1 dB | 2021 Hz | 2.6 % |
+| the reference, and the device | about **+15.5 dB** | about 110 Hz | 77 % |
+
+**Read literally, the drawing's explosion sits 11 dB under the thrust it always
+plays over**, so enabling it adds about 0.3 dB. The reference makes it 26 dB
+louder and much darker, and the device copies the reference: noise times a
+fitted 2400, then a 560 Hz low-pass that has no part behind it either (the
+drawing's only shared low-pass is `C27`'s 159 Hz).
+
+Two readings of that gap, and nothing on this sheet can separate them. Either
+the board plays a quiet, bright crash, or something shaping the explosion is
+off this sheet: side A is missing from every scan, and the game could make the
+crash by what it writes to the throttle bits as well as by `AUD3`. The
+reference's 1000-against-600 levels have no part behind them, so they are not
+evidence either way. What the game writes to `0x3C00` during a crash was the
+cheapest thing that could.
+
+**Traced, it narrows the gap without closing it.** The crash sets full throttle
+with the explosion and steps the throttle down to 0 over 2.8 s (see "What it
+does NOT establish"). The thrust has no gate of its own, so that staircase plays
+the thrust's roar at full level and fades it: on the board, most of a crash's
+loudness is the thrust. The explosion leg rides on it, but the throttle scales
+both legs together, so the staircase cannot change their ratio; as it falls, the
+common node's corner darkens and the brighter explosion leg loses further. So
+the drawn crash is a full-throttle roar decaying over 2.8 s with a brighter
+layer about 11 dB under it. Distinct in band, that layer would still be clearly
+audible, which makes it a plausible design rather than an evident misreading.
+
+It also bounds item 3. `llander/explosion` holds throttle 7 with the explosion
+indefinitely, which the game never does for more than 0.32 s, and that hold is
+where the device's 9.9 % clipping is measured.
+
+`C27` was missed because the solver reports time constants and DC gains, and
+every figure in this section needs a frequency response. The netlist has had
+`C27` all along.
 
 The band-pass's midband gain is `R27/(2*R22)` = **2.87** referred to the common
 node, which is the same 115 the device carries referred to the `R22`/`R26`
