@@ -15,6 +15,11 @@ description = "Crash explosion over full throttle, which is the only way the boa
 # thrust path has no gate of its own -- the switches ARE its gate -- so anything
 # that opens the explosion also opens the thrust. What isolates the two here is
 # the `explosion` probe, not the timeline.
+#
+# A STRESS CASE, NOT THE GAME. Full throttle with the explosion held is the
+# worst case for headroom, and the game never holds it for more than 0.32 s: it
+# steps the throttle down under the explosion. llander/crash replays what the
+# game does.
 [[action]]
 at_s = 0.5
 control = "thrust-data"

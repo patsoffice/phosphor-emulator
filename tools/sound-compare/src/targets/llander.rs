@@ -4,13 +4,11 @@
 //! fixed alert tones. They reach the board through a single write address, so
 //! the controls here are named for the effects rather than for `0x3C00`'s bits.
 //!
-//! WHY THIS EXISTS NOW. This device has never been compared against anything.
-//! It was transcribed from a netlist rather than built from the drawing, and it
-//! carries three constants with no part behind them: `THRUST_IN_GAIN` 2400,
-//! `THRUST_OUT_GAIN` 18.7, and an output divisor of 14347. Per the standing rule
-//! that a fitted value is the usual disguise for a missing stage, all three are
-//! suspect, and the per-stage probes below are what makes it possible to find
-//! out which stage each is standing in for.
+//! WHY THIS EXISTED. The device was first transcribed from a netlist rather than
+//! built from the drawing, and carried three constants with no part behind
+//! them: `THRUST_IN_GAIN` 2400, `THRUST_OUT_GAIN` 18.7, and an output divisor of
+//! 14347. All three are gone; the analog block is now built in volts from the
+//! drawing's parts, and the per-stage probes below read it stage by stage.
 //!
 //! The schematic is now transcribed at `docs/schematics/llander-audio-output.md`,
 //! and it named two mechanisms this model did not have. Both are now modeled:
@@ -76,7 +74,8 @@ pub static SPEC: TargetSpec = TargetSpec {
         },
         ProbeSpec {
             name: "thrust-explod",
-            description: "Thrust and explosion summed, after the shared 560 Hz low-pass",
+            description: "AUDIO1: thrust and explosion summed at the summing amp, clipped to its \
+                          swing, at mix level",
         },
         // The thrust chain, stage by stage. Three stages all move the same bands
         // at the output (the noise source, the throttle's switched low-pass,
@@ -89,15 +88,17 @@ pub static SPEC: TargetSpec = TargetSpec {
         ProbeSpec {
             name: "thrust-throttle",
             description: "The throttle's common node, the band-pass's input: the noise through \
-                          the setting's own corner and gain, unity at full throttle (+/-1)",
+                          the setting's own corner and gain (volts from +5 V, divided by 2)",
         },
         ProbeSpec {
             name: "thrust-bp",
-            description: "Thrust resonant band-pass output, where the rumble is made (volts)",
+            description: "Thrust resonant band-pass output, where the rumble is made (volts \
+                          from +5 V, divided by the op-amp's 5 V symmetric swing)",
         },
         ProbeSpec {
             name: "explosion-noise",
-            description: "The explosion's unfiltered noise leg, before its gate",
+            description: "The explosion leg's current through R21 and C91, times R31, before its \
+                          gate and C27's pole (volts, divided by the 5 V swing)",
         },
     ],
     create,
@@ -213,21 +214,24 @@ impl SoundTarget for LlanderTarget {
 /// The scale divides the node's value before it is written as PCM. A stage
 /// already at its mix level is divided by the mixer's own full scale, so a probe
 /// reads at the share of the output that voice actually has; dividing by
-/// anything else would measure the probe's normalization instead. The band-pass
-/// carries circuit VOLTS and would clip a full-scale sample flat, so it is
-/// divided by the rail it swings against.
+/// anything else would measure the probe's normalization instead. The noise
+/// legs appear on both outputs of the pair, so a leg at AUDIO1 is doubled on its
+/// way into the mix, which is the same as dividing by half the full scale.
+/// Stages ahead of the summing amp carry circuit volts and are divided by the
+/// swing they sit in, so a full-scale sample does not clip flat.
 fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
     const MIX: f64 = LunarLanderDiscreteSound::MIX_FULL_SCALE;
+    const AUDIO1: f64 = MIX / 2.0;
     let (node, scale) = match probe {
-        "thrust" => ("THRUST_PATH", MIX),
-        "explosion" => ("EXPLOD_GATE", MIX),
+        "thrust" => ("THRUST_LEG", AUDIO1),
+        "explosion" => ("EXPLOD_LEG", AUDIO1),
         "tone-3k" => ("TONE3K_OUT", MIX),
         "tone-6k" => ("TONE6K_OUT", MIX),
-        "thrust-explod" => ("THRUST_EXPLOD", MIX),
-        "explosion-noise" => ("EXPLOD_SCALED", MIX),
+        "thrust-explod" => ("AUDIO1", AUDIO1),
+        "explosion-noise" => ("EXPLOD_I", AUDIO1),
         "noise" => ("NOISE", 1.0),
-        "thrust-throttle" => ("THROTTLE", 1.0),
-        "thrust-bp" => ("THRUST_BP", 12.0),
+        "thrust-throttle" => ("THROTTLE", 2.0),
+        "thrust-bp" => ("THRUST_BP", AUDIO1),
         _ => return None,
     };
     circuit

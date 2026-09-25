@@ -74,12 +74,23 @@ local EFFECTS = {
   ["explosion"] = true,
   ["tone-3k"] = true,
   ["tone-6k"] = true,
+  ["crash"] = true,
 }
 if not EFFECTS[effect] then
   print("[DRIVER] ERROR: set LL_EFFECT to one of: thrust, thrust-low, " ..
-        "explosion, tone-3k, tone-6k")
+        "explosion, tone-3k, tone-6k, crash")
   return
 end
+
+-- THE CRASH AS THE GAME PLAYS IT, from trace_llander_writes.lua: descent at
+-- throttle 1, then at impact the explosion with throttle 7, stepped down one
+-- notch at a time to 0. Offsets from the first traced crash, relative to the
+-- impact at TRIGGER_S. Matches scenarios/llander/crash.toml.
+local CRASH_STEPS = {
+  { 0.0000, 0x0f }, { 0.3228, 0x0e }, { 0.7319, 0x0d }, { 1.1435, 0x0c },
+  { 1.5553, 0x0b }, { 1.9722, 0x0a }, { 2.3894, 0x09 }, { 2.8081, 0x08 },
+}
+local CRASH_FLIGHT_S = 0.5
 
 -- Matches the scenario files: one assert at 1.0 s, held to the end of the run.
 -- Held rather than released, because every voice on this board is hard gated --
@@ -204,6 +215,11 @@ local function on_frame()
   if effect == "explosion" then
     if t >= EXPLOSION_THROTTLE_S then reg = 0x07 end
     if t >= TRIGGER_S then reg = 0x0f end
+  elseif effect == "crash" then
+    if t >= CRASH_FLIGHT_S then reg = 0x01 end
+    for _, step in ipairs(CRASH_STEPS) do
+      if t >= TRIGGER_S + step[1] then reg = step[2] end
+    end
   elseif t >= TRIGGER_S then
     if effect == "thrust" then
       reg = 0x07

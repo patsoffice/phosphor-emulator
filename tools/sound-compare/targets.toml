@@ -215,28 +215,26 @@ scenarios = [
   "llander/thrust",
   "llander/thrust-low",
   "llander/explosion",
+  "llander/crash",
   "llander/tone-3k",
   "llander/tone-6k",
 ]
 notes = """
-All five voices within 0.44 dB of the reference on level, and within 0.15
-percentage points on every band. The whole board had been 25 dB down: the output
-normalization was a fitted 14347 where the mixer's own leg sum is the answer, and
-the same peak-to-peak convention was missed again on the tone gain, which put the
-tones a further 6 dB out of balance. Both are now derived from the drawing,
-transcribed at docs/schematics/llander-audio-output.md.
+Built from the drawing, transcribed at docs/schematics/llander-audio-output.md,
+with nothing fitted. The throttle's time constants and gains are solved from the
+transcription by `netlist derive`; everything after it is in volts from the
+parts, with full scale the LM324's swing. Two levels are taken on trust, the
+noise's 3.8 V and the gates' 4 V.
 
-The throttle is now the board's: its three resistors set the noise filter's
-corner as well as the volume, with each setting's time constant and gain solved
-from the transcription by `netlist derive`. So llander/thrust-low now DIFFERS
-from the reference by design, +2.58 dB and 3.5 Hz darker, where full throttle
-still agrees to 0.29 dB. The reference has a fixed corner and a linear volume;
-the drawing does not.
-
-Residuals, neither findable by comparison because the reference shares them: two
-make-up gains are still fitted, and the explosion clips 9.5 % of samples where
-the reference clips 9.9 %, which the board would not. Both in
-phosphor-emulator-b72s."""
+It now DIFFERS from the reference on purpose, and the reference's own gain table
+says why: it gives the explosion the thrust leg's 6.8k at a flat gain, calls its
+thrust level a tweak, and has a fixed throttle corner with a linear volume. The
+tones agree within 0.9 dB. The thrust is 4.6 dB quieter against them; throttle 1
+is darker and relatively louder; the explosion sits 11.75 dB under the thrust
+where the reference has it 15 dB over; and nothing clips. llander/crash replays
+the game's traced crash, the explosion over a throttle stepped from 7 to 0, and
+is the scenario to listen to: it is about 21 dB under the reference's. Table in
+the doc, under "Built as drawn". Closes phosphor-emulator-b72s."""
 
 # ---------------------------------------------------------------------------
 # Implemented, but no comparison

@@ -410,6 +410,69 @@ It also bounds item 3. `llander/explosion` holds throttle 7 with the explosion
 indefinitely, which the game never does for more than 0.32 s, and that hold is
 where the device's 9.9 % clipping is measured.
 
+### Where the reference's explosion level comes from
+
+The reference netlist carries its own gain table, and it answers the question
+this section opened with:
+
+| effect | input | gain ratio | relative |
+|---|---|---|---|
+| tone 3k, tone 6k | 4 V | 10/390 | 9.2 |
+| explode | 3.8 V | **10/6.8** * 2 | 1000 |
+| thrust | 3.8 V | 10/6.8 * 2 | 600, "has to be tweaked, due to the filter stage" |
+
+The explosion is given `R28`'s 6.8 k, the thrust leg's resistor, at a flat
+gain, with no `C91`, no `R21` and no `C27`: 3.8 V times 10/6.8 times 2 is exactly
+1000 on the scale that makes a tone 9.2. The thrust's 600 is labeled a tweak. So
+neither level is a measurement of a board, and the gap in the table above is the
+reference simplifying the explosion leg, not the drawing missing something.
+
+### Built as drawn
+
+`phosphor-emulator-b72s` item 2. `llander_sound.rs` now builds everything after
+the throttle from the parts, in volts from the +5 V reference: the band-pass
+from `R22`, `R26`, `R27`, `C20` and `C21`; the thrust leg through `R28`; the
+explosion leg through `R21` and `C91`; `C27` across `R31`; the summing amp
+clipped to the LM324's swing; the tones through `R29` and `R30` against `R34`.
+Full scale is that swing, 5 V about the reference, doubled across the output
+pair. The fitted `THRUST_IN_GAIN` 2400, `THRUST_OUT_GAIN` 18.7 and the
+reference's 560 Hz low-pass are gone. `netlist lint --device` now reads 13
+designators from the device and holds 12 values against this sheet, all
+agreeing, where it read none before the throttle work.
+
+Against fresh 192 kHz reference captures, band-limited to 44.1 kHz:
+
+| scenario | reference | fitted device | drawn device |
+|---|---|---|---|
+| `llander/tone-3k` | -45.34 dBFS | -45.27 | -46.15 |
+| `llander/tone-6k` | -45.51 | -45.50 | -46.40 |
+| `llander/thrust` | -20.96 | -21.25 | **-27.16** |
+| `llander/thrust-low` | -37.87 | -35.29 | -41.15 |
+| `llander/explosion` | -5.31, 9.9 % clipped | -5.24, 9.9 % clipped | **-26.43, none** |
+| `llander/crash` | -9.88, 2.4 % clipped | -8.46, 3.6 % clipped | **-31.05, none** |
+
+- **The tones land within 0.9 dB of the reference with nothing fitted.** The
+  full-scale definition and the reference's own calibration agree, which is what
+  makes the rest of the table comparable.
+- **The thrust is 4.6 dB quieter relative to the tones** than the reference
+  has it: 19.8 dB over a tone against 24.4. The fitted make-up gain had been
+  hiding it. The two levels taken on trust, 3.8 V and 4 V, cannot plausibly
+  carry that much.
+- **The explosion sits 11.75 dB under the thrust** at full throttle, measured
+  in the device as the sample-by-sample difference with and without it, against
+  -11.1 dB from the frequency-domain estimate above.
+- **Nothing clips**, in the worst case the scenarios drive or in the game's own
+  crash. The headroom argument below said the board would not, and the drawn
+  circuit agrees.
+- **So a crash is quiet against the reference**, about 21 dB down, and most of
+  it is the thrust's roar fading down the game's throttle staircase. Of
+  everything here, this is the result a player would notice, and it rests on
+  the explosion leg reading the way it was rechecked to read.
+
+`llander/crash` replays the traced staircase on both sides
+(`drive_llander_single.lua` has it as `LL_EFFECT=crash`), so the comparison is
+of what the game does rather than of a hold it never makes.
+
 `C27` was missed because the solver reports time constants and DC gains, and
 every figure in this section needs a frequency response. The netlist has had
 `C27` all along.

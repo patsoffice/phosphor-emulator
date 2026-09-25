@@ -1,0 +1,74 @@
+schema = 1
+id = "llander/crash"
+target = "llander-discrete"
+duration_s = 4.5
+description = "A crash as the game plays it: the explosion over a throttle stepped from 7 to 0"
+
+# THE GAME'S OWN SEQUENCE, from tools/sound-reference/trace_llander_writes.lua,
+# which logged three crashes that agree to within a few milliseconds. The
+# lander descends at throttle 1 with the pedal released; at impact the game
+# writes 0x0f (explosion and throttle 7) and steps the throttle down one notch
+# at a time, the first after 0.32 s and then every ~0.41 s, reaching 0x08 at
+# 2.81 s. Offsets are the first traced crash's, relative to the impact at 1.0 s.
+#
+# This is the scenario that says how a crash SOUNDS. llander/explosion holds
+# throttle 7 with the explosion indefinitely, which the game never does for more
+# than 0.32 s, so it is a stress case for headroom rather than a description of
+# the game. Because the thrust has no gate of its own, most of this capture is
+# the thrust's roar fading; the explosion leg rides on it.
+[[action]]
+at_s = 0.5
+control = "thrust-data"
+value = 1
+
+[[action]]
+at_s = 1.0
+control = "explosion"
+value = true
+
+[[action]]
+at_s = 1.0
+control = "thrust-data"
+value = 7
+
+[[action]]
+at_s = 1.3228
+control = "thrust-data"
+value = 6
+
+[[action]]
+at_s = 1.7319
+control = "thrust-data"
+value = 5
+
+[[action]]
+at_s = 2.1435
+control = "thrust-data"
+value = 4
+
+[[action]]
+at_s = 2.5553
+control = "thrust-data"
+value = 3
+
+[[action]]
+at_s = 2.9722
+control = "thrust-data"
+value = 2
+
+[[action]]
+at_s = 3.3894
+control = "thrust-data"
+value = 1
+
+[[action]]
+at_s = 3.8081
+control = "thrust-data"
+value = 0
+
+# Opens 50 ms before impact, so the window carries the step from the descent's
+# throttle-1 rumble into the crash, and runs past the last step into the silence
+# the open legs leave.
+[analysis]
+start_s = 0.95
+end_s = 4.5
