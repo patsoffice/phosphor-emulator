@@ -137,6 +137,14 @@ thrust is also darker thrust.
 > one setting of eight, and the DC-gain column replaces the multiply, which is
 > right at two. Tracked as `phosphor-emulator-b72s`.
 >
+> **Done, and from the solver rather than from this table.**
+> [`netlists/llander-audio.derive.toml`](netlists/llander-audio.derive.toml)
+> solves the whole board once per setting and writes each setting's `C15` time
+> constant and DC gain to `machines/src/llander_sound_derived.rs`, which the
+> device's `Throttle` component indexes by the 3-bit value. The spec holds the
+> band-pass's inverting input at its virtual ground, so its figures are the
+> 11.4774 ms and 2.1783 ms of the next paragraph rather than the open-pin ones.
+>
 > **The op-amp being open in the solver does not carry this.** The band-pass
 > input is a virtual ground in the real circuit and an open pin in the model,
 > which changes the load on the common node through `R22`. Holding `R7` pin 6
@@ -163,7 +171,8 @@ independent netlist of this board uses for a *fixed* RC ahead of a *linear*
 volume multiply. That netlist is therefore correct at full throttle and wrong
 everywhere else, and so is the model built from it.
 
-Two consequences follow, and neither is modelled today:
+Two consequences follow, and both are now modeled (see the measurement after
+this list):
 
 - **The volume law is not linear.** Weighted by conductance at the band centre,
   where C15's impedance is comparable to the switched resistance, throttle 1
@@ -173,6 +182,22 @@ Two consequences follow, and neither is modelled today:
   setting the same spectrum, which is what both our capture and the reference
   show: their band shares agree to 0.15 pp at throttle 7 and at throttle 1
   alike, and the reference's throttle-1 RMS is exactly 1/7 of its throttle-7.
+
+> **Measured with the board's throttle in the device**, against a fresh 192 kHz
+> reference capture band-limited to 44.1 kHz:
+>
+> | scenario | level vs reference, before | after | centroid delta, after | 0-150 Hz share delta, after |
+> |---|---|---|---|---|
+> | `llander/thrust`, setting 7 | -0.44 dB | -0.29 dB | +0.9 Hz | -0.18 pp |
+> | `llander/thrust-low`, setting 1 | -0.44 dB | **+2.58 dB** | **-3.5 Hz** | **+0.47 pp** |
+>
+> Full throttle barely moves, since only its corner changed, from 71 to 73 Hz.
+> Throttle 1 is now louder and darker than the reference by the amount the
+> drawing predicts, and the reference is the side without the mechanism. Inside
+> the device, each setting's level against full is within 0.25 dB of the
+> solver's 89.5 Hz column above (throttle 1 at -14.04 dB against -14.29), and
+> `the_throttle_is_the_boards_switched_resistors_not_a_linear_control` holds
+> throttles 1 and 2 between the board's law and the linear one.
 
 ## The band-pass, which is the rumble
 

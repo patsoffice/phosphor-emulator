@@ -13,19 +13,20 @@
 //! [`docs/schematics/llander-audio-output.md`](../../docs/schematics/llander-audio-output.md).
 //! Every component value named below is from that sheet.
 //!
-//! # Known residual
+//! # The throttle is a filter as well as a volume
 //!
-//! **The throttle's three resistors also set the noise filter's corner**, and
-//! that is not modelled here: this builds one fixed 71 Hz corner (the value all
-//! three switches closed give) and then multiplies by a linear volume. On the
-//! board, closing only the 15k leg moves the corner to 10.6 Hz, so quieter
-//! thrust is also darker thrust, and the volume law is compressed rather than
-//! linear -- throttle 1 sits about 2.6 dB above where a linear DAC puts it.
+//! The three switched resistors that set the thrust's volume also set the
+//! corner of the low-pass `C15` makes on their common node, so quieter thrust
+//! is darker thrust: 73 Hz at full throttle, 14 Hz at throttle 1. The volume
+//! law is compressed rather than linear, putting throttle 1 about 2.6 dB above
+//! where a linear control would. [`Throttle`] takes each setting's time
+//! constant and gain from `llander_sound_derived.rs`, which `netlist derive`
+//! solves from the board's transcription.
 //!
-//! This cannot be found by comparison, which is why it is written down here. The
-//! reference netlist has the identical gap, so both sides agree to 0.15
-//! percentage points on every band at every throttle setting, and both are
-//! wrong in the same way. Only the drawing says so.
+//! No comparison against the reference can check this. Its netlist has a fixed
+//! corner and a linear volume, as this device did, so the two agreed to 0.15
+//! percentage points on every band at every setting while both were wrong in
+//! the same way. Only the drawing says so.
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
@@ -100,6 +101,86 @@ impl CustomComponent for LanderNoise {
 }
 
 // ---------------------------------------------------------------------------
+// The throttle: three switched legs and C15 on one node (custom component)
+// ---------------------------------------------------------------------------
+
+// Solved from the transcription by `netlist derive`; see the file's header for
+// how to regenerate it.
+#[path = "llander_sound_derived.rs"]
+mod derived;
+
+/// Each throttle setting's `C15` time constant, indexed by the 3-bit value.
+const THROTTLE_TAU: [f64; 8] = [
+    derived::THROTTLE_0_C15_TAU,
+    derived::THROTTLE_1_C15_TAU,
+    derived::THROTTLE_2_C15_TAU,
+    derived::THROTTLE_3_C15_TAU,
+    derived::THROTTLE_4_C15_TAU,
+    derived::THROTTLE_5_C15_TAU,
+    derived::THROTTLE_6_C15_TAU,
+    derived::THROTTLE_7_C15_TAU,
+];
+
+/// Each throttle setting's DC gain from the noise to the common node.
+const THROTTLE_GAIN: [f64; 8] = [
+    derived::THROTTLE_0_GAIN,
+    derived::THROTTLE_1_GAIN,
+    derived::THROTTLE_2_GAIN,
+    derived::THROTTLE_3_GAIN,
+    derived::THROTTLE_4_GAIN,
+    derived::THROTTLE_5_GAIN,
+    derived::THROTTLE_6_GAIN,
+    derived::THROTTLE_7_GAIN,
+];
+
+/// The common node the throttle legs drive, relative to +5 V, as a one-pole
+/// section whose time constant and gain both come from the setting.
+///
+/// Neither is linear in the setting, because the legs are resistors in
+/// parallel: throttle 1 is `R18` alone at 11.5 ms, throttle 7 is all three at
+/// 2.2 ms. Throttle 0 opens every leg, and the node then drains toward +5 V
+/// through the band-pass input at 48 ms rather than stopping, which is why the
+/// state is carried across a change of setting instead of being reset.
+///
+/// The output is scaled so that full throttle has unity gain.
+/// `THRUST_IN_GAIN` and `THRUST_OUT_GAIN` were fitted against a node that was
+/// the filtered noise at full throttle, and this keeps them meaning what they
+/// were fitted to; `phosphor-emulator-b72s` item 2 replaces both, and the
+/// scaling with them. The real 0.955 at full throttle is inside that fit.
+///
+/// A custom component because the builder's one-pole sections have a fixed
+/// time constant, and this one switches with a register write. The update is
+/// the same backward-Euler step `RcLowPass` takes.
+///
+/// Inputs: `[noise, throttle setting 0..=7]`.
+struct Throttle {
+    y: f64,
+}
+
+impl CustomComponent for Throttle {
+    fn reset(&mut self) {
+        self.y = 0.0;
+    }
+
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        let setting = (inputs[1].round() as usize).min(7);
+        let target = inputs[0] * THROTTLE_GAIN[setting] / THROTTLE_GAIN[7];
+        let alpha = dt / (THROTTLE_TAU[setting] + dt);
+        self.y += alpha * (target - self.y);
+        self.y
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.y);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.y = r.read_f64_le()?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Typed input handles + node ids for debug
 // ---------------------------------------------------------------------------
 
@@ -131,9 +212,9 @@ const LVL_EXPLOSION: f64 = 1000.0;
 
 // STILL FITTED, both of them, and both should come out of the drawing.
 //
-// THRUST_IN_GAIN sets the noise*throttle amplitude feeding the unfiltered
-// explosion path; the thrust band-pass instead takes the normalized
-// throttle*noise, and THRUST_OUT_GAIN supplies its post-filter make-up. The
+// THRUST_IN_GAIN scales the throttle's common node into the unfiltered
+// explosion path; the thrust band-pass instead takes the node as it is, and
+// THRUST_OUT_GAIN supplies its post-filter make-up. The
 // board has no counterpart for either: the explosion leg is R21 1.5k in series
 // with C91 47nF, and the thrust leg is R28 6.8k, so their ratio is set by two
 // resistors and a coupling capacitor rather than by these two numbers. The
@@ -150,13 +231,13 @@ fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
     );
 
     // --- Board-facing inputs ---
-    let thrust_data = b.data_input("THRUST_DATA", 1.0); // normalized 0..1 (data/7)
+    let thrust_data = b.data_input("THRUST_DATA", 1.0); // the 3-bit setting, 0..=7
     let tone3k_en = b.logic_input("TONE3K_EN");
     let tone6k_en = b.logic_input("TONE6K_EN");
     let explod_en = b.logic_input("EXPLOD_EN");
     let noise_reset = b.pulse_input("NOISE_RESET");
 
-    // --- Shared noise -> RC low-pass (~71 Hz) ---
+    // --- Shared noise -> the throttle's common node ---
     let noise = b.custom(
         "NOISE",
         vec![noise_reset.into()],
@@ -165,17 +246,20 @@ fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
             clock_acc: 0.0,
         }),
     );
-    let noise_rc = b.rc_low_pass("NOISE_RC", noise, 2_247.0, 1e-6);
+    let common = b.custom(
+        "THROTTLE",
+        vec![noise, thrust_data.into()],
+        Box::new(Throttle { y: 0.0 }),
+    );
 
-    // --- Thrust: noise scaled by the 3-bit throttle, through a resonant op-amp
+    // --- Thrust: the common node through a resonant op-amp
     // multiple-feedback band-pass (R_in 1.17k / R_f 270k / C 0.1uF -> fc ~89.5 Hz,
     // Q ~7.6). The band-pass's component-set gain (center Rf/2·Rin ≈ 115) provides
-    // the resonant make-up, so it takes the *normalized* throttle·noise — the
-    // amplified `thrust_amp` below would slam the op-amp into its rails. ---
-    let thrust_throttle = b.multiply("THRUST_THROTTLE", noise_rc, thrust_data);
+    // the resonant make-up, so it takes the unamplified node; the scaled
+    // `thrust_amp` below would slam the op-amp into its rails. ---
     let thrust_bp = b.op_amp_band_pass(
         "THRUST_BP",
-        thrust_throttle,
+        common,
         &[1_170.0],
         270_000.0,
         0.1e-6,
@@ -186,9 +270,10 @@ fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
     );
     let thrust_path = b.gain("THRUST_PATH", thrust_bp, THRUST_OUT_GAIN);
 
-    // --- Explosion: the same noise*throttle, scaled up (unfiltered) and gated ---
-    let thrust_in = b.gain("THRUST_IN", thrust_data, THRUST_IN_GAIN);
-    let thrust_amp = b.multiply("THRUST_AMP", noise_rc, thrust_in);
+    // --- Explosion: the same common node, scaled up (unfiltered) and gated. Its
+    // switch takes the node rather than the noise, so the throttle is its
+    // volume too. ---
+    let thrust_amp = b.gain("THRUST_AMP", common, THRUST_IN_GAIN);
     let explod_scaled = b.gain("EXPLOD_SCALED", thrust_amp, LVL_EXPLOSION / LVL_THRUST);
     let explod_gated = b.multiply("EXPLOD_GATE", explod_scaled, explod_en);
 
@@ -285,7 +370,7 @@ impl LunarLanderDiscreteSound {
     pub fn write_sound_register(&mut self, data: u8) {
         self.sound_reg = data;
         self.circuit
-            .set_data(self.ids.thrust_data, (data & 0x07) as f64 / 7.0);
+            .set_data(self.ids.thrust_data, (data & 0x07) as f64);
         self.circuit.set_logic(self.ids.explod_en, data & 0x08 != 0);
         self.circuit.set_logic(self.ids.tone3k_en, data & 0x10 != 0);
         self.circuit.set_logic(self.ids.tone6k_en, data & 0x20 != 0);
@@ -521,17 +606,53 @@ mod tests {
             (-26.0..-16.0).contains(&thrust_dbfs),
             "full thrust measures {thrust_dbfs:.1} dBFS; the reference puts it at -21.0"
         );
+    }
 
-        // The throttle is a linear multiply, so a third of it is a third of the
-        // level. This is the check that would fail if the volume DAC were ever
-        // rebuilt as the board's three switched resistors, which is NOT linear
-        // and is the residual recorded against this device.
-        let quarter = level(0x02);
-        let ratio = db(thrust, quarter);
-        let linear = 20.0 * (7.0f64 / 2.0).log10();
+    /// The throttle's volume law, which is the board's three switched
+    /// resistors and not a linear control.
+    ///
+    /// Each setting's corner and DC gain come from the solved network, and at
+    /// the band-pass's 89.5 Hz center they put throttle 1 at 0.193 of full
+    /// (-14.3 dB) and throttle 2 at 0.345 (-9.2 dB). A linear control gives
+    /// -16.9 and -10.9. The windows sit between the two laws, so either
+    /// setting fails if the throttle goes back to a linear multiply.
+    ///
+    /// The thrust voice is band-passed noise, so its RMS is read over a longer
+    /// window than the balance test's; a second of it settles to well under
+    /// the 1.3 dB that separates the laws at throttle 1.
+    #[test]
+    fn the_throttle_is_the_boards_switched_resistors_not_a_linear_control() {
+        let level = |reg: u8| -> f64 {
+            let mut s = LunarLanderDiscreteSound::new();
+            s.write_sound_register(reg);
+            for _ in 0..30 {
+                run_frame(&mut s);
+            }
+            let mut discard = vec![0i16; 1 << 16];
+            while s.fill_audio(&mut discard) > 0 {}
+            let mut all = Vec::new();
+            let mut buf = vec![0i16; 1 << 16];
+            for _ in 0..60 {
+                run_frame(&mut s);
+                let n = s.fill_audio(&mut buf);
+                all.extend_from_slice(&buf[..n]);
+            }
+            let mean = all.iter().map(|&v| v as f64).sum::<f64>() / all.len() as f64;
+            let ac: f64 = all.iter().map(|&v| (v as f64 - mean).powi(2)).sum();
+            (ac / all.len() as f64).sqrt()
+        };
+        let full = level(0x07);
+        let db = |reg: u8| 20.0 * (level(reg) / full).log10();
+
+        let one = db(0x01);
         assert!(
-            (ratio - linear).abs() < 1.0,
-            "throttle 7 over throttle 2 measured {ratio:.2} dB, a linear DAC gives {linear:.2}"
+            (-15.6..-13.0).contains(&one),
+            "throttle 1 sits {one:.2} dB under full; the board gives -14.3, a linear control -16.9"
+        );
+        let two = db(0x02);
+        assert!(
+            (-10.0..-8.4).contains(&two),
+            "throttle 2 sits {two:.2} dB under full; the board gives -9.2, a linear control -10.9"
         );
     }
 

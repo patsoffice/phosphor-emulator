@@ -63,8 +63,12 @@ pub struct Spec {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
-    /// The parts' `group`.
-    pub group: String,
+    /// The parts' `group`, or the whole board when absent. A quantity that
+    /// depends on a load drawn in another group needs the whole board: Lunar
+    /// Lander's throttle corner is set as much by the band-pass input's 48.2k
+    /// as by the throttle resistors themselves.
+    #[serde(default)]
+    pub group: Option<String>,
     /// Nets held by parts the solver does not model, as in `netlist solve
     /// --drive`.
     #[serde(default)]
@@ -75,6 +79,9 @@ pub struct Scenario {
     /// How far one node moves per volt of another, within one mode.
     #[serde(default)]
     pub share: Vec<Share>,
+    /// How far a node moves at DC per volt of a driven net.
+    #[serde(default)]
+    pub gain: Vec<Gain>,
 }
 
 /// A constant that is one mode's time constant.
@@ -100,6 +107,21 @@ pub struct Share {
     /// The node that follows.
     pub node: String,
     /// The node it follows.
+    pub per: String,
+}
+
+/// A constant that is one node's DC displacement per volt of a driven net: the
+/// gain a device applies ahead of a one-pole section whose time constant is a
+/// [`Tau`] from the same scenario. Found by solving the operating point twice,
+/// a volt apart, so the other drives and the rails drop out of it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gain {
+    /// The Rust constant.
+    pub name: String,
+    /// The node that follows.
+    pub node: String,
+    /// The driven net it follows. It must be one of the scenario's `drives`.
     pub per: String,
 }
 
@@ -147,6 +169,32 @@ fn at(mode: &Mode, net: &str) -> Result<f64, String> {
         .find(|(name, _)| name == net)
         .map(|(_, v)| *v)
         .ok_or_else(|| format!("`{net}` is not a free node of the solved network"))
+}
+
+/// How far `node` moves at DC per volt of the driven net `per`.
+fn dc_gain(netlist: &Netlist, scenario: &Scenario, gain: &Gain) -> Result<f64, String> {
+    let Some(&volts) = scenario.drives.get(&gain.per) else {
+        return Err(format!(
+            "`{}` is not driven in this scenario, and a gain is taken per volt of a drive",
+            gain.per
+        ));
+    };
+    let solve = |drive: f64| -> Result<f64, String> {
+        let mut drives = scenario.drives.clone();
+        drives.insert(gain.per.clone(), drive);
+        let setup = Setup {
+            drives,
+            ..Setup::default()
+        };
+        let network = Network::build(netlist, &setup).map_err(|e| e.join("; "))?;
+        network
+            .dc()?
+            .into_iter()
+            .find(|(net, _)| *net == gain.node)
+            .map(|(_, v)| v)
+            .ok_or_else(|| format!("`{}` is not a free node of the solved network", gain.node))
+    };
+    Ok(solve(volts + 1.0)? - solve(volts)?)
 }
 
 /// The scenario's drives, as the header and doc comments say them.
@@ -218,16 +266,23 @@ pub fn render(spec: &Spec, spec_path: &Path, netlist: &Netlist) -> Result<String
     .unwrap();
 
     for scenario in &spec.scenarios {
-        let subset = netlist.subset(&scenario.group);
-        if subset.parts.is_empty() {
-            errors.push(format!("no parts in group `{}`", scenario.group));
-            continue;
-        }
+        let excerpt;
+        let subset = match &scenario.group {
+            Some(group) => {
+                excerpt = netlist.subset(group);
+                if excerpt.parts.is_empty() {
+                    errors.push(format!("no parts in group `{group}`"));
+                    continue;
+                }
+                &excerpt
+            }
+            None => netlist,
+        };
         let setup = Setup {
             drives: scenario.drives.clone(),
             ..Setup::default()
         };
-        let network = match Network::build(&subset, &setup) {
+        let network = match Network::build(subset, &setup) {
             Ok(network) => network,
             Err(problems) => {
                 errors.extend(problems);
@@ -241,7 +296,10 @@ pub fn render(spec: &Spec, spec_path: &Path, netlist: &Netlist) -> Result<String
                 continue;
             }
         };
-        let context = format!("group `{}`, {}", scenario.group, held(scenario));
+        let context = match &scenario.group {
+            Some(group) => format!("group `{group}`, {}", held(scenario)),
+            None => format!("the whole board, {}", held(scenario)),
+        };
 
         for tau in &scenario.tau {
             match mode_of(&modes, &tau.mode_of) {
@@ -295,13 +353,64 @@ pub(super) const {}: f64 = {ratio:.5};",
                 Err(e) => errors.push(format!("{}: {e}", share.name)),
             }
         }
+
+        for gain in &scenario.gain {
+            match dc_gain(subset, scenario, gain) {
+                Ok(ratio) => {
+                    writeln!(
+                        out,
+                        "
+/// How far `{}` moves at DC per volt of `{}`: {context}.
+pub(super) const {}: f64 = {ratio:.5};",
+                        gain.node, gain.per, gain.name,
+                    )
+                    .unwrap();
+                }
+                Err(e) => errors.push(format!("{}: {e}", gain.name)),
+            }
+        }
     }
 
     if errors.is_empty() {
-        Ok(out)
+        Ok(wrap_doc_lines(&out))
     } else {
         Err(errors)
     }
+}
+
+/// Rewrap any `///` line longer than [`DOC_WIDTH`] at word boundaries. A
+/// scenario holding several drives says them all in one sentence, and rustfmt
+/// leaves comments alone. Shorter lines pass through untouched, so a spec whose
+/// sentences already fit generates the same bytes it always did.
+fn wrap_doc_lines(text: &str) -> String {
+    const DOC_WIDTH: usize = 80;
+    const PREFIX: &str = "/// ";
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        match line.strip_prefix(PREFIX) {
+            Some(body) if line.len() > DOC_WIDTH => {
+                let mut current = String::from(PREFIX);
+                for word in body.split(' ') {
+                    if current.len() > PREFIX.len() && current.len() + 1 + word.len() > DOC_WIDTH {
+                        out.push_str(&current);
+                        out.push('\n');
+                        current = String::from(PREFIX);
+                    }
+                    if current.len() > PREFIX.len() {
+                        current.push(' ');
+                    }
+                    current.push_str(word);
+                }
+                out.push_str(&current);
+                out.push('\n');
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -363,7 +472,7 @@ on = ["C1.b", "C2.b"]
             out: "t.rs".into(),
             device: "t.rs".into(),
             scenarios: vec![Scenario {
-                group: "g".into(),
+                group: Some("g".into()),
                 drives: BTreeMap::new(),
                 tau: tau
                     .iter()
@@ -381,8 +490,130 @@ on = ["C1.b", "C2.b"]
                         per: (*per).into(),
                     })
                     .collect(),
+                gain: Vec::new(),
             }],
         }
+    }
+
+    /// A divider from a driven net, with a capacitor on its tap and a load in
+    /// a second group, so a gain and a whole-board scenario can be tested
+    /// without either being the other's premise.
+    const DIVIDER: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "R1"
+kind = "R"
+group = "g"
+kohms = 10
+
+[[parts]]
+ref = "C1"
+kind = "C"
+group = "g"
+uf = 1.0
+
+[[parts]]
+ref = "R2"
+kind = "R"
+group = "load"
+kohms = 30
+
+[[nets]]
+name = "in"
+on = ["R1.a"]
+
+[[nets]]
+name = "tap"
+on = ["R1.b", "C1.a", "R2.a"]
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["C1.b", "R2.b"]
+"#;
+
+    fn divider_spec(group: Option<&str>, per: &str) -> Spec {
+        Spec {
+            netlist: "t.toml".into(),
+            out: "t.rs".into(),
+            device: "t.rs".into(),
+            scenarios: vec![Scenario {
+                group: group.map(Into::into),
+                drives: BTreeMap::from([("in".to_string(), 3.8)]),
+                tau: vec![Tau {
+                    name: "TAU".into(),
+                    mode_of: "C1".into(),
+                }],
+                share: Vec::new(),
+                gain: vec![Gain {
+                    name: "GAIN".into(),
+                    node: "tap".into(),
+                    per: per.into(),
+                }],
+            }],
+        }
+    }
+
+    fn constant(text: &str, name: &str) -> f64 {
+        let line = text
+            .lines()
+            .find(|l| l.contains(&format!("const {name}:")))
+            .unwrap();
+        let rhs = line.split('=').nth(1).unwrap();
+        rhs.split(';').next().unwrap().trim().parse().unwrap()
+    }
+
+    /// With no group the load in the other group is part of the network, so
+    /// both the gain and the time constant see it: 30/40 and 10k || 30k.
+    #[test]
+    fn a_whole_board_scenario_sees_a_load_drawn_in_another_group() {
+        let netlist = Netlist::parse(DIVIDER).unwrap();
+        let text = render(
+            &divider_spec(None, "in"),
+            Path::new("t.derive.toml"),
+            &netlist,
+        )
+        .unwrap();
+        assert!((constant(&text, "GAIN") - 0.75).abs() < 1e-5, "{text}");
+        assert!(
+            (constant(&text, "TAU") - 7.5e-3).abs() / 7.5e-3 < 1e-4,
+            "{text}"
+        );
+        assert!(text.contains("the whole board"), "{text}");
+    }
+
+    /// The same spec keyed to the group alone loses the load, and says so in
+    /// its numbers: unity gain and 10k by itself.
+    #[test]
+    fn a_group_scenario_does_not() {
+        let netlist = Netlist::parse(DIVIDER).unwrap();
+        let text = render(
+            &divider_spec(Some("g"), "in"),
+            Path::new("t.derive.toml"),
+            &netlist,
+        )
+        .unwrap();
+        assert!((constant(&text, "GAIN") - 1.0).abs() < 1e-5, "{text}");
+        assert!(
+            (constant(&text, "TAU") - 10e-3).abs() / 10e-3 < 1e-4,
+            "{text}"
+        );
+    }
+
+    /// A gain is per volt of a drive, so one taken per volt of anything else
+    /// is refused rather than computed against a net nothing holds.
+    #[test]
+    fn a_gain_per_an_undriven_net_is_refused() {
+        let netlist = Netlist::parse(DIVIDER).unwrap();
+        let errors = render(
+            &divider_spec(None, "tap"),
+            Path::new("t.derive.toml"),
+            &netlist,
+        )
+        .unwrap_err();
+        assert!(errors[0].contains("is not driven"), "{errors:?}");
     }
 
     /// The fast capacitor's mode is `C1` against `R1` with `C2` a short, and

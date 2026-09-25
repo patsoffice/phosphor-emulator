@@ -10,14 +10,18 @@ description = "Rocket thrust at its lowest throttle, held for two seconds"
 # The board's throttle is not a DAC feeding a fixed filter. It is three analog
 # switches putting 15k, 8.2k and 3.9k in parallel between the noise source and a
 # 1 uF capacitor, so the SAME resistors set the volume and the noise low-pass
-# corner. All three closed is 2247 ohms and a 71 Hz corner; this scenario closes
-# only the 15k, which is a 10.6 Hz corner. On the board, quieter thrust is also
-# darker thrust.
+# corner. Solved with the band-pass input's load on the same node, all three
+# closed is a 73.1 Hz corner; this scenario closes only the 15k, which is
+# 13.9 Hz. On the board, quieter thrust is also darker thrust.
 #
-# Neither the netlist nor this model has that: both filter at a fixed 71 Hz and
-# then multiply by a linear volume. The prediction, if the model is missing it,
-# is that our low throttle measures BRIGHTER than the board's while the full
-# throttle agrees. See docs/schematics/llander-audio-output.md.
+# The reference netlist does not have that: it filters at a fixed corner and
+# then multiplies by a linear volume, as this model did until
+# phosphor-emulator-b72s item 1. So THIS SCENARIO NOW DISAGREES WITH THE
+# REFERENCE ON PURPOSE, and the disagreement is the check. With the board's
+# throttle it measured +2.58 dB against the reference, with the centroid 3.5 Hz
+# lower and the 0-150 Hz share 0.47 points higher, where llander/thrust still
+# agrees to 0.29 dB. Before the change it measured -0.44 dB, the same offset as
+# full throttle. See docs/schematics/llander-audio-output.md.
 [[action]]
 at_s = 1.0
 control = "thrust-data"

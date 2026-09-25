@@ -13,11 +13,12 @@
 //! out which stage each is standing in for.
 //!
 //! The schematic is now transcribed at `docs/schematics/llander-audio-output.md`,
-//! and it names two mechanisms this model does not have. Both are visible from
-//! the probes here: the thrust volume and the noise low-pass corner are the SAME
-//! three resistors, so quieter thrust is also darker thrust; and the two board
-//! outputs are differential for thrust and explosion but single-ended for the
-//! tones, so the tones sit 6 dB lower against the rest than a summed mix says.
+//! and it named two mechanisms this model did not have. Both are now modeled:
+//! the thrust volume and the noise low-pass corner are the SAME three
+//! resistors, so quieter thrust is also darker thrust (`thrust-throttle` shows
+//! the corner moving with the setting); and the two board outputs are
+//! differential for thrust and explosion but single-ended for the tones, so the
+//! tones sit 6 dB lower against the rest than a summed mix says.
 
 use phosphor_core::device::DiscreteCircuit;
 use phosphor_machines::atari_dvg::TIMING;
@@ -77,21 +78,18 @@ pub static SPEC: TargetSpec = TargetSpec {
             name: "thrust-explod",
             description: "Thrust and explosion summed, after the shared 560 Hz low-pass",
         },
-        // The thrust chain, stage by stage. Four stages all move the same bands
-        // at the output -- the noise source, its pre-filter, the volume
-        // multiply, and the resonant band-pass that makes the rumble -- so an
-        // output comparison cannot separate them and will accuse the last one.
+        // The thrust chain, stage by stage. Three stages all move the same bands
+        // at the output (the noise source, the throttle's switched low-pass,
+        // and the resonant band-pass that makes the rumble), so an output
+        // comparison cannot separate them and will accuse the last one.
         ProbeSpec {
             name: "noise",
             description: "12 kHz shift-register noise, before any filtering (+/-1)",
         },
         ProbeSpec {
-            name: "noise-rc",
-            description: "Noise after its 71 Hz RC pre-filter (+/-1)",
-        },
-        ProbeSpec {
             name: "thrust-throttle",
-            description: "Noise scaled by the throttle, the band-pass's input (+/-1)",
+            description: "The throttle's common node, the band-pass's input: the noise through \
+                          the setting's own corner and gain, unity at full throttle (+/-1)",
         },
         ProbeSpec {
             name: "thrust-bp",
@@ -228,8 +226,7 @@ fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
         "thrust-explod" => ("THRUST_EXPLOD", MIX),
         "explosion-noise" => ("EXPLOD_SCALED", MIX),
         "noise" => ("NOISE", 1.0),
-        "noise-rc" => ("NOISE_RC", 1.0),
-        "thrust-throttle" => ("THRUST_THROTTLE", 1.0),
+        "thrust-throttle" => ("THROTTLE", 1.0),
         "thrust-bp" => ("THRUST_BP", 12.0),
         _ => return None,
     };

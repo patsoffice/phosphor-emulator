@@ -1,0 +1,139 @@
+# What `machines/src/llander_sound.rs` takes from the solver rather than from
+# a hand derivation. Regenerate with
+#
+#     cargo run -p phosphor-netlist -- derive docs/schematics/netlists/llander-audio.derive.toml
+#
+# and `tools/netlist/tests/llander_derive_test.rs` fails while the output is
+# stale.
+#
+# THE THROTTLE, one scenario per setting. Three 4066 legs, R18 15k, R20 8.2k and
+# R19 3.9k, join the noise to the common node, and C15 1uF holds that node
+# against +5 V. The same resistors set the volume and the corner, so each
+# setting has its own time constant and its own gain, and neither is linear in
+# the setting. That is the board's finding and the reason this file exists:
+# the reference netlist has a fixed corner and a linear volume, the same as the
+# device had, so no comparison between them could see it.
+#
+# WHOLE BOARD, NOT A GROUP. The corner depends on the band-pass input's 48.2k
+# path to +5 V (R22 into R26) loading the common node, and those parts are in
+# group `band-pass`. Solving `throttle` alone leaves that load out and puts
+# throttle 1's corner 31 percent low, which is the error the prose made by hand.
+#
+# THE DRIVES. `noise out` is the register's output; its level cancels out of
+# every constant here, since a gain is per volt of it and a time constant does
+# not depend on it. AUD0 to AUD2 are the throttle bits, 5 V to close a leg.
+# AUD3 is the explosion switch, held open: its leg is R21 into C91, which
+# blocks DC and is 21 times smaller than C15, so it does not set these. The
+# band-pass's inverting input is held at +5 V because that is where the op-amp
+# holds it; the solver would otherwise leave it open, which moves the corner by
+# under a tenth of a percent.
+
+netlist = "llander-audio.toml"
+out = "../../../machines/src/llander_sound_derived.rs"
+device = "machines/src/llander_sound.rs"
+
+# Throttle 0, every leg open. Nothing drives the node, so the gain is zero and
+# the time constant is how fast the last setting's level drains away through
+# the band-pass input.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 0.0, AUD1 = 0.0, AUD2 = 0.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_0_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_0_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 1, R18 alone.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 5.0, AUD1 = 0.0, AUD2 = 0.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_1_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_1_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 2, R20 alone.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 0.0, AUD1 = 5.0, AUD2 = 0.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_2_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_2_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 3, R18 and R20.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 5.0, AUD1 = 5.0, AUD2 = 0.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_3_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_3_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 4, R19 alone.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 0.0, AUD1 = 0.0, AUD2 = 5.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_4_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_4_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 5, R19 and R18.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 5.0, AUD1 = 0.0, AUD2 = 5.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_5_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_5_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 6, R19 and R20.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 0.0, AUD1 = 5.0, AUD2 = 5.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_6_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_6_GAIN"
+node = "common node"
+per = "noise out"
+
+# Throttle 7, all three.
+[[scenarios]]
+drives = { "noise out" = 3.8, AUD0 = 5.0, AUD1 = 5.0, AUD2 = 5.0, AUD3 = 0.0, "R7b summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THROTTLE_7_C15_TAU"
+mode_of = "C15"
+
+[[scenarios.gain]]
+name = "THROTTLE_7_GAIN"
+node = "common node"
+per = "noise out"

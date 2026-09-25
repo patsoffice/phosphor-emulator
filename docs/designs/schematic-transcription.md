@@ -679,6 +679,30 @@ mechanism works where a voice's derivation is a passive network the
 transcription holds; it does not say how many voices on this board or the fleet
 are that shape.
 
+### Second use: Lunar Lander's throttle
+
+`phosphor-emulator-b72s` item 1 is the first use past the shot, and it needed
+two things the shot did not.
+
+- **A scenario over the whole board.** The throttle's corner is set as much by
+  the band-pass input's 48.2 kOhm as by the throttle resistors, and those parts
+  are in another group. A scenario may now omit `group`. Solving `throttle` alone
+  would have put throttle 1's corner 31 percent low, the same error the prose
+  made by hand, so a group boundary is itself a judgment about which load is
+  negligible.
+- **A DC gain.** The throttle sets a level as well as a corner, and a `share` is
+  a ratio within one mode, not a level. A `gain` is a node's operating-point
+  displacement per volt of a drive, found by solving twice a volt apart.
+
+Eight scenarios, one per setting, write sixteen constants to
+`llander_sound_derived.rs`; every mode keeps 98.9 percent or more of its energy
+in `C15`. The device measured afterwards is in
+[the board's transcription](../schematics/llander-audio-output.md). That device
+was the one "One thing does not generalize" found naming no part at all, and
+`lint --device` now counts one, `C15`, through the generated names. The three
+throttle resistors still come back as not modeled, for the reason `C88` would
+have without the name rule: they reach the device only through the solver.
+
 ## Kill criterion
 
 **After rungs 2 and 3, check two things.** Do the lints flag `C94` and its

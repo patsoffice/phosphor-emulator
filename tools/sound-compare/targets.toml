@@ -226,11 +226,17 @@ the same peak-to-peak convention was missed again on the tone gain, which put th
 tones a further 6 dB out of balance. Both are now derived from the drawing,
 transcribed at docs/schematics/llander-audio-output.md.
 
-Residuals, none of them findable by comparison because the reference shares them:
-the throttle's three resistors also set the noise filter's corner, so the board's
-quieter thrust is darker and its volume law is not linear; two make-up gains are
-still fitted; and the explosion clips 9.5 % of samples where the reference clips
-9.9 %, which the board would not. All three in phosphor-emulator-b72s."""
+The throttle is now the board's: its three resistors set the noise filter's
+corner as well as the volume, with each setting's time constant and gain solved
+from the transcription by `netlist derive`. So llander/thrust-low now DIFFERS
+from the reference by design, +2.58 dB and 3.5 Hz darker, where full throttle
+still agrees to 0.29 dB. The reference has a fixed corner and a linear volume;
+the drawing does not.
+
+Residuals, neither findable by comparison because the reference shares them: two
+make-up gains are still fitted, and the explosion clips 9.5 % of samples where
+the reference clips 9.9 %, which the board would not. Both in
+phosphor-emulator-b72s."""
 
 # ---------------------------------------------------------------------------
 # Implemented, but no comparison
