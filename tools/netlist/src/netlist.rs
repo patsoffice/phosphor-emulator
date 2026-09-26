@@ -276,6 +276,26 @@ pub struct Section {
     /// `4016B` gates four different voices. So the unit a drawing is cut along
     /// is the section and not the part. Falls back to the part's own `group`.
     pub group: Option<String>,
+    /// Which of this section's pins are an op-amp's inputs and output, where
+    /// it is one.
+    ///
+    /// The one electrical field on a section. It is a reading rather than a
+    /// pinout the tool knows, because the drawing marks `+` and `-` at the
+    /// symbol, and it is what lets the solver treat the section as an ideal
+    /// op-amp rather than as open pins.
+    pub op_amp: Option<OpAmpPins>,
+}
+
+/// An op-amp section's three signal pins, as the symbol marks them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpAmpPins {
+    /// The non-inverting input, marked `+`.
+    pub plus: String,
+    /// The inverting input, marked `-`.
+    pub minus: String,
+    /// The output.
+    pub out: String,
 }
 
 /// One part on the sheet.
@@ -816,6 +836,31 @@ impl Netlist {
                         ));
                     }
                     sectioned.push(pin);
+                }
+                if let Some(op_amp) = &section.op_amp {
+                    let roles = [
+                        ("plus", &op_amp.plus),
+                        ("minus", &op_amp.minus),
+                        ("out", &op_amp.out),
+                    ];
+                    for (role, pin) in roles {
+                        if !section.pins.contains(pin) {
+                            problems.push(format!(
+                                "{}: section {} gives its op-amp {role} as pin {pin}, which is \
+                                 not one of the section's pins",
+                                part.designator, section.name
+                            ));
+                        }
+                    }
+                    if op_amp.plus == op_amp.minus
+                        || op_amp.plus == op_amp.out
+                        || op_amp.minus == op_amp.out
+                    {
+                        problems.push(format!(
+                            "{}: section {} gives one pin two op-amp roles",
+                            part.designator, section.name
+                        ));
+                    }
                 }
             }
             // A switch names three pins and joins exactly two of them. Getting
@@ -1467,6 +1512,33 @@ on = ["R144.a"]
         let problems = Netlist::parse(text).unwrap_err();
         assert!(
             problems.iter().any(|p| p.contains("on 2 nets at once")),
+            "{problems:?}"
+        );
+    }
+
+    /// An op-amp's roles are a reading of the symbol, so a role on a pin the
+    /// section does not own, or two roles on one pin, is a misreading and not
+    /// a circuit.
+    #[test]
+    fn an_op_amp_role_must_be_a_distinct_pin_of_its_section() {
+        let text = |roles: &str| {
+            format!(
+                "[board]\nname = \"t\"\n\n[[parts]]\nref = \"U1\"\nkind = \"U\"\n\
+                 device = \"LM324\"\npins = [\"5\", \"6\", \"7\", \"8\"]\n\n\
+                 [[parts.sections]]\nname = \"b\"\npins = [\"5\", \"6\", \"7\"]\n\
+                 op_amp = {{ {roles} }}\n"
+            )
+        };
+        let problems =
+            Netlist::parse(&text("plus = \"5\", minus = \"6\", out = \"8\"")).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("out as pin 8")),
+            "{problems:?}"
+        );
+        let problems =
+            Netlist::parse(&text("plus = \"5\", minus = \"5\", out = \"7\"")).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("two op-amp roles")),
             "{problems:?}"
         );
     }

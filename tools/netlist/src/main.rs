@@ -58,6 +58,23 @@ enum Command {
         /// as a voltage need no flag.
         #[arg(short, long, value_name = "NET=VOLTS")]
         rail: Vec<String>,
+        /// Solve each op-amp section whose transcription marks its `+`, `-`
+        /// and output as an ideal op-amp, rather than as open pins. The modes
+        /// are then not computed: they belong to the passive network.
+        #[arg(long)]
+        ideal_op_amps: bool,
+        /// Also give every free node's small-signal response per volt of this
+        /// held net, at the frequencies `--hz` names.
+        #[arg(long, value_name = "NET")]
+        ac: Option<String>,
+        /// The frequencies for `--ac`, in hertz, comma separated.
+        #[arg(
+            long,
+            value_name = "HZ,...",
+            value_delimiter = ',',
+            default_value = "10,100,1000,10000"
+        )]
+        hz: Vec<f64>,
     },
     /// Solve the networks a derive spec names and write the device constants
     /// they give, as Rust. The spec says which capacitor's mode each constant
@@ -117,8 +134,21 @@ fn main() -> ExitCode {
         },
         Command::Lint { device, .. } => lint(&netlist, device.as_deref()),
         Command::Solve {
-            group, drive, rail, ..
-        } => solve(&netlist, group.as_deref(), drive, rail),
+            group,
+            drive,
+            rail,
+            ideal_op_amps,
+            ac,
+            hz,
+            ..
+        } => solve(
+            &netlist,
+            group.as_deref(),
+            drive,
+            rail,
+            *ideal_op_amps,
+            ac.as_deref().map(|net| (net, hz.as_slice())),
+        ),
         Command::Derive { .. } => unreachable!("dispatched before a netlist is loaded"),
     }
 }
@@ -183,12 +213,22 @@ fn cut(netlist: &Netlist, group: Option<&str>) -> Option<Netlist> {
 /// to say it. The assumptions are not an appendix: a time constant computed
 /// with the wrong pin held open is a wrong answer that looks like a right one,
 /// so the list of opened pins prints before the numbers do.
-fn solve(netlist: &Netlist, group: Option<&str>, drive: &[String], rail: &[String]) -> ExitCode {
+fn solve(
+    netlist: &Netlist,
+    group: Option<&str>,
+    drive: &[String],
+    rail: &[String],
+    ideal_op_amps: bool,
+    ac: Option<(&str, &[f64])>,
+) -> ExitCode {
     let Some(netlist) = cut(netlist, group) else {
         return ExitCode::FAILURE;
     };
 
-    let mut setup = solver::Setup::default();
+    let mut setup = solver::Setup {
+        ideal_op_amps,
+        ..solver::Setup::default()
+    };
     for (flag, given, into) in [
         ("--drive", drive, &mut setup.drives),
         ("--rail", rail, &mut setup.rails),
@@ -253,6 +293,13 @@ fn solve(netlist: &Netlist, group: Option<&str>, drive: &[String], rail: &[Strin
     println!("  resistors:  {}", network.resistors().join(", "));
     println!("  capacitors: {}", network.capacitors().join(", "));
 
+    if !network.op_amps.is_empty() {
+        println!("\nideal op-amps:");
+        for line in &network.op_amps {
+            println!("  {line}");
+        }
+    }
+
     // What the answer rests on. Printed before the answer, because a reader
     // whose question is about one of these pins has learned everything they
     // needed and can stop.
@@ -305,6 +352,37 @@ fn solve(netlist: &Netlist, group: Option<&str>, drive: &[String], rail: &[Strin
             }
         }
         Err(problem) => println!("\nnatural modes: {problem}"),
+    }
+
+    if let Some((source, hz)) = ac {
+        match network.ac(source, hz) {
+            Ok(points) => {
+                println!(
+                    "\nsmall-signal response per volt of `{source}`, every other held net at AC ground:"
+                );
+                for point in &points {
+                    println!("\n  {} Hz", point.hz);
+                    for (net, v) in &point.nodes {
+                        // As with the mode shapes, a node below a thousandth
+                        // is not carrying the signal and would bury those that
+                        // are.
+                        if v.abs() < 1e-3 {
+                            continue;
+                        }
+                        println!(
+                            "    {net:<24} {:>9.4}  {:>7.2} dB  {:>7.1} deg",
+                            v.abs(),
+                            20.0 * v.abs().log10(),
+                            v.degrees()
+                        );
+                    }
+                }
+            }
+            Err(problem) => {
+                eprintln!("{problem}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     ExitCode::SUCCESS

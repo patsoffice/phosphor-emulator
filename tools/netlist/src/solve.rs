@@ -59,6 +59,15 @@ pub struct Setup {
     /// than a constant because the number belongs to the scenario and not to
     /// the drawing.
     pub close_above: f64,
+    /// Solve every op-amp section whose transcription marks its `+`, `-` and
+    /// output as an ideal op-amp: the output supplies whatever current holds
+    /// its two inputs equal. Off by default, when every op-amp pin is open.
+    ///
+    /// Off is right for the modes, which are a property of the passive network
+    /// and which this cannot compute with an op-amp in it, and wrong for any
+    /// stage with feedback, whose gain is the feedback network's. `ac` is where
+    /// this matters.
+    pub ideal_op_amps: bool,
 }
 
 impl Default for Setup {
@@ -67,8 +76,108 @@ impl Default for Setup {
             rails: BTreeMap::new(),
             drives: BTreeMap::new(),
             close_above: 2.5,
+            ideal_op_amps: false,
         }
     }
+}
+
+/// A complex number, for the small-signal solve. Written here rather than
+/// taken from a crate, for the reason the arithmetic section gives.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Cx {
+    /// Real part.
+    pub re: f64,
+    /// Imaginary part.
+    pub im: f64,
+}
+
+impl Cx {
+    /// A complex number from its parts.
+    pub const fn new(re: f64, im: f64) -> Cx {
+        Cx { re, im }
+    }
+
+    /// The magnitude.
+    pub fn abs(self) -> f64 {
+        self.re.hypot(self.im)
+    }
+
+    /// The phase, in degrees.
+    pub fn degrees(self) -> f64 {
+        self.im.atan2(self.re).to_degrees()
+    }
+}
+
+impl std::ops::Add for Cx {
+    type Output = Cx;
+    fn add(self, o: Cx) -> Cx {
+        Cx::new(self.re + o.re, self.im + o.im)
+    }
+}
+
+impl std::ops::Sub for Cx {
+    type Output = Cx;
+    fn sub(self, o: Cx) -> Cx {
+        Cx::new(self.re - o.re, self.im - o.im)
+    }
+}
+
+impl std::ops::Mul for Cx {
+    type Output = Cx;
+    fn mul(self, o: Cx) -> Cx {
+        Cx::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
+    }
+}
+
+impl std::ops::Div for Cx {
+    type Output = Cx;
+    fn div(self, o: Cx) -> Cx {
+        let d = o.re * o.re + o.im * o.im;
+        Cx::new(
+            (self.re * o.re + self.im * o.im) / d,
+            (self.im * o.re - self.re * o.im) / d,
+        )
+    }
+}
+
+impl std::ops::AddAssign for Cx {
+    fn add_assign(&mut self, o: Cx) {
+        *self = *self + o;
+    }
+}
+
+impl std::ops::SubAssign for Cx {
+    fn sub_assign(&mut self, o: Cx) {
+        *self = *self - o;
+    }
+}
+
+/// Every free node's response at one frequency, per volt of the source.
+#[derive(Debug, Clone)]
+pub struct AcPoint {
+    /// Hertz.
+    pub hz: f64,
+    /// Each free node's complex response, in the order of `Network::free`.
+    pub nodes: Vec<(String, Cx)>,
+}
+
+impl AcPoint {
+    /// One node's response, if the node is free.
+    pub fn at(&self, net: &str) -> Option<Cx> {
+        self.nodes.iter().find(|(n, _)| n == net).map(|(_, v)| *v)
+    }
+}
+
+/// An op-amp section solved as ideal: the terms its pins are on.
+#[derive(Debug, Clone, Copy)]
+struct Amp {
+    plus: Term,
+    minus: Term,
+    /// Index into `free`: an output a drive holds is not an op-amp here.
+    out: usize,
 }
 
 /// A voltage the solver was given rather than computed.
@@ -151,10 +260,15 @@ pub struct Network {
     pub opened: Vec<String>,
     /// What the solver left out, and why. Each entry is a sentence.
     pub excluded: Vec<String>,
+    /// The op-amp sections solved as ideal, as `R7.b: + +5V, - R7b summing
+    /// node, out band-pass out`. Empty unless the setup asked for them.
+    pub op_amps: Vec<String>,
     /// Conductance branches, in siemens.
     resistive: Vec<Branch>,
     /// Capacitance branches, in farads.
     capacitive: Vec<Branch>,
+    /// The ideal op-amps, in the order of `op_amps`.
+    amps: Vec<Amp>,
 }
 
 /// One end of a branch.
@@ -284,6 +398,46 @@ impl Network {
             }
         }
 
+        // Op-amp sections the transcription marks, when the setup asks for them
+        // to be ideal. Their three pins are connected rather than open, so they
+        // are set aside before the open pins are collected; one that cannot be
+        // solved is put back below, and says why.
+        let mut amp_specs: Vec<(String, [&str; 3], [String; 3])> = Vec::new();
+        let mut amp_pins: BTreeSet<(&str, &str)> = BTreeSet::new();
+        if setup.ideal_op_amps {
+            for part in &netlist.parts {
+                for section in &part.sections {
+                    let Some(pins) = &section.op_amp else {
+                        continue;
+                    };
+                    let label = format!("{}.{}", part.designator, section.name);
+                    let roles = [&pins.plus, &pins.minus, &pins.out];
+                    let nets: Option<Vec<&str>> = roles
+                        .iter()
+                        .map(|pin| {
+                            netlist
+                                .net_of(&part.designator, pin)
+                                .map(|net| net.name.as_str())
+                        })
+                        .collect();
+                    let Some(nets) = nets else {
+                        excluded.push(format!(
+                            "{label}: an op-amp pin is on no net, so the section stays open"
+                        ));
+                        continue;
+                    };
+                    for pin in roles {
+                        amp_pins.insert((part.designator.as_str(), pin.as_str()));
+                    }
+                    amp_specs.push((
+                        label,
+                        [nets[0], nets[1], nets[2]],
+                        roles.map(|pin| format!("{}.{pin}", part.designator)),
+                    ));
+                }
+            }
+        }
+
         // Every pin of a part the solver does not model. Collected before the
         // branches, because a part is open as a whole: an `LM324` contributes
         // fourteen open pins and no branch.
@@ -303,6 +457,10 @@ impl Network {
                     // open, and saying otherwise in the report would send a
                     // reader looking for a fault that is not there.
                     if closed_pins.contains(&(part.designator.as_str(), pin.as_str())) {
+                        continue;
+                    }
+                    // Likewise an ideal op-amp's pins.
+                    if amp_pins.contains(&(part.designator.as_str(), pin.as_str())) {
                         continue;
                     }
                     opened.insert(format!("{}.{pin}", part.designator));
@@ -383,6 +541,11 @@ impl Network {
                 reach.join(nets[0], nets[1]);
             }
         }
+        // An ideal op-amp's output is a source: it can supply the current its
+        // node needs, the way a rail can.
+        for (_, [_, _, out], _) in &amp_specs {
+            reach.tie_to_rails(out);
+        }
 
         let mut free: Vec<String> = Vec::new();
         let mut free_of: BTreeMap<&str, usize> = BTreeMap::new();
@@ -401,6 +564,38 @@ impl Network {
                 .map(|i| Term::Held(*i))
                 .or_else(|| free_of.get(name).map(|i| Term::Free(*i)))
         };
+
+        let mut amps = Vec::new();
+        let mut op_amps = Vec::new();
+        for (label, [plus, minus, out], pins) in amp_specs {
+            let dropped = match (term(plus), term(minus), term(out)) {
+                (_, _, Some(Term::Held(_))) => Some(format!(
+                    "{label}: its output `{out}` is driven, and the drive stands in for the \
+                     op-amp, so its pins are open"
+                )),
+                (Some(Term::Held(_)), Some(Term::Held(_)), _) => Some(format!(
+                    "{label}: both inputs are held, which leaves the op-amp nothing to set, \
+                     so its pins are open"
+                )),
+                (Some(p), Some(m), Some(Term::Free(o))) => {
+                    amps.push(Amp {
+                        plus: p,
+                        minus: m,
+                        out: o,
+                    });
+                    op_amps.push(format!("{label}: + {plus}, - {minus}, out {out}"));
+                    None
+                }
+                _ => Some(format!(
+                    "{label}: an input reaches no held net through any resistor, so it \
+                     cannot be solved as an op-amp and its pins are open"
+                )),
+            };
+            if let Some(why) = dropped {
+                excluded.push(why);
+                opened.extend(pins);
+            }
+        }
 
         let mut resistive = Vec::new();
         let mut capacitive = Vec::new();
@@ -488,9 +683,89 @@ impl Network {
             free,
             opened: opened.into_iter().collect(),
             excluded,
+            op_amps,
             resistive,
             capacitive,
+            amps,
         })
+    }
+
+    /// The nodal equations at angular frequency `omega`, with the held nets at
+    /// the voltages given, over the free nodes and then one output current per
+    /// ideal op-amp.
+    ///
+    /// A resistor is its conductance and a capacitor `j omega C`, so at zero a
+    /// capacitor is open and this is the operating point. Each op-amp adds its
+    /// output current to the output node's equation and one row saying its two
+    /// inputs are equal.
+    fn assemble(&self, omega: f64, held: &[f64]) -> (Vec<Vec<Cx>>, Vec<Cx>) {
+        let n = self.free.len();
+        let size = n + self.amps.len();
+        let mut a = vec![vec![Cx::default(); size]; size];
+        let mut rhs = vec![Cx::default(); size];
+        let admittances = self
+            .resistive
+            .iter()
+            .map(|b| (b, Cx::new(b.value, 0.0)))
+            .chain(
+                self.capacitive
+                    .iter()
+                    .map(|b| (b, Cx::new(0.0, omega * b.value))),
+            );
+        for (branch, y) in admittances {
+            match (branch.a, branch.b) {
+                (Term::Free(p), Term::Free(m)) => {
+                    a[p][p] += y;
+                    a[m][m] += y;
+                    a[p][m] -= y;
+                    a[m][p] -= y;
+                }
+                (Term::Free(p), Term::Held(k)) | (Term::Held(k), Term::Free(p)) => {
+                    a[p][p] += y;
+                    rhs[p] += y * Cx::new(held[k], 0.0);
+                }
+                (Term::Held(_), Term::Held(_)) => {}
+            }
+        }
+        for (k, amp) in self.amps.iter().enumerate() {
+            let row = n + k;
+            a[amp.out][row] -= Cx::new(1.0, 0.0);
+            for (term, sign) in [(amp.plus, 1.0), (amp.minus, -1.0)] {
+                match term {
+                    Term::Free(p) => a[row][p] += Cx::new(sign, 0.0),
+                    Term::Held(h) => rhs[row] -= Cx::new(sign * held[h], 0.0),
+                }
+            }
+        }
+        (a, rhs)
+    }
+
+    /// Every free node's small-signal response per volt of `source`, which
+    /// must be a held net, at each frequency. Every other held net is at AC
+    /// ground, which is what a rail or a stated drive is to a small signal.
+    ///
+    /// This is the question every leg on these boards is: how much of a drive
+    /// reaches a node at a frequency, through the coupling capacitors and,
+    /// with `ideal_op_amps`, across the stages with feedback.
+    pub fn ac(&self, source: &str, hz: &[f64]) -> Result<Vec<AcPoint>, String> {
+        let Some(k) = self.held.iter().position(|h| h.net == source) else {
+            return Err(format!(
+                "`{source}` is not held, and an AC source is a rail or a drive: \
+                 pass --drive '{source}=<volts>'"
+            ));
+        };
+        let mut unit = vec![0.0; self.held.len()];
+        unit[k] = 1.0;
+        hz.iter()
+            .map(|&f| {
+                let (mut a, mut b) = self.assemble(std::f64::consts::TAU * f, &unit);
+                solve_complex(&mut a, &mut b).map_err(|e| format!("at {f} Hz: {e}"))?;
+                Ok(AcPoint {
+                    hz: f,
+                    nodes: self.free.iter().cloned().zip(b).collect(),
+                })
+            })
+            .collect()
     }
 
     /// The conductance matrix over the unknown nodes, and the current each one
@@ -520,6 +795,17 @@ impl Network {
 
     /// The operating point: every unknown node's DC voltage.
     pub fn dc(&self) -> Result<Vec<(String, f64)>, String> {
+        if !self.amps.is_empty() {
+            let volts: Vec<f64> = self.held.iter().map(|h| h.volts).collect();
+            let (mut a, mut b) = self.assemble(0.0, &volts);
+            solve_complex(&mut a, &mut b)?;
+            return Ok(self
+                .free
+                .iter()
+                .cloned()
+                .zip(b.iter().map(|v| v.re))
+                .collect());
+        }
         let (mut g, i) = self.conductances();
         let mut rhs = vec![i];
         solve_columns(&mut g, &mut rhs)?;
@@ -548,6 +834,13 @@ impl Network {
     /// difference between "these two capacitors each have a time constant" and
     /// "this network has two modes that both nodes take part in".
     pub fn modes(&self) -> Result<Vec<Mode>, String> {
+        if !self.amps.is_empty() {
+            return Err(
+                "modes are a property of the passive network, and this one has ideal op-amps \
+                 in it; solve without them for the modes"
+                    .to_string(),
+            );
+        }
         let k = self.capacitive.len();
         if k == 0 {
             return Ok(Vec::new());
@@ -768,6 +1061,46 @@ fn solve_columns(a: &mut [Vec<f64>], b: &mut [Vec<f64>]) -> Result<(), String> {
             }
             rhs[row] = sum / a[row][row];
         }
+    }
+    Ok(())
+}
+
+/// Solve `a x = b` in place over the complex numbers, by Gaussian elimination
+/// with partial pivoting on magnitude. The small-signal counterpart of
+/// `solve_columns`, for one right-hand side.
+fn solve_complex(a: &mut [Vec<Cx>], b: &mut [Cx]) -> Result<(), String> {
+    let n = a.len();
+    for column in 0..n {
+        let pivot = (column..n)
+            .max_by(|&i, &j| a[i][column].abs().total_cmp(&a[j][column].abs()))
+            .expect("the range is not empty");
+        if a[pivot][column].abs() < 1e-30 {
+            return Err(format!(
+                "the system is singular at unknown {column}: some node has no path to a \
+                 held net, or an op-amp has nothing its output can move"
+            ));
+        }
+        a.swap(pivot, column);
+        b.swap(pivot, column);
+        let pivot_row = a[column].clone();
+        for row in column + 1..n {
+            let factor = a[row][column] / pivot_row[column];
+            if factor == Cx::default() {
+                continue;
+            }
+            for (cell, above) in a[row].iter_mut().zip(&pivot_row).skip(column) {
+                *cell -= factor * *above;
+            }
+            let lead = b[column];
+            b[row] -= factor * lead;
+        }
+    }
+    for row in (0..n).rev() {
+        let mut sum = b[row];
+        for k in row + 1..n {
+            sum -= a[row][k] * b[k];
+        }
+        b[row] = sum / a[row][row];
     }
     Ok(())
 }
@@ -1446,6 +1779,195 @@ on = ["R2.b"]
             errors.iter().any(|e| e.contains("--rail 'VBB=")),
             "{errors:?}"
         );
+    }
+
+    /// A resistor from a driven net into a capacitor to ground: the one
+    /// response everybody knows, at its corner.
+    #[test]
+    fn an_rc_is_three_decibels_down_and_forty_five_degrees_late_at_its_corner() {
+        let text = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "R1"
+kind = "R"
+kohms = 10
+
+[[parts]]
+ref = "C1"
+kind = "C"
+uf = 0.1
+
+[[nets]]
+name = "in"
+on = ["R1.a"]
+
+[[nets]]
+name = "out"
+on = ["R1.b", "C1.a"]
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["C1.b"]
+"#;
+        let setup = Setup {
+            drives: BTreeMap::from([("in".to_string(), 0.0)]),
+            ..Setup::default()
+        };
+        let net = network(text, &setup);
+        let corner = 1.0 / (std::f64::consts::TAU * 10e3 * 0.1e-6);
+        let points = net.ac("in", &[0.0, corner]).expect("should solve");
+        let out = |i: usize| points[i].at("out").unwrap();
+        assert!((out(0).abs() - 1.0).abs() < 1e-9, "{:?}", out(0));
+        assert!(
+            (out(1).abs() - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-9,
+            "{:?}",
+            out(1)
+        );
+        assert!(
+            (out(1).degrees() + 45.0).abs() < 1e-6,
+            "{}",
+            out(1).degrees()
+        );
+    }
+
+    /// An inverting stage, `R2` from the output back to `-` and `C1` across
+    /// it, with `+` on a rail. Lunar Lander's summing amp is exactly this
+    /// shape, and `C1` is its `C27`: the stage is `-R2/R1` at DC and falls
+    /// through `1/(2 pi R2 C1)`.
+    const INVERTER: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "U1"
+kind = "U"
+device = "LM324"
+pins = ["5", "6", "7"]
+out = ["7"]
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+[[parts]]
+ref = "R1"
+kind = "R"
+kohms = 10
+
+[[parts]]
+ref = "R2"
+kind = "R"
+kohms = 20
+
+[[parts]]
+ref = "C1"
+kind = "C"
+uf = 0.1
+
+[[nets]]
+name = "in"
+on = ["R1.a"]
+
+[[nets]]
+name = "sum"
+on = ["R1.b", "R2.a", "C1.a", "U1.6"]
+
+[[nets]]
+name = "out"
+on = ["U1.7", "R2.b", "C1.b"]
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["U1.5"]
+"#;
+
+    fn inverter(ideal: bool, drive_out: bool) -> Network {
+        let mut drives = BTreeMap::from([("in".to_string(), 6.0)]);
+        if drive_out {
+            drives.insert("out".to_string(), 1.0);
+        }
+        network(
+            INVERTER,
+            &Setup {
+                drives,
+                ideal_op_amps: ideal,
+                ..Setup::default()
+            },
+        )
+    }
+
+    #[test]
+    fn an_ideal_inverting_stage_holds_its_input_at_the_rail_and_gains_minus_two() {
+        let net = inverter(true, false);
+        assert_eq!(net.op_amps.len(), 1, "{:?}", net.excluded);
+        assert!(
+            !net.opened.contains(&"U1.6".to_string()),
+            "{:?}",
+            net.opened
+        );
+        let dc = net.dc().expect("should solve");
+        let at = |n: &str| dc.iter().find(|(name, _)| name == n).unwrap().1;
+        // The virtual ground sits on +5 V, and 1 V above it at the input is
+        // 2 V below it at the output.
+        assert!((at("sum") - 5.0).abs() < 1e-9, "{}", at("sum"));
+        assert!((at("out") - 3.0).abs() < 1e-9, "{}", at("out"));
+    }
+
+    #[test]
+    fn a_capacitor_across_the_feedback_makes_the_stage_a_low_pass() {
+        let net = inverter(true, false);
+        let corner = 1.0 / (std::f64::consts::TAU * 20e3 * 0.1e-6);
+        let points = net.ac("in", &[1.0, corner, 10.0 * corner]).expect("solves");
+        let gain = |i: usize| points[i].at("out").unwrap().abs();
+        assert!((gain(0) - 2.0).abs() < 1e-3, "{}", gain(0));
+        assert!(
+            (gain(1) - 2.0 * std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-9,
+            "{}",
+            gain(1)
+        );
+        assert!((gain(2) - 2.0 / 101f64.sqrt()).abs() < 1e-9, "{}", gain(2));
+    }
+
+    /// Without the option the same section is open pins, as it always was,
+    /// and the answer is the passive network's.
+    #[test]
+    fn op_amps_are_open_unless_the_setup_asks_for_them_ideal() {
+        let net = inverter(false, false);
+        assert!(net.op_amps.is_empty());
+        assert!(net.opened.contains(&"U1.6".to_string()), "{:?}", net.opened);
+    }
+
+    /// A driven output means the scenario has said what the op-amp does, so
+    /// the drive wins and the section stays open, out loud.
+    #[test]
+    fn a_driven_output_stands_in_for_the_op_amp() {
+        let net = inverter(true, true);
+        assert!(net.op_amps.is_empty());
+        assert!(
+            net.excluded
+                .iter()
+                .any(|e| e.contains("U1.b") && e.contains("driven")),
+            "{:?}",
+            net.excluded
+        );
+        assert!(net.opened.contains(&"U1.6".to_string()), "{:?}", net.opened);
+    }
+
+    #[test]
+    fn modes_are_refused_with_an_op_amp_in_the_network() {
+        let err = inverter(true, false).modes().unwrap_err();
+        assert!(err.contains("passive"), "{err}");
+    }
+
+    #[test]
+    fn an_ac_source_must_be_held() {
+        let err = inverter(true, false).ac("sum", &[100.0]).unwrap_err();
+        assert!(err.contains("not held"), "{err}");
     }
 
     #[test]

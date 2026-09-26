@@ -412,23 +412,30 @@ four sections, so every section here runs from that pair. The prose lists \
 it, and the headroom argument that says this board does not clip rests on \
 it: about 11 V peak to peak differential against roughly 20 V available."""
 
+# The op-amp roles are read off the symbols, which mark `+` and `-` at each
+# section's inputs: 5 + and 6 -, 10 + and 9 -, 12 + and 13 -. Rechecked on the
+# 400 dpi scan on 2026-09-25 for phosphor-emulator-kfby.5.
+
 [[parts.sections]]
 name = "b"
 pins = ["5", "6", "7"]
 role = "band-pass"
 group = "band-pass"
+op_amp = { plus = "5", minus = "6", out = "7" }
 
 [[parts.sections]]
 name = "c"
 pins = ["8", "9", "10"]
 role = "summing amplifier"
 group = "mixer"
+op_amp = { plus = "10", minus = "9", out = "8" }
 
 [[parts.sections]]
 name = "d"
 pins = ["12", "13", "14"]
 role = "unity inverter"
 group = "mixer"
+op_amp = { plus = "12", minus = "13", out = "14" }
 
 [[parts]]
 ref = "C28"

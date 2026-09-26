@@ -475,7 +475,11 @@ of what the game does rather than of a hold it never makes.
 
 `C27` was missed because the solver reports time constants and DC gains, and
 every figure in this section needs a frequency response. The netlist has had
-`C27` all along.
+`C27` all along. *The solver now has one (`netlist solve --ac`, with the three
+LM324 sections marked as ideal op-amps), and it reproduces each leg figure
+above from the netlist alone; see `tools/netlist/tests/llander_ac_test.rs`. It
+also found the explosion switch's 80 ohms in series with `R21`, 2.6 percent at
+2258 Hz, which the device leaves out.*
 
 The band-pass's midband gain is `R27/(2*R22)` = **2.87** referred to the common
 node, which is the same 115 the device carries referred to the `R22`/`R26`

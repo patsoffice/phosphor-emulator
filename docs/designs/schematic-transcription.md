@@ -703,6 +703,48 @@ was the one "One thing does not generalize" found naming no part at all, and
 throttle resistors still come back as not modeled, for the reason `C88` would
 have without the name rule: they reach the device only through the solver.
 
+## Frequency response, with ideal op-amps
+
+`phosphor-emulator-kfby.5`. The modes and the operating point answer "how
+fast" and "where does it sit". Every question about a leg on these boards is
+a third one, "how much of a drive reaches this node at this frequency", and
+the solver could not answer it. Lunar Lander showed the cost: `C27` across the
+summing amp's `R31` was in the transcription from the start, and two hand
+analyses of the mixer left it out because nothing the tool produced would have
+shown it.
+
+`Network::ac` solves the small-signal network at a list of frequencies, per
+volt of one held net, with every other held net at AC ground. `netlist solve
+--ac <net> --hz <list>` prints it.
+
+**Op-amps can be ideal, and which pin is which is a reading.** A section may
+carry `op_amp = { plus, minus, out }`, and with `--ideal-op-amps` the solver
+gives the output node an unknown current and replaces nothing but that
+current's freedom with `V(+) = V(-)`. The roles are in the transcription rather
+than in a pinout table in the tool, because the drawing marks `+` and `-` at the
+symbol, and a table the tool carried would be a part property presented as a
+reading. A section whose output a scenario drives keeps its open pins: the drive
+has already said what the op-amp does. Modes refuse a network with an op-amp in
+it, since they are the passive network's.
+
+On Lunar Lander, with its three sections marked, the solve reproduces from the
+netlist alone every leg figure the mixer analysis had derived by hand, `C27`
+included: the band-pass peaking at 89.5 Hz with a gain of 2.87 from the common
+node; the thrust leg at 3.68 there, not 4.22; and the explosion leg as a
+band-pass flat at `C91/C27` from 159 Hz to 2258 Hz, within 1 percent of the
+device's formula at four frequencies. It also found two things no analysis had:
+the explosion switch's 80 ohms in series with `R21`, worth 2.6 percent at the top
+of the leg's band, and the switch loading the common node by about 0.35 dB when
+it closes. The device models neither. `tools/netlist/tests/llander_ac_test.rs`
+pins all of it.
+
+**`derive` gained nothing here, deliberately.** The issue proposed a
+single-frequency `response` constant, and no device consumes one: the devices
+build their filters from part values, and a gain at a chosen frequency is a
+check on that build rather than an input to it. So the AC figures are held as
+tests against the device's formulas instead of being generated as constants
+nobody reads.
+
 ## Kill criterion
 
 **After rungs 2 and 3, check two things.** Do the lints flag `C94` and its
