@@ -251,7 +251,7 @@ an emulator: the reference plays recorded WAVs because it never modelled this
 circuit. Comparing against those measures whoever made the recordings. The
 reference here is the drawing, so the next step is a rebuild and not a
 comparison, and `implemented-needs-validation` is unreachable until one exists.
-Tracked as phosphor-emulator-7z54."""
+The drums are rebuilt from the drawing; the gorilla is tracked separately."""
 notes = """
 THE PHASE'S ORDERING RATIONALE FOR THIS TARGET WAS FALSE, and this row is where
 that is recorded. It was listed first on the grounds that its reference is a
@@ -260,10 +260,20 @@ does not care where a WAV came from.
 
 The board does not play samples. Sound Board 834-5168 sheet 2 has all five voices
 as analog circuits: four identical drum channels, each a 7416 open-collector
-inverter into a diode-and-RC envelope shaper into a ringing multiple-feedback
-band-pass on a 3614, plus a separate gorilla built from two 4538B monostables and
-an HM5837 noise IC. Transcribed at docs/schematics/congo-percussion.md, including
-the four mixing resistors that set the balance.
+inverter into a diode-and-RC envelope shaper into a 3614 with a bridged-T in its
+feedback (a twin-T on the rim), plus a gorilla that is a relaxation oscillator
+built around two 4538B monostables and an HM5837 noise IC. Transcribed at pin
+level in docs/schematics/netlists/congo-sound.toml.
+
+THE FOUR DRUMS ARE NOW THE DRAWING. congo_sound.rs builds each from the
+netlist's values as a small piecewise-linear network (the 7416, the shaper with
+its diode, the resonator with its op-amp clamped at the rails) and they ring at
+the solver's 73.4, 265.5, 325.2 and 1079.9 Hz to 0.1 %. Each strikes when its
+PPI bit returns high, 15.6 ms after the write MAME treats as the hit, because
+the 7416 inverts the bit and the diode passes only the falling edge. Two
+assumptions carry the level: the 3614's 0 to 10.5 V range, and the SN76489A's
+output swing, chosen to keep the music where it was. The gorilla is still
+synthesized by ear.
 
 The emulator's implementation choice was read as evidence about the hardware.
 Reading the drawing took twenty minutes; the belief had been in the plan for

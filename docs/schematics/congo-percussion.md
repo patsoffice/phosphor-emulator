@@ -104,6 +104,18 @@ The bass and rim strikes are impulses against their periods, so those two
 resonators ring freely. The congas' 3.5 ms tail is about a period long, so it
 drives the resonator for most of a cycle and shapes each conga's attack.
 
+*The device is now built from this, 2026-09-25.* `congo_sound.rs` runs each
+drum as the drawn network (the 7416 as a switch behind its pull-up, the shaper
+with its diode deciding its own state, the resonator with its op-amp clamped at
+0 and 10.5 V, the output capacitor into SJ) and they ring at 73.32, 265.44,
+325.11 and 1078.80 Hz against the solver's figures above. A drum strikes when
+its PPI bit returns high: the game holds each bit low for 15.6 ms, one tick of
+the sound CPU's interrupt (a MAME trace of the PPI), so every hit lands that
+much after the write MAME treats as the hit. The drums' level against the PSGs
+rests on the SN76489A's output swing, which the drawing does not give; the
+device picks it to keep the music where it was. The gorilla is still
+synthesized by ear. What follows is the comparison that motivated the rebuild.
+
 The device plays the congas at 160 and 250 Hz and the rim as low-passed noise,
 so all three were tuned by ear to something the board does not do. These
 figures take the 3614 as a conventional op-amp, which is unconfirmed, and they
