@@ -67,6 +67,18 @@ enum Command {
         /// held net, at the frequencies `--hz` names.
         #[arg(long, value_name = "NET")]
         ac: Option<String>,
+        /// State a diode, as `D1=on` or `D1=off`. A diode is the one part a
+        /// linear solve cannot decide, so the scenario says which network it
+        /// means; one not named is open. Conducting is `--diode-ohms` in
+        /// series with `--diode-drop`, anode to cathode.
+        #[arg(long, value_name = "PART=on|off")]
+        diode: Vec<String>,
+        /// A conducting diode's forward drop, in volts.
+        #[arg(long, value_name = "VOLTS", default_value_t = 0.6)]
+        diode_drop: f64,
+        /// A conducting diode's resistance, in ohms.
+        #[arg(long, value_name = "OHMS", default_value_t = 10.0)]
+        diode_ohms: f64,
         /// The frequencies for `--ac`, in hertz, comma separated.
         #[arg(
             long,
@@ -140,12 +152,20 @@ fn main() -> ExitCode {
             ideal_op_amps,
             ac,
             hz,
+            diode,
+            diode_drop,
+            diode_ohms,
             ..
         } => solve(
             &netlist,
             group.as_deref(),
             drive,
             rail,
+            Diodes {
+                stated: diode,
+                drop: *diode_drop,
+                ohms: *diode_ohms,
+            },
             *ideal_op_amps,
             ac.as_deref().map(|net| (net, hz.as_slice())),
         ),
@@ -213,11 +233,19 @@ fn cut(netlist: &Netlist, group: Option<&str>) -> Option<Netlist> {
 /// to say it. The assumptions are not an appendix: a time constant computed
 /// with the wrong pin held open is a wrong answer that looks like a right one,
 /// so the list of opened pins prints before the numbers do.
+/// The diode flags, as given.
+struct Diodes<'a> {
+    stated: &'a [String],
+    drop: f64,
+    ohms: f64,
+}
+
 fn solve(
     netlist: &Netlist,
     group: Option<&str>,
     drive: &[String],
     rail: &[String],
+    diodes: Diodes,
     ideal_op_amps: bool,
     ac: Option<(&str, &[f64])>,
 ) -> ExitCode {
@@ -227,8 +255,22 @@ fn solve(
 
     let mut setup = solver::Setup {
         ideal_op_amps,
+        diode_drop: diodes.drop,
+        diode_ohms: diodes.ohms,
         ..solver::Setup::default()
     };
+    for text in diodes.stated {
+        let state = match text.rsplit_once('=') {
+            Some((part, "on")) => Some((part, true)),
+            Some((part, "off")) => Some((part, false)),
+            _ => None,
+        };
+        let Some((part, on)) = state else {
+            eprintln!("--diode wants `part=on` or `part=off`, and got `{text}`");
+            return ExitCode::FAILURE;
+        };
+        setup.diodes.insert(part.to_string(), on);
+    }
     for (flag, given, into) in [
         ("--drive", drive, &mut setup.drives),
         ("--rail", rail, &mut setup.rails),
@@ -292,6 +334,19 @@ fn solve(
     );
     println!("  resistors:  {}", network.resistors().join(", "));
     println!("  capacitors: {}", network.capacitors().join(", "));
+
+    // Like the switches, which way each diode was taken is part of the answer.
+    if !network.diodes.is_empty() {
+        println!("\ndiodes:");
+        for d in &network.diodes {
+            let state = if d.conducting {
+                format!("ON, {} V and {} ohms", setup.diode_drop, setup.diode_ohms)
+            } else {
+                "open".to_string()
+            };
+            println!("  {:<10} {:<28} {}", d.part, state, d.why);
+        }
+    }
 
     if !network.op_amps.is_empty() {
         println!("\nideal op-amps:");

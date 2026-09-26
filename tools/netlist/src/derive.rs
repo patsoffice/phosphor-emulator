@@ -82,6 +82,36 @@ pub struct Scenario {
     /// How far a node moves at DC per volt of a driven net.
     #[serde(default)]
     pub gain: Vec<Gain>,
+    /// Diodes the scenario states, `on` or `off`, as `netlist solve --diode`.
+    /// A diode not named is open.
+    #[serde(default)]
+    pub diodes: BTreeMap<String, DiodeSetting>,
+}
+
+/// A stated diode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiodeSetting {
+    /// Conducting.
+    On,
+    /// Blocking.
+    Off,
+}
+
+impl Scenario {
+    /// The solver setup this scenario states, with `drives` in place of its
+    /// own where a caller varies them.
+    fn setup(&self, drives: BTreeMap<String, f64>) -> Setup {
+        Setup {
+            drives,
+            diodes: self
+                .diodes
+                .iter()
+                .map(|(part, s)| (part.clone(), *s == DiodeSetting::On))
+                .collect(),
+            ..Setup::default()
+        }
+    }
 }
 
 /// A constant that is one mode's time constant.
@@ -182,10 +212,7 @@ fn dc_gain(netlist: &Netlist, scenario: &Scenario, gain: &Gain) -> Result<f64, S
     let solve = |drive: f64| -> Result<f64, String> {
         let mut drives = scenario.drives.clone();
         drives.insert(gain.per.clone(), drive);
-        let setup = Setup {
-            drives,
-            ..Setup::default()
-        };
+        let setup = scenario.setup(drives);
         let network = Network::build(netlist, &setup).map_err(|e| e.join("; "))?;
         network
             .dc()?
@@ -278,10 +305,7 @@ pub fn render(spec: &Spec, spec_path: &Path, netlist: &Netlist) -> Result<String
             }
             None => netlist,
         };
-        let setup = Setup {
-            drives: scenario.drives.clone(),
-            ..Setup::default()
-        };
+        let setup = scenario.setup(scenario.drives.clone());
         let network = match Network::build(subset, &setup) {
             Ok(network) => network,
             Err(problems) => {
@@ -491,6 +515,7 @@ on = ["C1.b", "C2.b"]
                     })
                     .collect(),
                 gain: Vec::new(),
+                diodes: BTreeMap::new(),
             }],
         }
     }
@@ -552,6 +577,7 @@ on = ["C1.b", "R2.b"]
                     node: "tap".into(),
                     per: per.into(),
                 }],
+                diodes: BTreeMap::new(),
             }],
         }
     }

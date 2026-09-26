@@ -68,6 +68,18 @@ pub struct Setup {
     /// stage with feedback, whose gain is the feedback network's. `ac` is where
     /// this matters.
     pub ideal_op_amps: bool,
+    /// Diodes the scenario states, by designator: `true` conducting, `false`
+    /// blocking. A diode is the one-way part a linear solve cannot decide
+    /// for itself, so the scenario decides, the way it decides a switch; a
+    /// diode it does not name is open and reported so. Conducting, a diode is
+    /// `diode_ohms` in series with `diode_drop`, anode to cathode.
+    pub diodes: BTreeMap<String, bool>,
+    /// A conducting diode's forward drop, in volts. A part property the
+    /// drawing does not give, so a knob with a silicon default.
+    pub diode_drop: f64,
+    /// A conducting diode's resistance, in ohms. Also a part property, and
+    /// small against every resistor these boards put in series with one.
+    pub diode_ohms: f64,
 }
 
 impl Default for Setup {
@@ -77,6 +89,9 @@ impl Default for Setup {
             drives: BTreeMap::new(),
             close_above: 2.5,
             ideal_op_amps: false,
+            diodes: BTreeMap::new(),
+            diode_drop: 0.6,
+            diode_ohms: 10.0,
         }
     }
 }
@@ -263,6 +278,8 @@ pub struct Network {
     /// The op-amp sections solved as ideal, as `R7.b: + +5V, - R7b summing
     /// node, out band-pass out`. Empty unless the setup asked for them.
     pub op_amps: Vec<String>,
+    /// What each diode was set to.
+    pub diodes: Vec<DiodeState>,
     /// Conductance branches, in siemens.
     resistive: Vec<Branch>,
     /// Capacitance branches, in farads.
@@ -289,6 +306,22 @@ struct Branch {
     b: Term,
     /// Siemens or farads, by which list it is in.
     value: f64,
+    /// A source in series, in volts, opposing current from `a` to `b`: a
+    /// conducting diode's forward drop. Zero for every part but a diode. It
+    /// is a DC quantity, so the small-signal solve does not see it.
+    emf: f64,
+}
+
+/// What the solver did with one diode, and why. Always reported, like a
+/// switch, because a diode's state is the scenario's choice.
+#[derive(Debug, Clone)]
+pub struct DiodeState {
+    /// The designator.
+    pub part: String,
+    /// Whether it was solved as conducting.
+    pub conducting: bool,
+    /// The reason, in a few words.
+    pub why: String,
 }
 
 impl Network {
@@ -442,9 +475,59 @@ impl Network {
         // branches, because a part is open as a whole: an `LM324` contributes
         // fourteen open pins and no branch.
         let mut opened: BTreeSet<String> = BTreeSet::new();
-        let mut endpoints: Vec<(Kind, &str, [&str; 2], f64)> = Vec::new();
+        let mut endpoints: Vec<(Kind, &str, [&str; 2], f64, f64)> = Vec::new();
         for (designator, nets, siemens) in switch_branches {
-            endpoints.push((Kind::R, designator, nets, siemens));
+            endpoints.push((Kind::R, designator, nets, siemens, 0.0));
+        }
+
+        // Diodes, as the scenario states them. A conducting one is a branch,
+        // anode to cathode, with its drop in series; any other is open.
+        let mut diodes = Vec::new();
+        let mut diode_pins: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for name in setup.diodes.keys() {
+            if !netlist
+                .parts
+                .iter()
+                .any(|p| &p.designator == name && p.kind == Kind::D)
+            {
+                errors.push(format!(
+                    "--diode names `{name}`, which is not a diode in this file"
+                ));
+            }
+        }
+        for part in netlist.parts.iter().filter(|p| p.kind == Kind::D) {
+            let stated = setup.diodes.get(&part.designator).copied();
+            let (conducting, why) = match stated {
+                Some(true) => (true, "stated conducting".to_string()),
+                Some(false) => (false, "stated blocking".to_string()),
+                None => (false, "nothing states it, so it is open".to_string()),
+            };
+            if conducting {
+                let anode = netlist.net_of(&part.designator, "a");
+                let cathode = netlist.net_of(&part.designator, "k");
+                match (anode, cathode) {
+                    (Some(a), Some(k)) => {
+                        diode_pins.insert((part.designator.as_str(), "a"));
+                        diode_pins.insert((part.designator.as_str(), "k"));
+                        endpoints.push((
+                            Kind::R,
+                            part.designator.as_str(),
+                            [a.name.as_str(), k.name.as_str()],
+                            1.0 / setup.diode_ohms,
+                            setup.diode_drop,
+                        ));
+                    }
+                    _ => errors.push(format!(
+                        "{}: stated conducting, and its anode or cathode is on no net",
+                        part.designator
+                    )),
+                }
+            }
+            diodes.push(DiodeState {
+                part: part.designator.clone(),
+                conducting,
+                why,
+            });
         }
         for part in &netlist.parts {
             let quantity = part.value.quantity();
@@ -459,8 +542,11 @@ impl Network {
                     if closed_pins.contains(&(part.designator.as_str(), pin.as_str())) {
                         continue;
                     }
-                    // Likewise an ideal op-amp's pins.
-                    if amp_pins.contains(&(part.designator.as_str(), pin.as_str())) {
+                    // Likewise an ideal op-amp's pins, and a conducting
+                    // diode's.
+                    if amp_pins.contains(&(part.designator.as_str(), pin.as_str()))
+                        || diode_pins.contains(&(part.designator.as_str(), pin.as_str()))
+                    {
                         continue;
                     }
                     opened.insert(format!("{}.{pin}", part.designator));
@@ -523,7 +609,7 @@ impl Network {
                 }
             }
             if wired {
-                endpoints.push((part.kind, part.designator.as_str(), nets, value));
+                endpoints.push((part.kind, part.designator.as_str(), nets, value, 0.0));
             }
         }
 
@@ -545,7 +631,7 @@ impl Network {
             for held_net in held_of.keys() {
                 reach.tie_to_rails(held_net);
             }
-            for (kind, _, nets, _) in &endpoints {
+            for (kind, _, nets, _, _) in &endpoints {
                 if matches!(kind, Kind::R) {
                     reach.join(nets[0], nets[1]);
                 }
@@ -624,7 +710,7 @@ impl Network {
 
         let mut resistive = Vec::new();
         let mut capacitive = Vec::new();
-        for (kind, designator, nets, value) in endpoints {
+        for (kind, designator, nets, value, emf) in endpoints {
             let (Some(a), Some(b)) = (term(nets[0]), term(nets[1])) else {
                 let stranded = if term(nets[0]).is_none() {
                     nets[0]
@@ -649,6 +735,7 @@ impl Network {
                 a,
                 b,
                 value,
+                emf,
             };
             match kind {
                 Kind::R => resistive.push(branch),
@@ -709,6 +796,7 @@ impl Network {
             opened: opened.into_iter().collect(),
             excluded,
             op_amps,
+            diodes,
             resistive,
             capacitive,
             amps,
@@ -723,7 +811,11 @@ impl Network {
     /// capacitor is open and this is the operating point. Each op-amp adds its
     /// output current to the output node's equation and one row saying its two
     /// inputs are equal.
-    fn assemble(&self, omega: f64, held: &[f64]) -> (Vec<Vec<Cx>>, Vec<Cx>) {
+    ///
+    /// `sources` says whether a conducting diode's forward drop is included:
+    /// yes for the operating point, no for a small signal, which a constant
+    /// drop does not move.
+    fn assemble(&self, omega: f64, held: &[f64], sources: bool) -> (Vec<Vec<Cx>>, Vec<Cx>) {
         let n = self.free.len();
         let size = n + self.amps.len();
         let mut a = vec![vec![Cx::default(); size]; size];
@@ -750,6 +842,18 @@ impl Network {
                     rhs[p] += y * Cx::new(held[k], 0.0);
                 }
                 (Term::Held(_), Term::Held(_)) => {}
+            }
+            // A series drop pushes current from `b` toward `a`: the branch
+            // carries y (Va - Vb - emf), so the constant part lands on the
+            // right-hand side at each free end.
+            if sources && branch.emf != 0.0 {
+                let push = y * Cx::new(branch.emf, 0.0);
+                if let Term::Free(p) = branch.a {
+                    rhs[p] += push;
+                }
+                if let Term::Free(m) = branch.b {
+                    rhs[m] -= push;
+                }
             }
         }
         for (k, amp) in self.amps.iter().enumerate() {
@@ -783,7 +887,7 @@ impl Network {
         unit[k] = 1.0;
         hz.iter()
             .map(|&f| {
-                let (mut a, mut b) = self.assemble(std::f64::consts::TAU * f, &unit);
+                let (mut a, mut b) = self.assemble(std::f64::consts::TAU * f, &unit, false);
                 solve_complex(&mut a, &mut b).map_err(|e| format!("at {f} Hz: {e}"))?;
                 Ok(AcPoint {
                     hz: f,
@@ -814,6 +918,15 @@ impl Network {
                 }
                 (Term::Held(_), Term::Held(_)) => {}
             }
+            // A conducting diode's drop, as in `assemble`.
+            if branch.emf != 0.0 {
+                if let Term::Free(p) = branch.a {
+                    i[p] += branch.value * branch.emf;
+                }
+                if let Term::Free(m) = branch.b {
+                    i[m] -= branch.value * branch.emf;
+                }
+            }
         }
         (g, i)
     }
@@ -822,7 +935,7 @@ impl Network {
     pub fn dc(&self) -> Result<Vec<(String, f64)>, String> {
         if !self.amps.is_empty() {
             let volts: Vec<f64> = self.held.iter().map(|h| h.volts).collect();
-            let (mut a, mut b) = self.assemble(0.0, &volts);
+            let (mut a, mut b) = self.assemble(0.0, &volts, true);
             solve_complex(&mut a, &mut b)?;
             return Ok(self
                 .free
@@ -2052,6 +2165,124 @@ on = [\"U2.7\", \"U2.6\"]
         let dc = net.dc().expect("the first stage should still solve");
         let out = dc.iter().find(|(n, _)| n == "out").unwrap().1;
         assert!((out - 3.0).abs() < 1e-9, "{out}");
+    }
+
+    /// A diode between two 1k resistors from a driven net to ground: the
+    /// shape of Congo Bongo's shapers with the capacitors taken out.
+    const DIODE: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "R1"
+kind = "R"
+kohms = 1
+
+[[parts]]
+ref = "D1"
+kind = "D"
+
+[[parts]]
+ref = "R2"
+kind = "R"
+kohms = 1
+
+[[nets]]
+name = "in"
+on = ["R1.a"]
+
+[[nets]]
+name = "anode"
+on = ["R1.b", "D1.a"]
+
+[[nets]]
+name = "cathode"
+on = ["D1.k", "R2.a"]
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["R2.b"]
+"#;
+
+    fn diode(state: Option<bool>) -> Network {
+        network(
+            DIODE,
+            &Setup {
+                drives: BTreeMap::from([("in".to_string(), 5.0)]),
+                diodes: state
+                    .map(|on| BTreeMap::from([("D1".to_string(), on)]))
+                    .unwrap_or_default(),
+                ..Setup::default()
+            },
+        )
+    }
+
+    /// Conducting, the diode is its drop and its resistance in series, so
+    /// the current is (5 - 0.6) / 2010 and each node sits where Ohm's law
+    /// puts it.
+    #[test]
+    fn a_conducting_diode_is_its_drop_in_series_with_its_resistance() {
+        let net = diode(Some(true));
+        assert!(net.diodes[0].conducting);
+        assert!(
+            !net.opened.contains(&"D1.a".to_string()),
+            "{:?}",
+            net.opened
+        );
+        let dc = net.dc().expect("should solve");
+        let at = |n: &str| dc.iter().find(|(name, _)| name == n).unwrap().1;
+        let amps = (5.0 - 0.6) / 2010.0;
+        assert!(
+            (at("cathode") - 1000.0 * amps).abs() < 1e-9,
+            "{}",
+            at("cathode")
+        );
+        assert!(
+            (at("anode") - (5.0 - 1000.0 * amps)).abs() < 1e-9,
+            "{}",
+            at("anode")
+        );
+    }
+
+    /// Blocking, or stated by nobody, it is open, and the report says which.
+    #[test]
+    fn a_blocking_or_unstated_diode_is_open_and_says_why() {
+        for (state, word) in [(Some(false), "blocking"), (None, "nothing states")] {
+            let net = diode(state);
+            assert!(!net.diodes[0].conducting);
+            assert!(net.diodes[0].why.contains(word), "{}", net.diodes[0].why);
+            assert!(net.opened.contains(&"D1.a".to_string()), "{:?}", net.opened);
+            let dc = net.dc().expect("should solve");
+            let cathode = dc.iter().find(|(n, _)| n == "cathode").unwrap().1;
+            assert!(cathode.abs() < 1e-12, "{cathode}");
+        }
+    }
+
+    /// The drop is a DC source, so a small signal passes a conducting diode
+    /// as its resistance alone: 1000 / 2010 of the drive.
+    #[test]
+    fn a_small_signal_sees_a_conducting_diode_as_its_resistance() {
+        let net = diode(Some(true));
+        let gain = net.ac("in", &[100.0]).unwrap()[0]
+            .at("cathode")
+            .unwrap()
+            .abs();
+        assert!((gain - 1000.0 / 2010.0).abs() < 1e-9, "{gain}");
+    }
+
+    #[test]
+    fn stating_a_part_that_is_not_a_diode_is_an_error() {
+        let netlist = Netlist::parse(DIODE).expect("should load");
+        let setup = Setup {
+            diodes: BTreeMap::from([("R1".to_string(), true)]),
+            ..Setup::default()
+        };
+        let errors = Network::build(&netlist, &setup).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("not a diode")),
+            "{errors:?}"
+        );
     }
 
     #[test]

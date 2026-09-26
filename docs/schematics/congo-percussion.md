@@ -91,6 +91,19 @@ gives each voice's resonance from the parts alone
 | Q | 10.8 | 27.4 | 33.6 | 23.3 |
 | ring time constant, Q/(pi f) | 47 ms | 33 ms | 33 ms | 6.9 ms |
 
+And the shapers, solved with each diode stated conducting, the state it is in
+while the 7416's falling edge comes through:
+
+| | bass drum | conga (L) | conga (H) | rim |
+|---|---|---|---|---|
+| strike, the input cap's mode | 0.81 ms (C20) | 0.94 ms (C26) | 0.94 ms (C32) | 57 us (C38) |
+| tail, the second cap's mode | 49 ms (C21) | 3.5 ms (C27) | 3.5 ms (C33) | 185 us (C39) |
+| resonator period | 13.6 ms | 3.8 ms | 3.1 ms | 0.93 ms |
+
+The bass and rim strikes are impulses against their periods, so those two
+resonators ring freely. The congas' 3.5 ms tail is about a period long, so it
+drives the resonator for most of a cycle and shapes each conga's attack.
+
 The device plays the congas at 160 and 250 Hz and the rim as low-passed noise,
 so all three were tuned by ear to something the board does not do. These
 figures take the 3614 as a conventional op-amp, which is unconfirmed, and they

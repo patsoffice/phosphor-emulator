@@ -745,6 +745,29 @@ check on that build rather than an input to it. So the AC figures are held as
 tests against the device's formulas instead of being generated as constants
 nobody reads.
 
+## Stated diodes
+
+A diode is the one part a linear solve cannot decide for itself: it conducts
+one way and blocks the other, and which it is doing is the question. Congo
+Bongo's four drum shapers are each a diode between two RC networks, and the
+diode's state is the whole difference between the edge that strikes the drum
+and the edge that does not.
+
+So a scenario states it, the way it states a `4066` switch: `netlist solve
+--diode D1=on`, or `diodes = { D1 = "on" }` in a derive spec. Conducting, a
+diode is `--diode-ohms` (10) in series with `--diode-drop` (0.6 V), anode to
+cathode; blocking or unstated, it is open, and the report says which and why.
+The drop is a DC source, so the small-signal solve sees only the resistance.
+Both numbers are part properties the drawing does not give, knobs with silicon
+defaults rather than readings, as `close_above` is for a switch.
+
+What it does not do is decide when a diode switches. That is the nonlinear
+part, and it belongs to the device: the solver gives each state's network, and
+the device chooses between them sample by sample. On Congo Bongo that splits
+cleanly. With the diode conducting, each shaper's strike decays in its input
+capacitor's mode (0.81 ms for the bass, 0.94 ms for the congas, 57 us for the
+rim), which `congo_ac_test.rs` pins.
+
 ## Kill criterion
 
 **After rungs 2 and 3, check two things.** Do the lints flag `C94` and its

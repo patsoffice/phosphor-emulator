@@ -156,6 +156,61 @@ fn each_drum_reaches_sou_at_r20_over_its_mixing_resistor() {
     }
 }
 
+/// Each drum's shaper with its diode conducting, the state it is in while
+/// the 7416's falling edge comes through: the time constants of the strike.
+///
+/// The fast mode lives in the input capacitor and the slower one in the
+/// second. Against each resonator's period (13.6, 3.8, 3.1 and 0.93 ms) the
+/// bass and rim strikes are impulses, and the congas' 3.5 ms tail is about a
+/// period long, so it drives the resonator for most of a cycle and shapes the
+/// conga's attack. The diode is stated rather than solved, because a linear
+/// solve cannot decide a one-way part: 0.6 V and 10 ohms, the solver's
+/// defaults, which move these figures by well under a percent.
+#[test]
+fn each_shaper_strikes_in_its_input_capacitors_modes() {
+    let board = congo();
+    for (voice, diode, fast_cap, fast, slow_cap, slow) in [
+        ("bass", "D1", "C20", 0.8106e-3, "C21", 48.74e-3),
+        ("conga-low", "D2", "C26", 0.9396e-3, "C27", 3.479e-3),
+        ("conga-high", "D3", "C32", 0.9396e-3, "C33", 3.479e-3),
+        ("rim", "D4", "C38", 56.70e-6, "C39", 184.8e-6),
+    ] {
+        let excerpt = board.subset(voice);
+        let net = Network::build(
+            &excerpt,
+            &Setup {
+                drives: BTreeMap::from([(format!("{voice} pulse"), 0.0)]),
+                diodes: BTreeMap::from([(diode.to_string(), true)]),
+                ..Setup::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{voice}: {e:?}"));
+        let modes = net.modes().expect("should solve");
+        let tau_of = |cap: &str| {
+            modes
+                .iter()
+                .max_by(|a, b| {
+                    let e = |m: &phosphor_netlist::solve::Mode| {
+                        m.energy
+                            .iter()
+                            .find(|(c, _)| c == cap)
+                            .map_or(0.0, |(_, e)| *e)
+                    };
+                    e(a).total_cmp(&e(b))
+                })
+                .unwrap()
+                .tau
+        };
+        for (cap, expected) in [(fast_cap, fast), (slow_cap, slow)] {
+            let tau = tau_of(cap);
+            assert!(
+                (tau - expected).abs() / expected < 0.01,
+                "{voice}: {cap}'s mode is {tau} s, not {expected}"
+            );
+        }
+    }
+}
+
 /// And each PSG through both summers: `R18/R16` then `R20/R19`, 0.769.
 #[test]
 fn a_psg_reaches_sou_through_both_summers() {
