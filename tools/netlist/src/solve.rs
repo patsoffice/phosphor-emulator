@@ -532,20 +532,45 @@ impl Network {
         // is undetermined and the charge on any capacitor reaching it is
         // frozen, both of which are facts about the drawing rather than
         // shortcomings of the arithmetic.
-        let mut reach = Reach::new();
-        for held_net in held_of.keys() {
-            reach.tie_to_rails(held_net);
-        }
-        for (kind, _, nets, _) in &endpoints {
-            if matches!(kind, Kind::R) {
-                reach.join(nets[0], nets[1]);
-            }
-        }
         // An ideal op-amp's output is a source: it can supply the current its
-        // node needs, the way a rail can.
-        for (_, [_, _, out], _) in &amp_specs {
-            reach.tie_to_rails(out);
-        }
+        // node needs, the way a rail can. But only an op-amp whose inputs are
+        // themselves solvable is one, and an input may be reachable only
+        // through another op-amp's output (or its own, for a follower). So
+        // start from every op-amp, and drop any whose inputs the resulting
+        // reach does not cover, until none is dropped. Tying the output of an
+        // op-amp that is then dropped would leave a node nothing drives, and
+        // the system singular.
+        let reach_with = |amps: &[bool]| -> Reach {
+            let mut reach = Reach::new();
+            for held_net in held_of.keys() {
+                reach.tie_to_rails(held_net);
+            }
+            for (kind, _, nets, _) in &endpoints {
+                if matches!(kind, Kind::R) {
+                    reach.join(nets[0], nets[1]);
+                }
+            }
+            for ((_, [_, _, out], _), live) in amp_specs.iter().zip(amps) {
+                if *live {
+                    reach.tie_to_rails(out);
+                }
+            }
+            reach
+        };
+        let mut live = vec![true; amp_specs.len()];
+        let mut reach = loop {
+            let mut reach = reach_with(&live);
+            let mut dropped = false;
+            for ((_, [plus, minus, _], _), alive) in amp_specs.iter().zip(live.iter_mut()) {
+                if *alive && !(reach.on_rails(plus) && reach.on_rails(minus)) {
+                    *alive = false;
+                    dropped = true;
+                }
+            }
+            if !dropped {
+                break reach;
+            }
+        };
 
         let mut free: Vec<String> = Vec::new();
         let mut free_of: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1956,6 +1981,77 @@ on = ["U1.5"]
             net.excluded
         );
         assert!(net.opened.contains(&"U1.6".to_string()), "{:?}", net.opened);
+    }
+
+    /// A second op-amp whose + input hangs off a part the solver does not
+    /// model (a logic gate's output here) cannot be solved, and must be dropped
+    /// without its output being left as a node nothing drives. The first
+    /// stage still solves. This is Congo Bongo's gorilla, whose op-amps sit
+    /// behind a 4001B, a 4538B and a noise IC, on the same board as four drums
+    /// that should solve regardless.
+    #[test]
+    fn an_op_amp_behind_an_unmodeled_part_is_dropped_and_the_rest_still_solves() {
+        let text = format!(
+            "{INVERTER}
+[[parts]]
+ref = \"U2\"
+kind = \"U\"
+device = \"LM324\"
+pins = [\"5\", \"6\", \"7\"]
+out = [\"7\"]
+
+[[parts.sections]]
+name = \"b\"
+pins = [\"5\", \"6\", \"7\"]
+op_amp = {{ plus = \"5\", minus = \"6\", out = \"7\" }}
+
+[[parts]]
+ref = \"U3\"
+kind = \"U\"
+device = \"4001B\"
+pins = [\"4\"]
+out = [\"4\"]
+
+[[parts]]
+ref = \"R3\"
+kind = \"R\"
+kohms = 10
+
+[[nets]]
+name = \"gate out\"
+on = [\"U3.4\", \"R3.a\"]
+
+[[nets]]
+name = \"buffer in\"
+on = [\"R3.b\", \"U2.5\"]
+
+[[nets]]
+name = \"buffer out\"
+on = [\"U2.7\", \"U2.6\"]
+"
+        );
+        let net = network(
+            &text,
+            &Setup {
+                drives: BTreeMap::from([("in".to_string(), 6.0)]),
+                ideal_op_amps: true,
+                ..Setup::default()
+            },
+        );
+        assert_eq!(net.op_amps.len(), 1, "{:?}", net.op_amps);
+        assert!(
+            net.excluded.iter().any(|e| e.contains("U2.b")),
+            "{:?}",
+            net.excluded
+        );
+        assert!(
+            !net.free.contains(&"buffer out".to_string()),
+            "{:?}",
+            net.free
+        );
+        let dc = net.dc().expect("the first stage should still solve");
+        let out = dc.iter().find(|(n, _)| n == "out").unwrap().1;
+        assert!((out - 3.0).abs() < 1e-9, "{out}");
     }
 
     #[test]

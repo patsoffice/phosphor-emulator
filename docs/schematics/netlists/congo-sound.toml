@@ -1,0 +1,1839 @@
+# Congo Bongo's sound board, 834-5168, at pin level: the four drum voices.
+#
+# Filed under phosphor-emulator-7z54. The prose beside it,
+# `docs/schematics/congo-percussion.md`, was read at block level and is
+# corrected by this file in two places, both found at pin level:
+#
+#   - THE DRUMS ARE BRIDGED-T RESONATORS, NOT MULTIPLE-FEEDBACK BAND-PASSES.
+#     The shaped pulse enters each 3614 section's NON-inverting input through
+#     the series resistor, with a resistor to ground and a bias divider on the
+#     same node. The feedback is the "1M" from output to the inverting input
+#     with two equal capacitors in series across it and the "small resistor"
+#     from their junction to ground: a bridged-T. The prose listed the right
+#     parts and named the wrong filter.
+#   - EACH VOICE HAS ITS OWN BIAS DIVIDER from +12 V, decoupled by an
+#     electrolytic: R27/C22/R26 for the bass, R37/C28/R36, R47/C34/R46 and
+#     R57/C40/R56 for the others. The prose table lumped R37 in with the bass.
+#
+# And the rim is not a bridged-T but a TWIN-T: R60 and R61, 2.2M each, run in
+# series from its inverting input to its output with C43 from their junction to
+# ground, in parallel with the bridged-T the other three have.
+#
+# And the gorilla is not a noise burst but a relaxation oscillator whose rate
+# follows an envelope plus low-passed noise, gated by U15 under a second
+# envelope. See its section below.
+#
+# EXCERPT: THE AUDIO PATH. All of sheet 2 (PDF pp17-18), the four drums and the
+# gorilla; and sheet 1's analog side (pp15-16), the two SN76489As' outputs, the
+# two summers SJ joins, the +6 V regulator and the connector's audio pins. Not
+# here: sheet 1's CPU, ROM, RAM, decode and PPI, which are digital.
+#
+# HOW TO READ THE SCAN. Each page is a 1013 x 1318 8-bit grayscale JPEG, 120 dpi
+# on the letter page. Grayscale holds up better than the number suggests (better
+# than Zaxxon's 1-bit 150 dpi): values and pin numbers are legible at 2x, and
+# junction dots are the reading to doubt. EVERY PAGE OF THE SOUND BOARD, pp15-18,
+# IS FLIPPED TOP TO BOTTOM, which the prose did not record, so flip before
+# reading anything with a direction. Each sheet is split across two pages that
+# overlap at the seam (R91 is drawn on both p17 and p18):
+#
+#   pdfimages -j -f 15 -l 18 congobongo5.PDF pg
+#   magick pg-003.jpg -flip p18.png
+#
+# ELECTROLYTICS: pin `a` is the + end, as the drawing marks it.
+#
+# THE OP-AMP. `3614` is printed at every section and was not identified. The
+# symbols mark + and - at each, which is what `op_amp` records; whether the part
+# behaves as a conventional op-amp (rather than, say, a Norton amplifier) is an
+# assumption the solve inherits, and is said again where it matters.
+
+[board]
+name = "Congo Bongo sound"
+assembly = "834-5168 A"
+source = "arcade-museum.com/manuals-videogames/C/congobongo5.PDF, Sound Board 834-5168 sheets 1 and 2, PDF pages 15 to 18, each a 1013 x 1318 8-bit JPEG at 120 dpi, flipped top to bottom"
+sheets = "1-2"
+dpi = 120
+excerpt = "the audio path: every voice and both PSG outputs, through the two summers, to SOU"
+prose = "docs/schematics/congo-percussion.md"
+
+# ---------------------------------------------------------------------------
+# SHARED PACKAGES
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "U6"
+kind = "U"
+device = "7416"
+pins = ["3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["4", "6", "8", "10", "12"]
+nc = [{ pin = "4", why = "the unused sixth inverter, input grounded and output drawn with a stub" }]
+note = """
+Hex inverter with open-collector outputs, one per drum, each pulled up to \
++12 V by a 10k. Supply pins 7 and 14 are not drawn, and sections 1 and 2 \
+(pins 1 and 2) are not on this sheet."""
+
+[[parts.sections]]
+name = "bass"
+pins = ["9", "8"]
+group = "bass"
+
+[[parts.sections]]
+name = "conga-low"
+pins = ["5", "6"]
+group = "conga-low"
+
+[[parts.sections]]
+name = "conga-high"
+pins = ["13", "12"]
+group = "conga-high"
+
+[[parts.sections]]
+name = "rim"
+pins = ["11", "10"]
+group = "rim"
+
+[[parts.sections]]
+name = "spare"
+pins = ["3", "4"]
+
+[[parts]]
+ref = "U13"
+kind = "U"
+device = "3614"
+device_inferred = false
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+note = """
+Quad op-amp, one section per drum. `3614` is printed at every section and was \
+not identified. Supply pins 4 and 11 are not drawn. The + and - of each \
+section are read off the symbol."""
+
+[[parts.sections]]
+name = "bass"
+pins = ["12", "13", "14"]
+group = "bass"
+op_amp = { plus = "12", minus = "13", out = "14" }
+
+[[parts.sections]]
+name = "conga-low"
+pins = ["10", "9", "8"]
+group = "conga-low"
+op_amp = { plus = "10", minus = "9", out = "8" }
+
+[[parts.sections]]
+name = "conga-high"
+pins = ["3", "2", "1"]
+group = "conga-high"
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[parts.sections]]
+name = "rim"
+pins = ["5", "6", "7"]
+group = "rim"
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+# ---------------------------------------------------------------------------
+# BASS DRUM, PC0 on sheet 1
+# ---------------------------------------------------------------------------
+
+[[parts]]
+group = "bass"
+ref = "R21"
+kind = "R"
+kohms = 10
+note = "the 7416's pull-up to +12 V."
+
+[[parts]]
+group = "bass"
+ref = "C20"
+kind = "C"
+uf = 0.068
+
+[[parts]]
+group = "bass"
+ref = "R22"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "bass"
+ref = "D1"
+kind = "D"
+device = "1S2075"
+note = """
+Cathode toward C20, anode toward C21: the bar is drawn on the C20 side. So \
+only the falling edge, when the 7416 pulls low, is passed on."""
+
+[[parts]]
+group = "bass"
+ref = "R23"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "bass"
+ref = "C21"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward R24."
+
+[[parts]]
+group = "bass"
+ref = "R24"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "bass"
+ref = "R25"
+kind = "R"
+kohms = 47
+note = "the + input's resistor to ground."
+
+[[parts]]
+group = "bass"
+ref = "R26"
+kind = "R"
+kohms = 22
+note = "from the bias node to the + input."
+
+[[parts]]
+group = "bass"
+ref = "R27"
+kind = "R"
+kohms = 10
+note = "from +12 V to the bias node."
+
+[[parts]]
+group = "bass"
+ref = "C22"
+kind = "C"
+uf = 47
+note = "electrolytic, + on the bias node, - to ground: decouples the bias."
+
+[[parts]]
+group = "bass"
+ref = "R28"
+kind = "R"
+kohms = 470
+note = "the bridge of the bridged-T, output to the - input."
+
+[[parts]]
+group = "bass"
+ref = "C23"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "bass"
+ref = "C24"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "bass"
+ref = "R29"
+kind = "R"
+kohms = 1
+note = "from the junction of C23 and C24 to ground: the leg of the T."
+
+[[parts]]
+group = "bass"
+ref = "C25"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward the op-amp."
+
+[[parts]]
+group = "bass"
+ref = "R30"
+kind = "R"
+kohms = 240
+note = "the bass's mixing resistor onto SJ."
+
+# ---------------------------------------------------------------------------
+# CONGA (L), PC1
+# ---------------------------------------------------------------------------
+
+[[parts]]
+group = "conga-low"
+ref = "R31"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "conga-low"
+ref = "C26"
+kind = "C"
+uf = 0.068
+
+[[parts]]
+group = "conga-low"
+ref = "R32"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-low"
+ref = "D2"
+kind = "D"
+device = "1S2075"
+note = "cathode toward C26, as D1."
+
+[[parts]]
+group = "conga-low"
+ref = "R33"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-low"
+ref = "C27"
+kind = "C"
+uf = 0.033
+
+[[parts]]
+group = "conga-low"
+ref = "R34"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-low"
+ref = "R35"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-low"
+ref = "R36"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "conga-low"
+ref = "R37"
+kind = "R"
+kohms = 10
+note = "from +12 V to this voice's bias node. The prose table put it with the bass."
+
+[[parts]]
+group = "conga-low"
+ref = "C28"
+kind = "C"
+uf = 47
+note = "electrolytic, + on the bias node."
+
+[[parts]]
+group = "conga-low"
+ref = "R38"
+kind = "R"
+mohms = 1.0
+
+[[parts]]
+group = "conga-low"
+ref = "C30"
+kind = "C"
+uf = 0.033
+
+[[parts]]
+group = "conga-low"
+ref = "C31"
+kind = "C"
+uf = 0.033
+
+[[parts]]
+group = "conga-low"
+ref = "R39"
+kind = "R"
+ohms = 330
+
+[[parts]]
+group = "conga-low"
+ref = "C29"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward the op-amp."
+
+[[parts]]
+group = "conga-low"
+ref = "R40"
+kind = "R"
+kohms = 390
+
+# ---------------------------------------------------------------------------
+# CONGA (H), PC2
+# ---------------------------------------------------------------------------
+
+[[parts]]
+group = "conga-high"
+ref = "R41"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "conga-high"
+ref = "C32"
+kind = "C"
+uf = 0.068
+
+[[parts]]
+group = "conga-high"
+ref = "R42"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-high"
+ref = "D3"
+kind = "D"
+device = "1S2075"
+note = "cathode toward C32, as D1."
+
+[[parts]]
+group = "conga-high"
+ref = "R43"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-high"
+ref = "C33"
+kind = "C"
+uf = 0.033
+
+[[parts]]
+group = "conga-high"
+ref = "R44"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-high"
+ref = "R45"
+kind = "R"
+kohms = 47
+
+[[parts]]
+group = "conga-high"
+ref = "R46"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "conga-high"
+ref = "R47"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "conga-high"
+ref = "C34"
+kind = "C"
+uf = 47
+note = "electrolytic, + on the bias node."
+
+[[parts]]
+group = "conga-high"
+ref = "R48"
+kind = "R"
+mohms = 1.0
+
+[[parts]]
+group = "conga-high"
+ref = "C35"
+kind = "C"
+uf = 0.033
+
+[[parts]]
+group = "conga-high"
+ref = "C36"
+kind = "C"
+uf = 0.033
+
+[[parts]]
+group = "conga-high"
+ref = "R49"
+kind = "R"
+ohms = 220
+
+[[parts]]
+group = "conga-high"
+ref = "C37"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward the op-amp."
+
+[[parts]]
+group = "conga-high"
+ref = "R50"
+kind = "R"
+kohms = 390
+
+# ---------------------------------------------------------------------------
+# RIM, PC3. The odd one: smaller values throughout, a 10k/4.7k bias, and a
+# twin-T in its feedback rather than a bridged-T.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+group = "rim"
+ref = "R51"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "rim"
+ref = "C38"
+kind = "C"
+uf = 0.01
+
+[[parts]]
+group = "rim"
+ref = "R52"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "rim"
+ref = "D4"
+kind = "D"
+device = "1S2075"
+note = "cathode toward C38, as D1."
+
+[[parts]]
+group = "rim"
+ref = "R53"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "rim"
+ref = "C39"
+kind = "C"
+uf = 0.0033
+
+[[parts]]
+group = "rim"
+ref = "R54"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "rim"
+ref = "R55"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "rim"
+ref = "R56"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "rim"
+ref = "R57"
+kind = "R"
+kohms = 4.7
+
+[[parts]]
+group = "rim"
+ref = "C40"
+kind = "C"
+uf = 2.2
+note = "electrolytic, + on the bias node."
+
+[[parts]]
+group = "rim"
+ref = "R58"
+kind = "R"
+mohms = 1.0
+
+[[parts]]
+group = "rim"
+ref = "C41"
+kind = "C"
+uf = 0.0068
+
+[[parts]]
+group = "rim"
+ref = "C42"
+kind = "C"
+uf = 0.0068
+
+[[parts]]
+group = "rim"
+ref = "R59"
+kind = "R"
+ohms = 470
+
+[[parts]]
+group = "rim"
+ref = "R60"
+kind = "R"
+mohms = 2.2
+note = "the twin-T's second T, from the - input to the junction with C43."
+
+[[parts]]
+group = "rim"
+ref = "R61"
+kind = "R"
+mohms = 2.2
+note = "from the junction with C43 to the output."
+
+[[parts]]
+group = "rim"
+ref = "C43"
+kind = "C"
+uf = 0.047
+note = "from the R60/R61 junction to ground: the leg of the second T."
+
+[[parts]]
+group = "rim"
+ref = "C44"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward the op-amp."
+
+[[parts]]
+group = "rim"
+ref = "R62"
+kind = "R"
+kohms = 200
+
+# ---------------------------------------------------------------------------
+# GORILLA, PB1 on sheet 1. PDF p17, with its tail on p18's left edge.
+#
+# Not a filtered noise burst, which is what the prose's block reading and the
+# device both assume. It is a RELAXATION OSCILLATOR (an integrator on U17 and a
+# Schmitt trigger on U16 that switches Q2) whose rate is set by a control
+# voltage made of an envelope plus low-passed noise: a growl whose pitch
+# wanders. Its square wave is scaled, low-passed, and then gated by U15 under a
+# second, longer envelope. Two 4538B monostables time the two envelopes, and a
+# NOR combines them so the pitch envelope starts only as the first one ends.
+# ---------------------------------------------------------------------------
+
+# --- the noise, and its low-pass ---
+
+[[parts]]
+group = "gorilla"
+ref = "BF3"
+kind = "U"
+device = "ferrite bead"
+pins = ["a", "b"]
+note = """
+A bead in the HM5837's +12 V feed. No value is drawn, and an `L` must carry \
+henries, so it is transcribed as a two-pin part rather than given an invented \
+inductance. It carries supply, not signal."""
+
+[[parts]]
+group = "gorilla"
+ref = "C45"
+kind = "C"
+uf = 33
+note = "electrolytic across the HM5837's supply, + on the bead side."
+
+[[parts]]
+group = "gorilla"
+ref = "C46"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "gorilla"
+ref = "U20"
+kind = "U"
+device = "HM5837"
+pins = ["1", "2", "3", "4"]
+out = ["3"]
+note = """
+Digital noise generator, the board's only noise source. Pins are labeled VDD, \
+VGG, OUT and VCC on the symbol: 1 and 2 to ground, 4 to the bead."""
+
+[[parts]]
+group = "gorilla"
+ref = "R63"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "gorilla"
+ref = "R64"
+kind = "R"
+kohms = 22
+
+[[parts]]
+group = "gorilla"
+ref = "D5"
+kind = "D"
+device = "1S2075"
+note = "anode on the noise node, cathode to +5 V: clamps the divided noise for the CMOS gate."
+
+[[parts]]
+group = "gorilla"
+ref = "C47"
+kind = "C"
+pf = 470
+
+[[parts]]
+ref = "U18"
+kind = "U"
+device = "4001B"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "4", "10", "11"]
+nc = [
+  { pin = "3", why = "an unused section, inputs grounded, output drawn with a stub" },
+  { pin = "11", why = "an unused section, inputs grounded, output drawn with a stub" },
+]
+note = "Quad two-input NOR. Supply pins 7 and 14 are not drawn."
+
+[[parts.sections]]
+name = "noise gate"
+pins = ["5", "6", "4"]
+role = "inverter, inputs tied"
+group = "gorilla"
+
+[[parts.sections]]
+name = "envelope gate"
+pins = ["8", "9", "10"]
+role = "NOR of the two monostables"
+group = "gorilla"
+
+[[parts.sections]]
+name = "spare a"
+pins = ["1", "2", "3"]
+
+[[parts.sections]]
+name = "spare d"
+pins = ["12", "13", "11"]
+
+[[parts]]
+group = "gorilla"
+ref = "R65"
+kind = "R"
+kohms = 20
+
+[[parts]]
+group = "gorilla"
+ref = "C48"
+kind = "C"
+uf = 0.0015
+
+[[parts]]
+group = "gorilla"
+ref = "R66"
+kind = "R"
+kohms = 20
+
+[[parts]]
+group = "gorilla"
+ref = "C50"
+kind = "C"
+uf = 0.0039
+note = "from the second ladder node back to U17 pin 8: the Sallen-Key feedback."
+
+[[parts]]
+group = "gorilla"
+ref = "R67"
+kind = "R"
+kohms = 20
+
+[[parts]]
+group = "gorilla"
+ref = "C49"
+kind = "C"
+pf = 220
+
+[[parts]]
+group = "gorilla"
+ref = "R68"
+kind = "R"
+kohms = 20
+note = "U17 pin 8 to pin 9. With R69 the section's gain is 2."
+
+[[parts]]
+group = "gorilla"
+ref = "R69"
+kind = "R"
+kohms = 20
+
+[[parts]]
+group = "gorilla"
+ref = "C51"
+kind = "C"
+uf = 1.0
+
+[[parts]]
+group = "gorilla"
+ref = "R78"
+kind = "R"
+kohms = 47
+note = "the noise's leg into the summer."
+
+# --- the monostables and the two envelopes ---
+
+[[parts]]
+ref = "U19"
+kind = "U"
+device = "4538B"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["6", "7", "9", "10"]
+nc = [{ pin = "7", why = "the first monostable's Q-bar, drawn with its pin number and no wire" }]
+note = """
+Dual monostable, both halves triggered on the falling edge of GORILLA at their \
+B inputs, with A grounded and both resets pulled up by R76. Supply pins 8 and \
+16 are not drawn."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3", "4", "5", "6", "7"]
+role = "pitch-envelope delay, R70 C52"
+group = "gorilla"
+
+[[parts.sections]]
+name = "b"
+pins = ["9", "10", "11", "12", "13", "14", "15"]
+role = "gate envelope, R71 C53"
+group = "gorilla"
+
+[[parts]]
+group = "gorilla"
+ref = "R76"
+kind = "R"
+kohms = 10
+note = "pulls both resets up."
+
+[[parts]]
+group = "gorilla"
+ref = "R70"
+kind = "R"
+kohms = 100
+
+[[parts]]
+group = "gorilla"
+ref = "C52"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + on pin 2."
+
+[[parts]]
+group = "gorilla"
+ref = "R71"
+kind = "R"
+kohms = 150
+
+[[parts]]
+group = "gorilla"
+ref = "C53"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + on pin 14."
+
+[[parts]]
+group = "gorilla"
+ref = "R72"
+kind = "R"
+kohms = 330
+note = "the pitch envelope's slow path, charging and discharging C55."
+
+[[parts]]
+group = "gorilla"
+ref = "D6"
+kind = "D"
+device = "1S2075"
+note = "anode on the NOR's output: charges C55 fast through R73 while the gate is high."
+
+[[parts]]
+group = "gorilla"
+ref = "R73"
+kind = "R"
+kohms = 1
+
+[[parts]]
+group = "gorilla"
+ref = "C55"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + on U17 pin 5."
+
+[[parts]]
+group = "gorilla"
+ref = "D7"
+kind = "D"
+device = "1S2075"
+note = "anode on U19 pin 10: charges C54 fast through R74 while the second monostable runs."
+
+[[parts]]
+group = "gorilla"
+ref = "R74"
+kind = "R"
+kohms = 1
+
+[[parts]]
+group = "gorilla"
+ref = "R75"
+kind = "R"
+kohms = 470
+note = "the gate envelope's slow path."
+
+[[parts]]
+group = "gorilla"
+ref = "C54"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + on U16 pin 10."
+
+# --- the summer, the oscillator, and the output ---
+
+[[parts]]
+ref = "U17"
+kind = "U"
+device = "3614"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+note = "Quad op-amp, the gorilla's first four stages. Supply pins 4 and 11 are not drawn."
+
+[[parts.sections]]
+name = "noise low-pass"
+pins = ["10", "9", "8"]
+group = "gorilla"
+op_amp = { plus = "10", minus = "9", out = "8" }
+
+[[parts.sections]]
+name = "pitch envelope buffer"
+pins = ["5", "6", "7"]
+group = "gorilla"
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+[[parts.sections]]
+name = "summer"
+pins = ["12", "13", "14"]
+group = "gorilla"
+op_amp = { plus = "12", minus = "13", out = "14" }
+
+[[parts.sections]]
+name = "integrator"
+pins = ["3", "2", "1"]
+group = "gorilla"
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[parts]]
+group = "gorilla"
+ref = "R77"
+kind = "R"
+kohms = 20
+note = "the pitch envelope's leg into the summer."
+
+[[parts]]
+group = "gorilla"
+ref = "R79"
+kind = "R"
+kohms = 22
+note = "the summer's feedback."
+
+[[parts]]
+group = "gorilla"
+ref = "R80"
+kind = "R"
+kohms = 20
+
+[[parts]]
+group = "gorilla"
+ref = "R81"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "gorilla"
+ref = "C56"
+kind = "C"
+uf = 10
+note = "electrolytic, + on the summer's bias: +12 V through R80 against R81, 4 V."
+
+[[parts]]
+group = "gorilla"
+ref = "R82"
+kind = "R"
+kohms = 100
+note = "the control voltage into the integrator's - input."
+
+[[parts]]
+group = "gorilla"
+ref = "R83"
+kind = "R"
+kohms = 51
+
+[[parts]]
+group = "gorilla"
+ref = "R84"
+kind = "R"
+kohms = 51
+note = "with R83, halves the control voltage onto the integrator's + input."
+
+[[parts]]
+group = "gorilla"
+ref = "C62"
+kind = "C"
+uf = 0.022
+note = "the integrating capacitor, U17 pin 1 to pin 2."
+
+[[parts]]
+group = "gorilla"
+ref = "R85"
+kind = "R"
+kohms = 51
+note = """
+From the integrator's - input to Q2's collector. With Q2 on it sinks twice \
+the current R82 brings, which reverses the ramp: the switched half of the \
+oscillator. Its vertical crosses the +6 V line to R86 with no junction dot."""
+
+[[parts]]
+ref = "U16"
+kind = "U"
+device = "3614"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+note = "Quad op-amp, the gorilla's last four stages. Supply pins 4 and 11 are not drawn."
+
+[[parts.sections]]
+name = "gate envelope buffer"
+pins = ["10", "9", "8"]
+group = "gorilla"
+op_amp = { plus = "10", minus = "9", out = "8" }
+
+[[parts.sections]]
+name = "Schmitt"
+pins = ["5", "6", "7"]
+role = "Schmitt trigger, positive feedback through R87: not a linear stage"
+group = "gorilla"
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+[[parts.sections]]
+name = "scaler"
+pins = ["3", "2", "1"]
+group = "gorilla"
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[parts.sections]]
+name = "low-pass"
+pins = ["12", "13", "14"]
+group = "gorilla"
+op_amp = { plus = "12", minus = "13", out = "14" }
+
+[[parts]]
+group = "gorilla"
+ref = "R86"
+kind = "R"
+kohms = 51
+note = "from +6 V to the Schmitt's + input."
+
+[[parts]]
+group = "gorilla"
+ref = "R87"
+kind = "R"
+kohms = 100
+note = "the Schmitt's hysteresis, from its output back to its + input."
+
+[[parts]]
+group = "gorilla"
+ref = "D8"
+kind = "D"
+device = "1S2075"
+note = "anode on the Schmitt's output, cathode toward R89: Q2 is driven only when the output is high."
+
+[[parts]]
+group = "gorilla"
+ref = "R89"
+kind = "R"
+kohms = 10
+
+[[parts]]
+group = "gorilla"
+ref = "R88"
+kind = "R"
+kohms = 2.2
+note = "Q2's base to ground."
+
+[[parts]]
+group = "gorilla"
+ref = "Q2"
+kind = "Q"
+device = "2SC1684"
+out = ["c"]
+note = "Drawn with the base horizontal, collector up to R85, emitter to ground: a switch."
+
+[[parts]]
+group = "gorilla"
+ref = "R90"
+kind = "R"
+kohms = 100
+
+[[parts]]
+group = "gorilla"
+ref = "R91"
+kind = "R"
+kohms = 10
+note = """
+The scaler's feedback: -R91/R90 is -0.1 about +6 V. Drawn on both p17 and p18, \
+where the two halves of the sheet overlap; it is one part."""
+
+[[parts]]
+group = "gorilla"
+ref = "R92"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "gorilla"
+ref = "R93"
+kind = "R"
+kohms = 15
+
+[[parts]]
+group = "gorilla"
+ref = "C57"
+kind = "C"
+uf = 0.047
+note = "from the R92/R93 junction to U16 pin 14: the Sallen-Key feedback."
+
+[[parts]]
+group = "gorilla"
+ref = "C58"
+kind = "C"
+uf = 0.022
+
+[[parts]]
+group = "gorilla"
+ref = "C59"
+kind = "C"
+uf = 10
+note = "electrolytic, + toward U16 pin 14."
+
+[[parts]]
+group = "gorilla"
+ref = "U15"
+kind = "U"
+device = "G501534"
+device_inferred = false
+pins = ["1", "2", "3", "4", "12", "13"]
+out = ["3"]
+note = """
+NOT IDENTIFIED. The symbol labels its pins IN (1), RD (2), OUT (3), GND (4), \
+VCC (12) and CY (13). Read at pin level it is a VCA in function: the signal \
+enters at IN and leaves at OUT, and CY is driven by the gate envelope from \
+U16 pin 8. That wire runs along the bottom of p17 and across the seam into \
+p18, and it is the least certain junction in this file. What RD and the \
+680 pF on it do was not established."""
+
+[[parts]]
+group = "gorilla"
+ref = "C60"
+kind = "C"
+pf = 680
+
+[[parts]]
+group = "gorilla"
+ref = "C61"
+kind = "C"
+uf = 1.0
+note = "not marked polarized."
+
+[[parts]]
+group = "gorilla"
+ref = "R94"
+kind = "R"
+kohms = 51
+note = "the gorilla's mixing resistor onto SJ."
+
+# ---------------------------------------------------------------------------
+# SHEET 1 (PDF pp15-16): THE PSG OUTPUTS, THE TWO SUMMERS, AND +6 V.
+#
+# The prose left open where SJ goes and worried that the drums' level against
+# the PSGs depended on the PSG chain's output impedance. It does not. SJ is U12
+# pin 13, the SECOND summer's virtual ground: every drum and the gorilla sum
+# there through their own mixing resistors against R20 20k, and the PSGs arrive
+# through R19 51k from the first summer. The whole balance is resistor ratios.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+group = "output"
+ref = "U5"
+kind = "U"
+device = "SN76489A"
+pins = ["7"]
+out = ["7"]
+note = """
+PSG 1, selected by PSG1. Only its audio output is transcribed: the data bus, \
+clock and strobes are sheet 1's digital side. Its IN pin is drawn with no wire."""
+
+[[parts]]
+group = "output"
+ref = "U4"
+kind = "U"
+device = "SN76489A"
+pins = ["7", "9"]
+out = ["7"]
+note = "PSG 2, selected by PSG2. Only its audio output and its IN pin are transcribed."
+
+[[parts]]
+group = "output"
+ref = "C12"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "output"
+ref = "R14"
+kind = "R"
+ohms = 10
+note = "with C12, a series RC from PSG 1's output to ground."
+
+[[parts]]
+group = "output"
+ref = "C13"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "output"
+ref = "R15"
+kind = "R"
+ohms = 10
+note = "with C13, a series RC from PSG 2's output to ground."
+
+[[parts]]
+group = "output"
+ref = "R13"
+kind = "R"
+ohms = 10
+note = """
+NOT A READ VALUE. From PSG 2's IN pin to ground, and the drawing prints no \
+value: at 3x the designator is clear and the space below it is blank. 10 ohms \
+is inferred from R14 and R15 beside it, which are 10 ohms, though those are \
+snubbers on the outputs and this ties the external audio input, a different \
+job. It carries no signal on this board, so no audio figure depends on it."""
+
+[[parts]]
+group = "output"
+ref = "C14"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward R16."
+
+[[parts]]
+group = "output"
+ref = "C15"
+kind = "C"
+uf = 1.0
+note = "electrolytic, + toward R17."
+
+[[parts]]
+group = "output"
+ref = "R16"
+kind = "R"
+kohms = 51
+note = "PSG 2 into the first summer."
+
+[[parts]]
+group = "output"
+ref = "R17"
+kind = "R"
+kohms = 51
+note = "PSG 1 into the first summer."
+
+[[parts]]
+group = "output"
+ref = "R18"
+kind = "R"
+kohms = 100
+note = "the first summer's feedback: each PSG at -R18/R16, -1.96."
+
+[[parts]]
+group = "output"
+ref = "R19"
+kind = "R"
+kohms = 51
+note = "the first summer into the second, at SJ."
+
+[[parts]]
+group = "output"
+ref = "R20"
+kind = "R"
+kohms = 20
+note = """
+The second summer's feedback, and so the reference every mixing resistor on \
+sheet 2 is read against: bass -20/240, congas -20/390, rim -20/200, gorilla \
+-20/51, and the PSG path -20/51 after the first summer."""
+
+[[parts]]
+ref = "U12"
+kind = "U"
+device = "3614"
+pins = ["1", "2", "3", "5", "6", "7", "8", "9", "10", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+note = "Quad op-amp, the two output summers and two spares. Supply pins 4 and 11 are not drawn."
+
+[[parts.sections]]
+name = "first summer"
+pins = ["10", "9", "8"]
+group = "output"
+op_amp = { plus = "10", minus = "9", out = "8" }
+
+[[parts.sections]]
+name = "second summer"
+pins = ["12", "13", "14"]
+group = "output"
+op_amp = { plus = "12", minus = "13", out = "14" }
+
+[[parts.sections]]
+name = "spare a"
+pins = ["3", "2", "1"]
+role = "unused: follower with + grounded"
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[parts.sections]]
+name = "spare b"
+pins = ["5", "6", "7"]
+role = "unused: follower with + grounded"
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+[[parts]]
+group = "output"
+ref = "U14"
+kind = "U"
+device = "78N06"
+pins = ["IN", "OUT", "COM"]
+out = ["OUT"]
+note = "the +6 V regulator, from +12 V. Pins are named on the symbol, not numbered."
+
+[[parts]]
+group = "output"
+ref = "C16"
+kind = "C"
+uf = 47
+note = "electrolytic on the regulator's input, + on +12 V."
+
+[[parts]]
+group = "output"
+ref = "C17"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "output"
+ref = "C18"
+kind = "C"
+uf = 0.1
+
+[[parts]]
+group = "output"
+ref = "C19"
+kind = "C"
+uf = 47
+note = "electrolytic on the regulator's output, + on +6 V."
+
+[[parts]]
+group = "output"
+ref = "R95"
+kind = "R"
+kohms = 1
+note = "the regulator's minimum load."
+
+[[parts]]
+group = "output"
+ref = "P1"
+kind = "J"
+pins = ["1", "2", "3", "4"]
+note = """
+The edge connector to the game board. Only the audio pins are transcribed: 3 \
+and 4 carry SOU, and 1 and 2 carry MUTE, which is the PPI's PB7 on sheet 1 and \
+goes straight to the connector, so muting happens off this board."""
+
+# ---------------------------------------------------------------------------
+# NETS
+# ---------------------------------------------------------------------------
+
+[[nets]]
+name = "+12V"
+rail = true
+on = [
+  "R21.a", "R27.a",
+  "R31.a", "R37.a",
+  "R41.a", "R47.a",
+  "R51.a", "R57.a",
+  "BF3.a", "R80.a", "U15.12",
+  "U14.IN", "C16.a", "C17.a",
+]
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["D5.k", "R70.a", "R71.a", "R76.a"]
+
+[[nets]]
+name = "GND"
+rail = true
+on = [
+  "U6.3",
+  "R22.b", "R23.b", "R25.b", "C22.b", "R29.b",
+  "R32.b", "R33.b", "R35.b", "C28.b", "R39.b",
+  "R42.b", "R43.b", "R45.b", "C34.b", "R49.b",
+  "R52.b", "R53.b", "R55.b", "C40.b", "R59.b", "C43.b",
+  "U20.1", "U20.2", "C45.b", "C46.b", "R64.b", "C47.b", "C48.b", "C49.b", "R69.b",
+  "U18.1", "U18.2", "U18.12", "U18.13",
+  "U19.1", "U19.4", "U19.12", "U19.15", "C52.b", "C53.b",
+  "C54.b", "C55.b", "R81.b", "C56.b", "R84.b", "R88.b", "Q2.e",
+  "C58.b", "U15.4", "C60.b",
+  "C12.a", "C13.a", "R13.b", "U12.3", "U12.5",
+  "U14.COM", "C16.b", "C17.b", "C18.b", "C19.b", "R95.b",
+]
+
+[[nets]]
+name = "SJ"
+on = ["R30.b", "R40.b", "R50.b", "R62.b", "R94.b", "U12.13", "R19.b", "R20.a"]
+note = """
+The percussion mix bus, labeled `SJ SH1` on sheet 2 and `SJ SH2` on sheet 1. \
+It is U12 pin 13, the second summer's virtual ground, so every voice on it is \
+set against R20 by its own mixing resistor."""
+
+# --- sheet 1: the PSGs, the summers, and +6 V ---
+
+[[nets]]
+name = "+6V"
+rail = true
+on = ["U14.OUT", "C18.a", "C19.a", "R95.a", "U12.10", "U12.12", "R86.a", "U16.3"]
+note = "made by U14 on sheet 1 from +12 V, and the bias every summer's + input sits on."
+
+[[nets]]
+name = "PSG1 out"
+on = ["U5.7", "R14.b", "C15.b"]
+
+[[nets]]
+name = "PSG1 snubber"
+on = ["C12.b", "R14.a"]
+
+[[nets]]
+name = "PSG2 out"
+on = ["U4.7", "R15.b", "C14.b"]
+
+[[nets]]
+name = "PSG2 snubber"
+on = ["C13.b", "R15.a"]
+
+[[nets]]
+name = "PSG2 IN"
+on = ["U4.9", "R13.a"]
+
+[[nets]]
+name = "PSG1 coupled"
+on = ["C15.a", "R17.a"]
+
+[[nets]]
+name = "PSG2 coupled"
+on = ["C14.a", "R16.a"]
+
+[[nets]]
+name = "first summer -in"
+on = ["R16.b", "R17.b", "R18.a", "U12.9"]
+
+[[nets]]
+name = "first summer out"
+on = ["U12.8", "R18.b", "R19.a"]
+
+[[nets]]
+name = "SOU"
+port = "output"
+on = ["U12.14", "R20.b", "P1.3", "P1.4"]
+note = "the board's audio output, to the amplifier on the game board."
+
+[[nets]]
+name = "MUTE"
+port = "input"
+on = ["P1.1", "P1.2"]
+note = "PB7 from the PPI on sheet 1, straight to the connector; this board's audio path does not use it."
+
+[[nets]]
+name = "U12 spare a"
+on = ["U12.1", "U12.2"]
+
+[[nets]]
+name = "U12 spare b"
+on = ["U12.7", "U12.6"]
+
+# --- gorilla ---
+
+[[nets]]
+name = "GORILLA"
+port = "input"
+on = ["U19.5", "U19.11"]
+note = "PB1 from the PPI on sheet 1, into both monostables' falling-edge inputs."
+
+[[nets]]
+name = "HM5837 supply"
+on = ["BF3.b", "U20.4", "C45.a", "C46.a"]
+
+[[nets]]
+name = "noise out"
+on = ["U20.3", "R63.a"]
+
+[[nets]]
+name = "noise clamp"
+on = ["R63.b", "R64.a", "D5.a", "C47.a", "U18.5", "U18.6"]
+note = "R63 and R64 halve the HM5837's 12 V swing, and D5 clamps it at +5 V for the 4001B."
+
+[[nets]]
+name = "gated noise"
+on = ["U18.4", "R65.a"]
+
+[[nets]]
+name = "noise ladder 1"
+on = ["R65.b", "C48.a", "R66.a"]
+
+[[nets]]
+name = "noise ladder 2"
+on = ["R66.b", "C50.a", "R67.a"]
+
+[[nets]]
+name = "noise lp +in"
+on = ["R67.b", "C49.a", "U17.10"]
+
+[[nets]]
+name = "noise lp -in"
+on = ["U17.9", "R68.b", "R69.a"]
+
+[[nets]]
+name = "noise lp out"
+on = ["U17.8", "C50.b", "R68.a", "C51.a"]
+
+[[nets]]
+name = "noise coupled"
+on = ["C51.b", "R78.a"]
+
+[[nets]]
+name = "monostable reset"
+on = ["R76.b", "U19.3", "U19.13"]
+
+[[nets]]
+name = "monostable a timing"
+on = ["R70.b", "C52.a", "U19.2"]
+
+[[nets]]
+name = "monostable a Q"
+on = ["U19.6", "U18.9"]
+
+[[nets]]
+name = "monostable b timing"
+on = ["R71.b", "C53.a", "U19.14"]
+
+[[nets]]
+name = "monostable b Qbar"
+on = ["U19.9", "U18.8"]
+
+[[nets]]
+name = "monostable b Q"
+on = ["U19.10", "D7.a", "R75.a"]
+
+[[nets]]
+name = "gate envelope diode"
+on = ["D7.k", "R74.a"]
+
+[[nets]]
+name = "gate envelope"
+on = ["R74.b", "R75.b", "C54.a", "U16.10"]
+
+[[nets]]
+name = "gate envelope out"
+on = ["U16.8", "U16.9", "U15.13"]
+note = "the buffered gate envelope, to U15's CY across the seam between p17 and p18."
+
+[[nets]]
+name = "envelope gate out"
+on = ["U18.10", "R72.a", "D6.a"]
+
+[[nets]]
+name = "pitch envelope diode"
+on = ["D6.k", "R73.a"]
+
+[[nets]]
+name = "pitch envelope"
+on = ["R72.b", "R73.b", "C55.a", "U17.5"]
+
+[[nets]]
+name = "pitch envelope out"
+on = ["U17.7", "U17.6", "R77.a"]
+
+[[nets]]
+name = "summer -in"
+on = ["R77.b", "R78.b", "R79.a", "U17.13"]
+
+[[nets]]
+name = "summer bias"
+on = ["R80.b", "R81.a", "C56.a", "U17.12"]
+
+[[nets]]
+name = "control voltage"
+on = ["U17.14", "R79.b", "R82.a", "R83.a"]
+note = "the summer's output, which sets the oscillator's rate."
+
+[[nets]]
+name = "integrator -in"
+on = ["R82.b", "C62.a", "U17.2", "R85.a"]
+
+[[nets]]
+name = "integrator +in"
+on = ["R83.b", "R84.a", "U17.3"]
+
+[[nets]]
+name = "integrator out"
+on = ["U17.1", "C62.b", "U16.6"]
+
+[[nets]]
+name = "Schmitt +in"
+on = ["R86.b", "R87.a", "U16.5"]
+
+[[nets]]
+name = "Schmitt out"
+on = ["U16.7", "R87.b", "D8.a", "R90.a"]
+
+[[nets]]
+name = "Q2 drive"
+on = ["D8.k", "R89.a"]
+
+[[nets]]
+name = "Q2 base"
+on = ["R89.b", "R88.a", "Q2.b"]
+
+[[nets]]
+name = "Q2 collector"
+on = ["Q2.c", "R85.b"]
+
+[[nets]]
+name = "scaler -in"
+on = ["R90.b", "R91.a", "U16.2"]
+
+[[nets]]
+name = "scaler out"
+on = ["U16.1", "R91.b", "R92.a"]
+
+[[nets]]
+name = "gorilla lp mid"
+on = ["R92.b", "R93.a", "C57.a"]
+
+[[nets]]
+name = "gorilla lp +in"
+on = ["R93.b", "C58.a", "U16.12"]
+
+[[nets]]
+name = "gorilla lp out"
+on = ["U16.14", "U16.13", "C57.b", "C59.a"]
+
+[[nets]]
+name = "U15 in"
+on = ["C59.b", "U15.1"]
+
+[[nets]]
+name = "U15 RD"
+on = ["U15.2", "C60.a"]
+
+[[nets]]
+name = "U15 out"
+on = ["U15.3", "C61.a"]
+
+[[nets]]
+name = "gorilla mix"
+on = ["C61.b", "R94.a"]
+
+# --- bass ---
+
+[[nets]]
+name = "BASS DRUM"
+port = "input"
+on = ["U6.9"]
+note = "PC0 from the PPI on sheet 1."
+
+[[nets]]
+name = "bass pulse"
+on = ["U6.8", "R21.b", "C20.a"]
+
+[[nets]]
+name = "bass edge"
+on = ["C20.b", "R22.a", "D1.k"]
+
+[[nets]]
+name = "bass rectified"
+on = ["D1.a", "R23.a", "C21.b"]
+
+[[nets]]
+name = "bass coupled"
+on = ["C21.a", "R24.a"]
+
+[[nets]]
+name = "bass +in"
+on = ["R24.b", "R25.a", "R26.b", "U13.12"]
+
+[[nets]]
+name = "bass bias"
+on = ["R27.b", "R26.a", "C22.a"]
+
+[[nets]]
+name = "bass -in"
+on = ["U13.13", "R28.a", "C23.a"]
+
+[[nets]]
+name = "bass T"
+on = ["C23.b", "C24.a", "R29.a"]
+
+[[nets]]
+name = "bass out"
+on = ["U13.14", "R28.b", "C24.b", "C25.a"]
+
+[[nets]]
+name = "bass mix"
+on = ["C25.b", "R30.a"]
+
+# --- conga (L) ---
+
+[[nets]]
+name = "CONGA (L)"
+port = "input"
+on = ["U6.5"]
+note = "PC1 from the PPI on sheet 1."
+
+[[nets]]
+name = "conga-low pulse"
+on = ["U6.6", "R31.b", "C26.a"]
+
+[[nets]]
+name = "conga-low edge"
+on = ["C26.b", "R32.a", "D2.k"]
+
+[[nets]]
+name = "conga-low rectified"
+on = ["D2.a", "R33.a", "C27.a"]
+
+[[nets]]
+name = "conga-low coupled"
+on = ["C27.b", "R34.a"]
+
+[[nets]]
+name = "conga-low +in"
+on = ["R34.b", "R35.a", "R36.b", "U13.10"]
+
+[[nets]]
+name = "conga-low bias"
+on = ["R37.b", "R36.a", "C28.a"]
+
+[[nets]]
+name = "conga-low -in"
+on = ["U13.9", "R38.a", "C30.a"]
+
+[[nets]]
+name = "conga-low T"
+on = ["C30.b", "C31.a", "R39.a"]
+
+[[nets]]
+name = "conga-low out"
+on = ["U13.8", "R38.b", "C31.b", "C29.a"]
+
+[[nets]]
+name = "conga-low mix"
+on = ["C29.b", "R40.a"]
+
+# --- conga (H) ---
+
+[[nets]]
+name = "CONGA (H)"
+port = "input"
+on = ["U6.13"]
+note = "PC2 from the PPI on sheet 1."
+
+[[nets]]
+name = "conga-high pulse"
+on = ["U6.12", "R41.b", "C32.a"]
+
+[[nets]]
+name = "conga-high edge"
+on = ["C32.b", "R42.a", "D3.k"]
+
+[[nets]]
+name = "conga-high rectified"
+on = ["D3.a", "R43.a", "C33.a"]
+
+[[nets]]
+name = "conga-high coupled"
+on = ["C33.b", "R44.a"]
+
+[[nets]]
+name = "conga-high +in"
+on = ["R44.b", "R45.a", "R46.b", "U13.3"]
+
+[[nets]]
+name = "conga-high bias"
+on = ["R47.b", "R46.a", "C34.a"]
+
+[[nets]]
+name = "conga-high -in"
+on = ["U13.2", "R48.a", "C35.a"]
+
+[[nets]]
+name = "conga-high T"
+on = ["C35.b", "C36.a", "R49.a"]
+
+[[nets]]
+name = "conga-high out"
+on = ["U13.1", "R48.b", "C36.b", "C37.a"]
+
+[[nets]]
+name = "conga-high mix"
+on = ["C37.b", "R50.a"]
+
+# --- rim ---
+
+[[nets]]
+name = "RIM"
+port = "input"
+on = ["U6.11"]
+note = "PC3 from the PPI on sheet 1."
+
+[[nets]]
+name = "rim pulse"
+on = ["U6.10", "R51.b", "C38.a"]
+
+[[nets]]
+name = "rim edge"
+on = ["C38.b", "R52.a", "D4.k"]
+
+[[nets]]
+name = "rim rectified"
+on = ["D4.a", "R53.a", "C39.a"]
+
+[[nets]]
+name = "rim coupled"
+on = ["C39.b", "R54.a"]
+
+[[nets]]
+name = "rim +in"
+on = ["R54.b", "R55.a", "R56.b", "U13.5"]
+
+[[nets]]
+name = "rim bias"
+on = ["R57.b", "R56.a", "C40.a"]
+
+[[nets]]
+name = "rim -in"
+on = ["U13.6", "R58.a", "C41.a", "R60.a"]
+
+[[nets]]
+name = "rim T"
+on = ["C41.b", "C42.a", "R59.a"]
+
+[[nets]]
+name = "rim second T"
+on = ["R60.b", "R61.a", "C43.a"]
+
+[[nets]]
+name = "rim out"
+on = ["U13.7", "R58.b", "C42.b", "R61.b", "C44.a"]
+
+[[nets]]
+name = "rim mix"
+on = ["C44.b", "R62.a"]
