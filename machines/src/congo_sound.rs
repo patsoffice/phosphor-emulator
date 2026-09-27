@@ -28,12 +28,14 @@
 //! # The gorilla is the drawing too
 //!
 //! A relaxation oscillator whose rate follows an envelope plus noise, gated by
-//! a second envelope; see [`Gorilla`]. It departs from the drawing in two
-//! places, both decided against a recording of a real board: U17's noise stage
-//! runs at unity gain (drawn, it latches and erases the pitch envelope the
-//! recording has), and U15's gain law is fitted. Against that recording its
-//! pitch still rests about 1.5 times low, and its dip is deeper and recovers
-//! more slowly, and nothing is fitted to hide it.
+//! a second envelope; see [`Gorilla`]. The structure is the drawing, but six
+//! of its numbers are not, and each is marked where it is set: U17's noise
+//! stage runs at unity gain (drawn, it latches), the second monostable's
+//! period and a leak across C55 are measured from a recording of a real
+//! board, the NOR's drive level, the Schmitt's upper threshold and U15's gain
+//! law are fitted to that recording, and U15's peak gain is set by ear. With
+//! them it rests near 410 Hz, dips 1.4 times from 100 to 200 ms and recovers
+//! in tens of milliseconds, as the recording does.
 //!
 //! # The drums against recordings of a real board
 //!
@@ -43,7 +45,7 @@
 //! 1015. The three higher ones run sharp and decay a little fast, which is what
 //! capacitor tolerance or a slow real 3614 would do to a bridged-T.
 //!
-//! # Three assumptions, each stated where it is used
+//! # Three assumptions shared across voices, each stated where it is used
 //!
 //! - The 3614's output range: 0 V to 10.5 V on its +12 V supply, an LM324's.
 //!   The part is not identified.
@@ -51,7 +53,8 @@
 //!   chosen so the music plays exactly as loud as it did before the drums were
 //!   rebuilt; see [`PSG_FULL_SWING_V`].
 //! - U15, the gorilla's VCA, `G501534`, not identified: a gain law FITTED to
-//!   the recording, zero below 2.6 V on CY and linear above.
+//!   the recording, zero below 3.0 V on CY and linear above, peaking at a gain
+//!   set by ear.
 
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
 use phosphor_core::device::{
@@ -916,13 +919,42 @@ const R91: f64 = 10e3; // and its feedback
 const R94: f64 = 51e3; // the gorilla's mixing resistor onto SJ
 const C61: f64 = 1e-6; // in series with it
 
-/// The two 4538B monostables' periods, `R70 C52` and `R71 C53`, taking the
-/// 4538's period as `R C`.
+/// The first 4538B monostable's period, `R70 C52`, taking the 4538's period as
+/// `R C`. The recording's pitch dip starts 101 to 103 ms after the trigger,
+/// which agrees.
 const MONO_A_S: f64 = 100e3 * 1e-6;
-const MONO_B_S: f64 = 150e3 * 1e-6;
+
+/// The second monostable's period. MEASURED from the recording, not the
+/// drawing's `R71 C53`, 150 ms: the recording's dip holds flat until about
+/// 200 ms, where a window closing at 150 would already have the pitch rising.
+/// C53 is a 1 uF electrolytic, and a third over its marking is within what one
+/// of its age can be.
+const MONO_B_S: f64 = 0.200;
 
 /// A 4001B's output high, on +5 V.
 const CMOS_HIGH_V: f64 = 5.0;
+
+/// The NOR's output high as it charges C55. FITTED to the recording's dip,
+/// 1.4 times where +5 V gives 2.2. Nothing on the drawing loads U18 enough to
+/// pull it this low, and only this output is lowered: the noise gate on the
+/// same package and the second monostable's output stay at [`CMOS_HIGH_V`].
+const NOR_HIGH_V: f64 = 3.0;
+
+/// A resistance across C55. MEASURED from the recording, which recovers from
+/// its dip with a time constant of about 30 ms where R72 C55 alone gives 330.
+/// The drawing has no such part: a leaky electrolytic, or R72 printed a decade
+/// high, would each do it, and this models the first.
+const C55_LEAK_OHMS: f64 = 33e3;
+
+/// The Schmitt's upper threshold, where the ramp turns it low. FITTED to the
+/// recording's rest pitch, about 405 Hz: the drawing puts it at 7.52 V, R86
+/// and R87 between +6 V and a 10.5 V output, which gives 282 Hz. This is the
+/// threshold an output reaching only 7 V would set, and it is applied to the
+/// threshold alone. The recording is normalized and says nothing of the
+/// Schmitt's output level, so the square wave the scaler takes keeps the
+/// assumed 0 to 10.5 V. It stands for something not yet found rather than for
+/// a part.
+const SCHMITT_UPPER_V: f64 = (V6 * R87 + 7.0 * R86) / (R86 + R87);
 
 /// Q2's collector when saturated.
 const Q2_SAT_V: f64 = 0.1;
@@ -943,9 +975,17 @@ const CONTROL_V: usize = 8;
 /// set's `gorilla.wav`, a recording of a real board, because U15 (`G501534`)
 /// is not identified and there is no part whose law this could be read from.
 /// With C54's drawn 470 ms decay it makes the level hold while the gate
-/// envelope is charged and fall 20 dB in about 150 ms after, as the recording
-/// does.
-const U15_THRESHOLD_V: f64 = 2.60;
+/// envelope is charged and fall about 25 dB in the 180 ms after, as the
+/// recording does. Refitted from 2.60 V when [`MONO_B_S`] moved to 200 ms.
+const U15_THRESHOLD_V: f64 = 3.00;
+
+/// U15's gain with the gate envelope fully charged. SET BY EAR, not read: U15
+/// has no external part that sets it (its RD pin carries only C60), and the
+/// MAME sample set normalizes every recording, so nothing measures the roar
+/// against the drums. At unity the roar sounded quiet beside them, and 2.6
+/// makes its peak equal a bass drum hit's. The scaler's divide-by-10 on U16
+/// just ahead of it is the kind of cut made to feed a VCA that then has gain.
+const U15_MAX_GAIN: f64 = 2.6;
 
 /// The gorilla as the board builds it.
 ///
@@ -968,14 +1008,19 @@ const U15_THRESHOLD_V: f64 = 2.60;
 /// follows the + input at half the control voltage. So the control voltage
 /// reaches the Schmitt twice: integrated, as the ramp's slope, and directly, at
 /// half size. The direct path lets the noise cross a threshold before the ramp
-/// does, which raises the pitch above what the slopes alone give: 282 Hz at
-/// rest against 264, and 125 in the dip against 112. The model integrated the
-/// output alone until 2026-09-26.
+/// does, which raises the pitch above what the slopes alone give. The model
+/// integrated the output alone until 2026-09-26.
 ///
 /// # Where this departs from the drawing, and why
 ///
-/// Two places, both decided against recordings of a real board (the MAME
-/// sample set's `gorilla.wav`), and both marked where they are made.
+/// The MAME sample set's `gorilla.wav` is a recording of a real board, and
+/// the drums match that set within a few percent from the drawing alone. As
+/// drawn, the gorilla did not: measured cycle by cycle it rested at 282 Hz
+/// against the recording's 405, dipped 2.2 times against 1.4, held its dip to
+/// 150 ms against 200, and recovered with R72 C55's 330 ms against about 30.
+/// Every part involved reads as transcribed at 3x and 4x. A sweep of single
+/// physical changes, each scored against those measurements, found no one
+/// change that fits; these do, and each is marked where it is set.
 ///
 /// - **U17's noise stage runs at unity gain.** The drawing gives it R68 and
 ///   R69, a gain of 2, and with the drawn capacitors that puts its poles in the
@@ -983,38 +1028,28 @@ const U15_THRESHOLD_V: f64 = 2.60;
 ///   voltage slams between its limits, and the pitch envelope disappears under
 ///   it. The recording has the pitch envelope, a clean dip and recovery, so the
 ///   board does not do what that reading says. R69 is left out.
+/// - **The second monostable runs 200 ms**, [`MONO_B_S`], MEASURED: the
+///   recording's dip holds to 200 ms. Its first, 100 ms as drawn, agrees.
+/// - **C55 has a 33k leak across it**, [`C55_LEAK_OHMS`], MEASURED from the
+///   recording's 30 ms recovery.
+/// - **The NOR drives C55 from 3.0 V**, [`NOR_HIGH_V`], FITTED to the dip's
+///   depth. Nothing drawn explains it.
+/// - **The Schmitt's upper threshold is 6.34 V**, [`SCHMITT_UPPER_V`], FITTED
+///   to the rest pitch. Nothing drawn explains it either.
 /// - **U15, `G501534`, is NOT IDENTIFIED**, and its gain law is FITTED: zero
-///   below [`U15_THRESHOLD_V`] on CY, rising linearly to unity with the gate
-///   envelope fully charged, applied to the AC part of its input. That matches
-///   the recording's level to 1.8 dB RMS: full while C54 is charged, then a
-///   steep fade as C54 decays through the threshold.
+///   below [`U15_THRESHOLD_V`] on CY, rising linearly with the gate envelope to
+///   [`U15_MAX_GAIN`] fully charged, applied to the AC part of its input. That
+///   matches the recording's level envelope to 1.5 dB RMS: full while C54 is
+///   charged, then a steep fade as C54 decays through the threshold. The peak
+///   gain is set by ear against the drums, since the recordings are
+///   normalized.
 ///
-/// # What still does not match
-///
-/// The pitch, and the pitch envelope's timing. Measured cycle by cycle:
-///
-/// | | this | recording |
-/// |---|---|---|
-/// | rest | 282 Hz | about 420 Hz |
-/// | dip | about 120 Hz | about 305 Hz |
-/// | window | 100 to 150 ms | about 87 to 185 ms |
-/// | recovery | R72 C55, 330 ms | about 30 ms |
-///
-/// The recording's rest is also rough, with bursts of cycles at 550 to 800 Hz,
-/// where its dip is steady; this is steady in both.
-///
-/// No single speed error in the recording reconciles these: its window opens
-/// early, closes late, and recovers ten times fast. The drawn envelope charges
-/// C55 to about 4.4 V from the 4001B's +5 V, which with R77 and R79 takes the
-/// control voltage from 8.4 V to 3.6 and the pitch down 2.4 times; the
-/// recording's dip is 1.4. No level of noise moves that ratio, and a smaller
-/// Schmitt swing scales rest and dip together. Every part in the oscillator,
-/// the summer and the envelopes was read again at 3x and 4x and they are as
-/// drawn, so the recorded board's envelope parts likely differ from its
-/// drawing, and nothing here is fitted to close the gap.
-///
-/// The slow recovery is also why the game's roars, 0.41 s apart, sit lower than
-/// the first: C55 still holds about 2 V when the next one fires.
+/// With these the roar rests near 410 Hz, dips to about 298 from 100 to
+/// 200 ms, and is back within tens of milliseconds, against the recording's
+/// 405, 294 and 200 ms. The recording's rest also has bursts of short cycles
+/// where its dip is steady; this does not, and those may be noise in the
+/// recording rather than the circuit, since its rest is 3 dB quieter than its
+/// dip.
 struct Gorilla {
     control: LinNet,
     smooth: LinNet,
@@ -1116,10 +1151,21 @@ impl Gorilla {
     }
 
     /// An envelope capacitor charged through a diode and a small resistor and
-    /// discharged through a large one, both from a CMOS output.
-    fn envelope(v: f64, high: bool, fast: f64, slow: f64, c: f64, h: f64) -> f64 {
-        let drive = if high { CMOS_HIGH_V } else { 0.0 };
-        let mut i = (drive - v) / slow;
+    /// discharged through a large one, both from a CMOS output at `drive_v`
+    /// when high, with `leak` across the capacitor.
+    #[allow(clippy::too_many_arguments)]
+    fn envelope(
+        v: f64,
+        high: bool,
+        drive_v: f64,
+        fast: f64,
+        slow: f64,
+        leak: f64,
+        c: f64,
+        h: f64,
+    ) -> f64 {
+        let drive = if high { drive_v } else { 0.0 };
+        let mut i = (drive - v) / slow - v / leak;
         if drive - DIODE_DROP_V - v > 0.0 {
             i += (drive - DIODE_DROP_V - v) / (fast + DIODE_OHMS);
         }
@@ -1136,8 +1182,26 @@ impl Gorilla {
 
         // The NOR of the first's Q and the second's Q-bar.
         let window = !qa && qb;
-        self.pitch_env = Self::envelope(self.pitch_env, window, R73, R72, C55, self.h);
-        self.gate_env = Self::envelope(self.gate_env, qb, R74, R75, C54, self.h);
+        self.pitch_env = Self::envelope(
+            self.pitch_env,
+            window,
+            NOR_HIGH_V,
+            R73,
+            R72,
+            C55_LEAK_OHMS,
+            C55,
+            h,
+        );
+        self.gate_env = Self::envelope(
+            self.gate_env,
+            qb,
+            CMOS_HIGH_V,
+            R74,
+            R75,
+            f64::INFINITY,
+            C54,
+            h,
+        );
 
         // The HM5837's output, halved, clamped and squared by the 4001B.
         let feedback = self.lfsr & 1;
@@ -1173,12 +1237,13 @@ impl Gorilla {
         {
             self.trace_integrator = integrator;
         }
-        let schmitt_out = if self.schmitt_high {
-            OPAMP_HI_V
+        // The thresholds R86 and R87 set about +6 V from the output; the
+        // upper one FITTED (see SCHMITT_UPPER_V).
+        let threshold = if self.schmitt_high {
+            SCHMITT_UPPER_V
         } else {
-            OPAMP_LO_V
+            (V6 * R87 + OPAMP_LO_V * R86) / (R86 + R87)
         };
-        let threshold = (V6 * R87 + schmitt_out * R86) / (R86 + R87);
         if self.schmitt_high && integrator > threshold {
             self.schmitt_high = false;
         } else if !self.schmitt_high && integrator < threshold {
@@ -1199,7 +1264,7 @@ impl Gorilla {
         // charged through D7.
         let full = CMOS_HIGH_V - DIODE_DROP_V;
         let gain = ((self.gate_env - U15_THRESHOLD_V) / (full - U15_THRESHOLD_V)).clamp(0.0, 1.0);
-        let gated = (smoothed - V6) * gain;
+        let gated = (smoothed - V6) * gain * U15_MAX_GAIN;
         let current = (gated - self.coupling) / R94;
         self.coupling += h * current / C61;
         current
@@ -1538,18 +1603,16 @@ mod tests {
     }
 
     /// U17's noise stage filters, rather than latching as its drawn gain of 2
-    /// would, and the pitch envelope pulls the oscillator down while its NOR
-    /// window is open: the shape of the recording (`gorilla.wav` in the MAME
-    /// sample set), which rests high, dips, and recovers. The recording's
-    /// absolute pitch is about 1.5 times this one's, which is recorded rather
-    /// than fitted; the test holds the circuit's own figures.
+    /// would, and the growl has the recording's shape (`gorilla.wav` in the
+    /// MAME sample set): it rests high, dips about 1.4 times while the NOR
+    /// window is open, and is back within tens of milliseconds of the window
+    /// closing, where R72 C55 alone would take a third of a second.
     ///
-    /// The rest pitch is above the 264 Hz the drawn oscillator gives with a
-    /// quiet control voltage, and only the noise reaching the Schmitt through
-    /// C62 unintegrated can put it there. Integrating the output alone, as
-    /// this model once did, rests at 256 Hz.
+    /// The figures here are flips counted over a span, a mean that short
+    /// cycles lift above the recording's per-cycle levels (about 405 Hz at
+    /// rest and 294 in the dip).
     #[test]
-    fn the_noise_stage_filters_and_the_pitch_envelope_dips_the_growl() {
+    fn the_growl_rests_dips_and_recovers_as_recorded() {
         let h = 1.0 / (sample_rate() as f64 * OVERSAMPLE as f64);
         let mut g = Gorilla::new(h);
         let (rest, at_rail) = run_gorilla(&mut g, 0.5);
@@ -1559,7 +1622,7 @@ mod tests {
             at_rail * 100.0
         );
         assert!(
-            (270.0..300.0).contains(&rest),
+            (400.0..490.0).contains(&rest),
             "the growl rests at {rest:.0} Hz"
         );
 
@@ -1568,9 +1631,19 @@ mod tests {
         g.mono_b = MONO_B_S;
         let _ = run_gorilla(&mut g, MONO_A_S + 0.005);
         let (dip, _) = run_gorilla(&mut g, MONO_B_S - MONO_A_S - 0.01);
+        let ratio = rest / dip;
         assert!(
-            dip < rest * 0.6,
-            "the growl dips to {dip:.0} Hz from {rest:.0}"
+            (1.25..1.6).contains(&ratio),
+            "the growl dips to {dip:.0} Hz from {rest:.0}, {ratio:.2} times"
+        );
+
+        // 60 ms after the window closes, the pitch is back within 15 %; R72
+        // C55 alone would still hold it near the dip.
+        let _ = run_gorilla(&mut g, 0.005 + 0.060);
+        let (back, _) = run_gorilla(&mut g, 0.030);
+        assert!(
+            back > rest * 0.85,
+            "the growl is at {back:.0} Hz 60 ms after the dip, against {rest:.0}"
         );
     }
 

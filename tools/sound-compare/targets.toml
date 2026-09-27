@@ -280,12 +280,17 @@ and the noise, gated by U15. The MAME sample set's WAVs are recordings of a real
 board, and the drums match them within a few percent from the drawing alone.
 Against gorilla.wav two things changed: U17's noise stage runs at unity gain,
 because its drawn gain of 2 latches and would erase the pitch envelope the
-recording has; and U15's gain law is fitted (threshold 2.6 V on CY). The
+recording has; and U15's gain law is fitted (threshold 3.0 V on CY). The
 integrator passes the control voltage's noise straight to the Schmitt at half
-size, as drawn, which the model once left out. The gorilla still rests about
-1.5 times low (282 Hz against 420), dips 2.4 times where the recording dips
-1.4, and recovers from the dip in 330 ms against about 30; left unfitted, as
-the recorded board's envelope parts rather than the oscillator.
+size, as drawn, which the model once left out. As drawn it still rested 1.5
+times low, dipped 2.2 times against 1.4, and recovered in 330 ms against about
+30. A sweep of single physical changes found no one change that fits, and four
+were adopted: the second monostable at 200 ms and a 33k leak across C55, both
+measured from the recording; and the NOR's drive at 3.0 V and the Schmitt's
+upper threshold at 6.34 V, both fitted and explained by nothing on the
+drawing. It now rests near 410 Hz, dips to about 298 from 100 to 200 ms and
+recovers in tens of milliseconds, against 405, 294 and 200 ms. U15's peak gain
+(2.6) is set by ear against the drums: the recordings are all normalized.
 
 The emulator's implementation choice was read as evidence about the hardware.
 Reading the drawing took twenty minutes; the belief had been in the plan for

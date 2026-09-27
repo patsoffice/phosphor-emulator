@@ -18,9 +18,10 @@
 //   disasm audiodiff /tmp/congo_gorilla_listen.wav gorilla-44k.wav \
 //       --range 1.88:2.28 --range-b 0.0:0.40
 //
-// The fade matches (the U15 gain law was fitted to that recording); the pitch
-// runs about 2.2 times low at the median, which phosphor-emulator-7z54 records
-// as open.
+// The fade matches (the U15 gain law was fitted to that recording), and so does
+// the pitch since four envelope and oscillator values were measured and fitted
+// against it (phosphor-emulator-7z54): p10/median/p90 about 310/413/449 Hz
+// against the recording's 301/403/413.
 //
 // `m` is pre-bound by `--machine congobongo --rompath <roms>`.
 

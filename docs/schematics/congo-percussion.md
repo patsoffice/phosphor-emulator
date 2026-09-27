@@ -131,17 +131,20 @@ things the drawing could not.
   the envelope's window is open, and recovers: the envelope is there. So the
   device runs the stage at unity gain, a 7 kHz low-pass, and every value around
   it was rechecked at 3x and 5x first.
-- **U15's gain law is fitted.** Zero below 2.6 V on CY, linear to unity with
-  C54 fully charged, which matches the recording's level to 1.8 dB RMS: full
-  while C54 is charged, then a steep fade. U15 (`G501534`) has no part number
-  to read a law from.
+- **U15's gain law is fitted.** Zero below 3.0 V on CY, linear with C54 up
+  to a peak gain at full charge, which matches the recording's level envelope
+  to 1.5 dB RMS: full while C54 is charged, then a steep fade. U15
+  (`G501534`) has no part number to read a law from, and no external part
+  sets its gain (its RD pin carries only C60, 680 pF). The peak gain, 2.6, is
+  set by ear so the roar peaks with a bass drum hit: at unity it sounded quiet
+  beside the drums, and every recording in the set is normalized, so none can
+  say. The threshold was 2.6 V until the second monostable moved to 200 ms
+  (below).
 
-**The pitch does not match, and is left so.** The device rests at 282 Hz and
-dips to about 120; the recording rests at 420 and dips to 305. The timing
+**The pitch did not match as drawn.** The device rested at 256 Hz and dipped
+to about 112; the recording rests near 420 and dips to 305. The timing
 components, the summer and the oscillator (R70/C52, R71/C53, R72/C55, R77/R79,
-R82/R85/C62, R86/R87) all read as transcribed at 4x. The gap is the board
-against its drawing, an unidentified part, or the recording, and fitting the
-oscillator to it would bury drawn values under fitted ones.
+R82/R85/C62, R86/R87) all read as transcribed at 4x.
 
 *One part of the gap was the model, 2026-09-26.* U17's integrator has its +
 input at half the control voltage, and its output is that voltage less C62's.
@@ -151,35 +154,58 @@ Schmitt directly at half size and crosses a threshold early, which raises the
 pitch: 256 to 282 Hz at rest, 112 to 125 in the dip. That is the drawing, not a
 fit.
 
-What is left is not one error. Measured cycle by cycle, the recording differs
-in four ways that no single cause fits:
+*The rest was not one error, and is closed with four changes, 2026-09-26.*
+Measured cycle by cycle (per-cycle levels as 30th percentiles, so bursts of
+short cycles do not lift them):
 
-| | device | recording |
-|---|---|---|
-| rest | 282 Hz, steady | about 420 Hz, with bursts at 550 to 800 |
-| dip | about 120 Hz | about 305 Hz, steady |
-| window | 100 to 150 ms (R70 C52, R71 C53) | about 87 to 185 ms |
-| recovery | 330 ms (R72 C55) | about 30 ms |
+| | as drawn | recording | adopted |
+|---|---|---|---|
+| rest | 274 Hz | 405 Hz | 414 Hz |
+| tail, 270 to 340 ms | 178 Hz | 388 Hz | 404 Hz |
+| dip | 125 Hz (2.2 times) | 294 Hz (1.4 times) | 298 Hz (1.4 times) |
+| dip starts | 100 ms | 101 to 103 ms | 100 ms |
+| dip ends | 150 ms, then 330 ms back | about 200 ms, then about 30 ms back | 200 ms, about 30 ms |
+
+An earlier reading put the recording's dip at 87 ms; that was a 25 ms
+autocorrelation window smearing it, and cycle by cycle it starts on the drawn
+R70 C52.
+
+A sweep of single physical changes, each scored against those figures, found
+none that fits alone:
 
 - **The recording's time base is not it.** A speed error scales every time
-  together, and these would need 0.87 (window opens), 1.23 (window closes),
-  about 0.09 (recovery) and 1.5 (pitch).
-- **The noise's level is not it.** Clocking the HM5837 slower puts more noise
-  in U17's band and raises the device's pitch (334 Hz at rest at 12 kHz), but
-  the dip ratio stays at 2.2 against the recording's 1.4. The HM5837's clock
-  is not read either way; the device steps it once per substep.
-- **The Schmitt's swing is not it.** A smaller swing scales rest and dip
-  together, and 420 Hz would take about 7 V, which is not an LM324's range.
+  and pitch together, and these move independently.
+- **The noise's level is not it.** Clocking the HM5837 slower, or giving U17's
+  noise stage some gain, raises the rest pitch, but the dip ratio stays near 2
+  against the recording's 1.4. The HM5837's clock is not read either way; the
+  device steps it once per substep.
+- **The Schmitt's swing alone is not it.** It scales rest and dip together.
+- **No value of C55 is it.** A smaller C55 recovers faster but dips deeper.
 - **The envelope's supply is as modeled.** R70, R71 and R76 are on +5 V and D5
-  clamps the noise to +5 V for the 4001B, so C55 charges to about 4.4 V, and
-  with R77 and R79 that pulls the control voltage from 8.4 V to 3.6: a dip of
-  2.4 times, where the recording's 1.4 wants C55 near 2 V.
+  clamps the noise to +5 V for the 4001B, so C55 charges to about 4.4 V as
+  drawn, a dip of 2.2 times.
 
-A shallow dip, a window twice as long and a recovery ten times fast all point
-at the recorded board's envelope parts, not at the oscillator, and nothing on
-the sheet explains them. The slow drawn recovery is also why the game's five
-roars, 0.41 s apart, sit lower in play than the first: C55 still holds about
-2 V when the next one fires.
+What fits is four changes, adopted, each marked in `congo_sound.rs`:
+
+- **The second monostable runs 200 ms, measured.** The first matches the
+  drawing, and C53 a third over its 1 uF marking is within what an
+  electrolytic of its age can be.
+- **C55 has 33k across it, measured** from the 30 ms recovery. A leaky
+  electrolytic would do it, or R72 printed a decade high.
+- **The NOR drives C55 from 3.0 V, fitted** to the dip's depth, the NOR's
+  output alone: the noise and the gate envelope stay at +5 V. Nothing on the
+  drawing loads U18 enough to explain it.
+- **The Schmitt's upper threshold is 6.34 V, fitted** to the rest pitch,
+  where R86 and R87 put it at 7.52. It is the threshold a 7 V output would
+  set, applied to the threshold alone, so the square wave into the scaler
+  keeps its assumed swing and the roar's level is not changed by the fit.
+
+The last two stand for something not yet found rather than for parts. The
+recording's rest also has bursts of short cycles where its dip is steady, and
+the device has neither; that may be noise in the recording, since its rest is
+3 dB quieter than its dip (400 Hz sits above the output low-pass's 330 Hz
+corner). The higher pitch makes the roar a few dB quieter through that
+low-pass than it was as drawn, as the recording's own rest is.
 
 The device plays the congas at 160 and 250 Hz and the rim as low-passed noise,
 so all three were tuned by ear to something the board does not do. These
