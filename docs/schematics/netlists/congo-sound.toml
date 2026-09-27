@@ -748,7 +748,16 @@ group = "gorilla"
 ref = "R68"
 kind = "R"
 kohms = 20
-note = "U17 pin 8 to pin 9. With R69 the section's gain is 2."
+note = """
+U17 pin 8 to pin 9. With R69 the section's gain is 2, and with R65 to R67 and \
+C48 to C50 as drawn that puts two of the filter's three poles in the right \
+half-plane, both real: the stage latches to a rail rather than low-passing. \
+Rechecked at 3x and 5x on 2026-09-25: R68 and R69 read 20K, the capacitors \
+.0015, .0039 and 220 pF, pin 10 is marked +. THE RECORDING CONTRADICTS IT: the \
+MAME sample set's gorilla.wav, from a real board, has the pitch envelope's dip \
+and recovery that a latched stage would erase, so the device runs this stage at \
+unity gain, a 7 kHz low-pass, and leaves R69 out. The transcription keeps what \
+the sheet shows."""
 
 [[parts]]
 group = "gorilla"
@@ -895,6 +904,7 @@ note = "Quad op-amp, the gorilla's first four stages. Supply pins 4 and 11 are n
 [[parts.sections]]
 name = "noise low-pass"
 pins = ["10", "9", "8"]
+role = "third-order Sallen-Key low-pass; drawn with a gain of 2 that would latch, which a recording contradicts"
 group = "gorilla"
 op_amp = { plus = "10", minus = "9", out = "8" }
 

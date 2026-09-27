@@ -25,27 +25,38 @@
 //! resistor, and SJ is the second output summer's virtual ground, so the balance
 //! between the voices is resistor ratios against `R20` and nothing else.
 //!
-//! # What is still by ear
+//! # The gorilla is the drawing too
 //!
-//! The gorilla. The board makes it with a relaxation oscillator whose rate
-//! follows an envelope plus low-passed noise, gated by an unidentified VCA
-//! (U15, `G501534`); this still synthesizes it as enveloped noise with a
-//! tremolo, at the level it always had.
+//! A relaxation oscillator whose rate follows an envelope plus noise, gated by
+//! a second envelope; see [`Gorilla`]. It departs from the drawing in two
+//! places, both decided against a recording of a real board: U17's noise stage
+//! runs at unity gain (drawn, it latches and erases the pitch envelope the
+//! recording has), and U15's gain law is fitted. Against that recording its
+//! pitch still rests about 1.5 times low, and its dip is deeper and recovers
+//! more slowly, and nothing is fitted to hide it.
 //!
-//! # Two assumptions, both stated where they are used
+//! # The drums against recordings of a real board
+//!
+//! Solved from the drawing without reference to them, the drums land within a
+//! few percent of the MAME sample set's recordings: bass 73.3 Hz against 73.7,
+//! conga low 265 against 258, conga high 325 against 312, rim 1079 against
+//! 1015. The three higher ones run sharp and decay a little fast, which is what
+//! capacitor tolerance or a slow real 3614 would do to a bridged-T.
+//!
+//! # Three assumptions, each stated where it is used
 //!
 //! - The 3614's output range: 0 V to 10.5 V on its +12 V supply, an LM324's.
 //!   The part is not identified.
 //! - The SN76489A's output swing, which the drawing does not give. It is
 //!   chosen so the music plays exactly as loud as it did before the drums were
 //!   rebuilt; see [`PSG_FULL_SWING_V`].
-
-use std::f64::consts::TAU;
+//! - U15, the gorilla's VCA, `G501534`, not identified: a gain law FITTED to
+//!   the recording, zero below 2.6 V on CY and linear above.
 
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
 use phosphor_core::device::{
-    CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
-    LogicInputId, OutputGain,
+    CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, LogicInputId,
+    OutputGain, PulseInputId,
 };
 use phosphor_macros::Saveable;
 
@@ -92,20 +103,6 @@ const PSG_COUPLING_TAU: f64 = 51_000.0 * 1e-6;
 /// level is the drawing's; the music's is this.
 const PSG_FULL_SWING_V: f64 = 0.45 * FULL_SCALE_V / PSG_PATH_GAIN;
 
-// The gorilla, still synthesized by ear at the level it always had.
-const GORILLA_ATTACK_MS: f64 = 90.0;
-const GORILLA_DECAY_MS: f64 = 230.0;
-const GORILLA_TREMOLO_HZ: f64 = 28.0;
-const GORILLA_LP_HZ: f64 = 700.0;
-const GORILLA_GAIN: f64 = 0.85;
-
-/// Convert a "decay to 10%" time in ms to an exponential time constant (s).
-fn decay_tau(ms: f64) -> f64 {
-    ms / 1000.0 / std::f64::consts::LN_10
-}
-
-const ENV_FLOOR: f64 = 1e-4;
-
 // ---------------------------------------------------------------------------
 // The drums, from the drawing
 // ---------------------------------------------------------------------------
@@ -126,16 +123,21 @@ enum Pin {
     /// SJ, the second summer's virtual ground, held at +6 V.
     Sj,
     N(usize),
+    /// A pin driven by something outside the network, by index into the
+    /// inputs a [`LinNet`] is stepped with: a logic output, a buffered
+    /// envelope. The drums have none.
+    In(usize),
 }
 
 impl Pin {
-    /// The voltage of a pin the circuit holds, or `None` for a node.
+    /// The voltage of a pin the circuit holds, or `None` for a node or an
+    /// input.
     fn held(self) -> Option<f64> {
         match self {
             Pin::Gnd => Some(0.0),
             Pin::Plus12 => Some(V12),
             Pin::Sj => Some(V6),
-            Pin::N(_) => None,
+            Pin::N(_) | Pin::In(_) => None,
         }
     }
 }
@@ -664,121 +666,600 @@ fn rim() -> DrumParts {
     parts
 }
 
-/// A noise voice (rim, gorilla): white noise shaped by an attack/decay envelope,
-/// with optional tremolo for the gorilla's growl. `one_shot` ignores retriggers
-/// while still sounding (matches the gorilla's "start if not playing").
-struct NoiseVoice {
-    attack_s: f64,
-    tau: f64,
-    tremolo_hz: f64,
-    one_shot: bool,
-    lfsr: u32,
-    env: f64,
-    attacking: bool,
-    trem_phase: f64,
-    last_gate: f64,
+// ---------------------------------------------------------------------------
+// The gorilla, from the drawing
+// ---------------------------------------------------------------------------
+
+/// A linear network with ideal op-amps, stepped by the trapezoidal rule, with
+/// some pins driven from outside it: the gorilla's filters and summer. The
+/// drums' engine without their switches, since nothing in these stages
+/// changes state, so one matrix inverted once serves every step.
+struct LinNet {
+    size: usize,
+    nodes: usize,
+    resistors: Vec<(Pin, Pin, f64)>,
+    capacitors: Vec<(Pin, Pin, f64)>,
+    /// Each op-amp's +, -, out.
+    op_amps: Vec<(usize, usize, usize)>,
+    /// The inverse for each combination of op-amp states, indexed by the
+    /// states as base-3 digits, op-amp 0 lowest: 0 linear, 1 at the top
+    /// rail, 2 at ground.
+    inverse: Vec<Vec<f64>>,
+    /// The right-hand side the rails put in, before inputs and history.
+    rails: [f64; MAX_UNKNOWNS],
+    cap_g: Vec<f64>,
+    cap_v: Vec<f64>,
+    cap_i: Vec<f64>,
+    rest_v: Vec<f64>,
 }
 
-impl NoiseVoice {
-    const SEED: u32 = 0x1_2345;
-
-    fn gorilla() -> Self {
-        Self::new(
-            GORILLA_ATTACK_MS,
-            GORILLA_DECAY_MS,
-            GORILLA_TREMOLO_HZ,
-            true,
-        )
+impl LinNet {
+    /// `op_amps` as +, -, out node indices. `rest` is each input's value at
+    /// power-on, from which the operating point is solved.
+    fn new(
+        nodes: usize,
+        resistors: Vec<(Pin, Pin, f64)>,
+        capacitors: Vec<(Pin, Pin, f64)>,
+        op_amps: &[(usize, usize, usize)],
+        h: f64,
+        rest: &[f64],
+    ) -> Self {
+        let size = nodes + op_amps.len();
+        assert!(
+            size <= MAX_UNKNOWNS,
+            "a network has at most {MAX_UNKNOWNS} unknowns"
+        );
+        let cap_g = capacitors.iter().map(|&(_, _, c)| 2.0 * c / h).collect();
+        let mut net = LinNet {
+            size,
+            nodes,
+            cap_v: vec![0.0; capacitors.len()],
+            cap_i: vec![0.0; capacitors.len()],
+            resistors,
+            capacitors,
+            op_amps: op_amps.to_vec(),
+            inverse: Vec::new(),
+            rails: [0.0; MAX_UNKNOWNS],
+            cap_g,
+            rest_v: Vec::new(),
+        };
+        let matrix = |with_caps: bool, code: usize| {
+            let n = size;
+            let mut m = vec![0.0; n * n];
+            let mut stamp = |a: Pin, b: Pin, g: f64| {
+                if let Pin::N(p) = a {
+                    m[p * n + p] += g;
+                }
+                if let Pin::N(q) = b {
+                    m[q * n + q] += g;
+                }
+                if let (Pin::N(p), Pin::N(q)) = (a, b) {
+                    m[p * n + q] -= g;
+                    m[q * n + p] -= g;
+                }
+            };
+            for &(a, b, ohms) in &net.resistors {
+                stamp(a, b, 1.0 / ohms);
+            }
+            if with_caps {
+                for (&(a, b, _), &g) in net.capacitors.iter().zip(&net.cap_g) {
+                    stamp(a, b, g);
+                }
+            }
+            for (k, &(plus, minus, out)) in op_amps.iter().enumerate() {
+                let row = nodes + k;
+                m[out * n + row] -= 1.0;
+                if op_state(code, k) == 0 {
+                    m[row * n + plus] += 1.0;
+                    m[row * n + minus] -= 1.0;
+                } else {
+                    m[row * n + out] = 1.0;
+                }
+            }
+            m
+        };
+        for &(a, b, ohms) in &net.resistors {
+            let g = 1.0 / ohms;
+            if let (Pin::N(p), Some(v)) = (a, b.held()) {
+                net.rails[p] += g * v;
+            }
+            if let (Pin::N(q), Some(v)) = (b, a.held()) {
+                net.rails[q] += g * v;
+            }
+        }
+        net.inverse = (0..3usize.pow(op_amps.len() as u32))
+            .map(|code| invert(matrix(true, code)).expect("the network solves"))
+            .collect();
+        // The operating point, capacitors open, inputs at rest, every op-amp
+        // in its linear range.
+        let dc = invert(matrix(false, 0)).expect("the operating point solves");
+        let r = net.drive(rest, false);
+        let x = mul(&dc, &r[..size]);
+        net.rest_v = net
+            .capacitors
+            .iter()
+            .map(|&(a, b, _)| pin_volt(&x, rest, a) - pin_volt(&x, rest, b))
+            .collect();
+        net.reset();
+        net
     }
 
-    fn new(attack_ms: f64, decay_ms: f64, tremolo_hz: f64, one_shot: bool) -> Self {
-        Self {
-            attack_s: attack_ms / 1000.0,
-            tau: decay_tau(decay_ms),
-            tremolo_hz,
-            one_shot,
-            lfsr: Self::SEED,
-            env: 0.0,
-            attacking: false,
-            trem_phase: 0.0,
-            last_gate: 0.0,
+    /// The right-hand side: rails, then what the inputs drive through each
+    /// part, then (with capacitors) each capacitor's history.
+    fn drive(&self, inputs: &[f64], with_caps: bool) -> [f64; MAX_UNKNOWNS] {
+        fn from_input(r: &mut [f64], inputs: &[f64], a: Pin, b: Pin, g: f64) {
+            if let (Pin::N(p), Pin::In(k)) = (a, b) {
+                r[p] += g * inputs[k];
+            }
+            if let (Pin::N(q), Pin::In(k)) = (b, a) {
+                r[q] += g * inputs[k];
+            }
+        }
+        let mut r = self.rails;
+        for &(a, b, ohms) in &self.resistors {
+            from_input(&mut r, inputs, a, b, 1.0 / ohms);
+        }
+        if with_caps {
+            for (k, &(a, b, _)) in self.capacitors.iter().enumerate() {
+                let g = self.cap_g[k];
+                from_input(&mut r, inputs, a, b, g);
+                let history = g * self.cap_v[k] + self.cap_i[k];
+                if let Pin::N(p) = a {
+                    r[p] += history;
+                }
+                if let Pin::N(q) = b {
+                    r[q] -= history;
+                }
+            }
+        }
+        r
+    }
+
+    /// One step with the inputs at these values; returns every unknown.
+    ///
+    /// Each op-amp is tried in its linear range, and clamped at the rail it
+    /// would pass, as the drums' op-amps are.
+    fn step(&mut self, inputs: &[f64]) -> [f64; MAX_UNKNOWNS] {
+        let n = self.size;
+        let base = self.drive(inputs, true);
+        let mut code = 0;
+        let mut x = [0.0; MAX_UNKNOWNS];
+        for _ in 0..=self.op_amps.len() {
+            let mut r = base;
+            for (k, &(_, _, _)) in self.op_amps.iter().enumerate() {
+                r[self.nodes + k] = match op_state(code, k) {
+                    1 => OPAMP_HI_V,
+                    2 => OPAMP_LO_V,
+                    _ => 0.0,
+                };
+            }
+            let m = &self.inverse[code];
+            for (row, xr) in x.iter_mut().enumerate().take(n) {
+                let line = &m[row * n..row * n + n];
+                *xr = line.iter().zip(&r[..n]).map(|(a, b)| a * b).sum();
+            }
+            let mut next = code;
+            for (k, &(_, _, out)) in self.op_amps.iter().enumerate() {
+                let digit = 3usize.pow(k as u32);
+                if op_state(code, k) == 0 {
+                    if x[out] > OPAMP_HI_V {
+                        next += digit;
+                    } else if x[out] < OPAMP_LO_V {
+                        next += 2 * digit;
+                    }
+                }
+            }
+            if next == code {
+                break;
+            }
+            code = next;
+        }
+        for k in 0..self.capacitors.len() {
+            let (a, b, _) = self.capacitors[k];
+            let v = pin_volt(&x, inputs, a) - pin_volt(&x, inputs, b);
+            self.cap_i[k] = self.cap_g[k] * (v - self.cap_v[k]) - self.cap_i[k];
+            self.cap_v[k] = v;
+        }
+        x
+    }
+
+    fn reset(&mut self) {
+        self.cap_v.clone_from(&self.rest_v);
+        self.cap_i.iter_mut().for_each(|i| *i = 0.0);
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        for (&v, &i) in self.cap_v.iter().zip(&self.cap_i) {
+            w.write_f64_le(v);
+            w.write_f64_le(i);
         }
     }
 
-    fn next_noise(&mut self) -> f64 {
-        // 17-bit Galois LFSR.
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        for k in 0..self.cap_v.len() {
+            self.cap_v[k] = r.read_f64_le()?;
+            self.cap_i[k] = r.read_f64_le()?;
+        }
+        Ok(())
+    }
+}
+
+/// Op-amp `k`'s state in a combination code: its base-3 digit, 0 linear, 1 at
+/// the top rail, 2 at ground.
+fn op_state(code: usize, k: usize) -> usize {
+    (code / 3usize.pow(k as u32)) % 3
+}
+
+/// A pin's voltage in a solution, with its inputs.
+fn pin_volt(x: &[f64], inputs: &[f64], pin: Pin) -> f64 {
+    match pin {
+        Pin::N(p) => x[p],
+        Pin::In(k) => inputs[k],
+        held => held.held().expect("a pin is a node, an input or held"),
+    }
+}
+
+// The gorilla's parts, by the netlist's designators.
+const R72: f64 = 330e3; // the pitch envelope's slow path
+const R73: f64 = 1e3; // and its fast one, behind D6
+const C55: f64 = 1e-6;
+const R74: f64 = 1e3; // the gate envelope's fast path, behind D7
+const R75: f64 = 470e3; // and its slow one
+const C54: f64 = 1e-6;
+const R82: f64 = 100e3; // the control voltage into the integrator's - input
+const R85: f64 = 51e3; // Q2's collector leg on the same node
+const C62: f64 = 0.022e-6; // the integrating capacitor
+const R86: f64 = 51e3; // the Schmitt's + input from +6 V
+const R87: f64 = 100e3; // and its hysteresis from its own output
+const R90: f64 = 100e3; // the scaler's input
+const R91: f64 = 10e3; // and its feedback
+const R94: f64 = 51e3; // the gorilla's mixing resistor onto SJ
+const C61: f64 = 1e-6; // in series with it
+
+/// The two 4538B monostables' periods, `R70 C52` and `R71 C53`, taking the
+/// 4538's period as `R C`.
+const MONO_A_S: f64 = 100e3 * 1e-6;
+const MONO_B_S: f64 = 150e3 * 1e-6;
+
+/// A 4001B's output high, on +5 V.
+const CMOS_HIGH_V: f64 = 5.0;
+
+/// Q2's collector when saturated.
+const Q2_SAT_V: f64 = 0.1;
+
+// Node numbers in the gorilla's control network: the noise low-pass on U17
+// pins 10/9/8, and the summer on U17 pins 12/13/14.
+const LADDER_1: usize = 0;
+const LADDER_2: usize = 1;
+const LP_PLUS: usize = 2;
+const LP_MINUS: usize = 3;
+const LP_OUT: usize = 4;
+const NOISE_COUPLED: usize = 5;
+const SUM_MINUS: usize = 6;
+const SUM_BIAS: usize = 7;
+const CONTROL_V: usize = 8;
+
+/// U15's CY voltage below which it passes nothing. FITTED to the MAME sample
+/// set's `gorilla.wav`, a recording of a real board, because U15 (`G501534`)
+/// is not identified and there is no part whose law this could be read from.
+/// With C54's drawn 470 ms decay it makes the level hold while the gate
+/// envelope is charged and fall 20 dB in about 150 ms after, as the recording
+/// does.
+const U15_THRESHOLD_V: f64 = 2.60;
+
+/// The gorilla as the board builds it.
+///
+/// A falling edge on its PPI bit fires both 4538B monostables. The second,
+/// through D7, R74 and R75, charges C54 into the gate envelope that drives
+/// U15. The NOR of the first's Q and the second's Q-bar is high only between
+/// the first ending and the second ending, and through D6, R73 and R72 it
+/// charges C55 into a pitch envelope.
+///
+/// The pitch envelope and the HM5837's noise, squared by a 4001B and low-passed
+/// third order on U17, meet at the summer on U17, whose output is the control
+/// voltage. That sets the rate of a relaxation oscillator: U17 integrates it
+/// onto C62, and the Schmitt on U16 flips at thresholds R86 and R87 set around
+/// +6 V, switching Q2, whose collector through R85 reverses the ramp. So the
+/// pitch falls when the pitch envelope rises and wanders with the noise: a
+/// growl. The Schmitt's square wave is scaled on U16, low-passed second order
+/// on U16, and gated by U15, then reaches SJ through C61 and R94.
+///
+/// The integrator's output is its - input less C62's voltage, and that input
+/// follows the + input at half the control voltage. So the control voltage
+/// reaches the Schmitt twice: integrated, as the ramp's slope, and directly, at
+/// half size. The direct path lets the noise cross a threshold before the ramp
+/// does, which raises the pitch above what the slopes alone give: 282 Hz at
+/// rest against 264, and 125 in the dip against 112. The model integrated the
+/// output alone until 2026-09-26.
+///
+/// # Where this departs from the drawing, and why
+///
+/// Two places, both decided against recordings of a real board (the MAME
+/// sample set's `gorilla.wav`), and both marked where they are made.
+///
+/// - **U17's noise stage runs at unity gain.** The drawing gives it R68 and
+///   R69, a gain of 2, and with the drawn capacitors that puts its poles in the
+///   right half-plane: it latches to a rail instead of filtering, the control
+///   voltage slams between its limits, and the pitch envelope disappears under
+///   it. The recording has the pitch envelope, a clean dip and recovery, so the
+///   board does not do what that reading says. R69 is left out.
+/// - **U15, `G501534`, is NOT IDENTIFIED**, and its gain law is FITTED: zero
+///   below [`U15_THRESHOLD_V`] on CY, rising linearly to unity with the gate
+///   envelope fully charged, applied to the AC part of its input. That matches
+///   the recording's level to 1.8 dB RMS: full while C54 is charged, then a
+///   steep fade as C54 decays through the threshold.
+///
+/// # What still does not match
+///
+/// The pitch, and the pitch envelope's timing. Measured cycle by cycle:
+///
+/// | | this | recording |
+/// |---|---|---|
+/// | rest | 282 Hz | about 420 Hz |
+/// | dip | about 120 Hz | about 305 Hz |
+/// | window | 100 to 150 ms | about 87 to 185 ms |
+/// | recovery | R72 C55, 330 ms | about 30 ms |
+///
+/// The recording's rest is also rough, with bursts of cycles at 550 to 800 Hz,
+/// where its dip is steady; this is steady in both.
+///
+/// No single speed error in the recording reconciles these: its window opens
+/// early, closes late, and recovers ten times fast. The drawn envelope charges
+/// C55 to about 4.4 V from the 4001B's +5 V, which with R77 and R79 takes the
+/// control voltage from 8.4 V to 3.6 and the pitch down 2.4 times; the
+/// recording's dip is 1.4. No level of noise moves that ratio, and a smaller
+/// Schmitt swing scales rest and dip together. Every part in the oscillator,
+/// the summer and the envelopes was read again at 3x and 4x and they are as
+/// drawn, so the recorded board's envelope parts likely differ from its
+/// drawing, and nothing here is fitted to close the gap.
+///
+/// The slow recovery is also why the game's roars, 0.41 s apart, sit lower than
+/// the first: C55 still holds about 2 V when the next one fires.
+struct Gorilla {
+    control: LinNet,
+    smooth: LinNet,
+    h: f64,
+    mono_a: f64,
+    mono_b: f64,
+    pitch_env: f64,
+    gate_env: f64,
+    lfsr: u32,
+    /// C62's voltage, the integrator's - input less its output.
+    c62: f64,
+    schmitt_high: bool,
+    coupling: f64,
+    #[cfg(test)]
+    trace_lp: f64,
+    #[cfg(test)]
+    trace_cv: f64,
+    #[cfg(test)]
+    trace_integrator: f64,
+}
+
+impl Gorilla {
+    const SEED: u32 = 0x1_2345;
+
+    /// C62 at power-on, with the integrator's output at +6 V and the control
+    /// voltage at rest: the summer's 4 V bias (R80 against R81 from +12 V)
+    /// plus R79/R77 times the same 4 V across R77 with the pitch envelope at
+    /// ground, 8.4 V, halved onto the - input.
+    const REST_C62_V: f64 = 8.4 / 2.0 - V6;
+
+    fn new(h: f64) -> Self {
+        use Pin::*;
+        // The noise low-pass and the summer, with the squared noise and the
+        // buffered pitch envelope as inputs 0 and 1.
+        let control = LinNet::new(
+            9,
+            vec![
+                (In(0), N(LADDER_1), 20e3),       // R65
+                (N(LADDER_1), N(LADDER_2), 20e3), // R66
+                (N(LADDER_2), N(LP_PLUS), 20e3),  // R67
+                // R68, with R69 left out: the stage at unity gain, where the
+                // drawn gain of 2 latches. See the struct's doc comment.
+                (N(LP_OUT), N(LP_MINUS), 20e3),
+                (N(NOISE_COUPLED), N(SUM_MINUS), 47e3), // R78
+                (In(1), N(SUM_MINUS), 20e3),            // R77
+                (N(SUM_MINUS), N(CONTROL_V), 22e3),     // R79
+                (Plus12, N(SUM_BIAS), 20e3),            // R80
+                (N(SUM_BIAS), Gnd, 10e3),               // R81
+            ],
+            vec![
+                (N(LADDER_1), Gnd, 0.0015e-6),       // C48
+                (N(LADDER_2), N(LP_OUT), 0.0039e-6), // C50
+                (N(LP_PLUS), Gnd, 220e-12),          // C49
+                (N(LP_OUT), N(NOISE_COUPLED), 1e-6), // C51
+                (N(SUM_BIAS), Gnd, 10e-6),           // C56
+            ],
+            &[
+                (LP_PLUS, LP_MINUS, LP_OUT),
+                (SUM_BIAS, SUM_MINUS, CONTROL_V),
+            ],
+            h,
+            &[CMOS_HIGH_V / 2.0, 0.0],
+        );
+        // The output low-pass on U16 pins 12/13/14, a follower, with the
+        // scaler's output as input 0.
+        let smooth = LinNet::new(
+            3,
+            vec![
+                (In(0), N(0), 15e3), // R92
+                (N(0), N(1), 15e3),  // R93
+            ],
+            vec![
+                (N(0), N(2), 0.047e-6), // C57
+                (N(1), Gnd, 0.022e-6),  // C58
+            ],
+            &[(1, 2, 2)],
+            h,
+            &[V6],
+        );
+        Gorilla {
+            control,
+            smooth,
+            h,
+            mono_a: 0.0,
+            mono_b: 0.0,
+            pitch_env: 0.0,
+            gate_env: 0.0,
+            lfsr: Self::SEED,
+            c62: Self::REST_C62_V,
+            schmitt_high: true,
+            coupling: 0.0,
+            #[cfg(test)]
+            trace_lp: 0.0,
+            #[cfg(test)]
+            trace_cv: 0.0,
+            #[cfg(test)]
+            trace_integrator: V6,
+        }
+    }
+
+    /// An envelope capacitor charged through a diode and a small resistor and
+    /// discharged through a large one, both from a CMOS output.
+    fn envelope(v: f64, high: bool, fast: f64, slow: f64, c: f64, h: f64) -> f64 {
+        let drive = if high { CMOS_HIGH_V } else { 0.0 };
+        let mut i = (drive - v) / slow;
+        if drive - DIODE_DROP_V - v > 0.0 {
+            i += (drive - DIODE_DROP_V - v) / (fast + DIODE_OHMS);
+        }
+        v + h * i / c
+    }
+
+    /// One substep; returns the gorilla's current into SJ.
+    fn substep(&mut self) -> f64 {
+        let h = self.h;
+        let qa = self.mono_a > 0.0;
+        let qb = self.mono_b > 0.0;
+        self.mono_a = (self.mono_a - h).max(0.0);
+        self.mono_b = (self.mono_b - h).max(0.0);
+
+        // The NOR of the first's Q and the second's Q-bar.
+        let window = !qa && qb;
+        self.pitch_env = Self::envelope(self.pitch_env, window, R73, R72, C55, self.h);
+        self.gate_env = Self::envelope(self.gate_env, qb, R74, R75, C54, self.h);
+
+        // The HM5837's output, halved, clamped and squared by the 4001B.
         let feedback = self.lfsr & 1;
         self.lfsr >>= 1;
         if feedback != 0 {
             self.lfsr ^= 0x1_2000;
         }
-        if self.lfsr & 1 != 0 { 1.0 } else { -1.0 }
+        let noise = if self.lfsr & 1 != 0 { CMOS_HIGH_V } else { 0.0 };
+
+        let x = self.control.step(&[noise, self.pitch_env]);
+        let cv = x[CONTROL_V];
+        #[cfg(test)]
+        {
+            self.trace_lp = x[LP_OUT];
+            self.trace_cv = cv;
+        }
+
+        // The integrator's inputs sit at half the control voltage (R83 and
+        // R84), so R82 brings in cv/2 over R82, and Q2, when on, takes
+        // cv/2 over R85 back out: the ramp's two slopes. That current
+        // charges C62, and the output is the - input less C62's voltage, so
+        // whatever the control voltage does reaches the Schmitt at half size
+        // with no integration: the noise on it crosses a threshold early.
+        let half = cv / 2.0;
+        let mut into = half / R82;
+        if self.schmitt_high {
+            into -= (half - Q2_SAT_V).max(0.0) / R85;
+        }
+        self.c62 += h * into / C62;
+        let integrator = (half - self.c62).clamp(OPAMP_LO_V, OPAMP_HI_V);
+        self.c62 = half - integrator;
+        #[cfg(test)]
+        {
+            self.trace_integrator = integrator;
+        }
+        let schmitt_out = if self.schmitt_high {
+            OPAMP_HI_V
+        } else {
+            OPAMP_LO_V
+        };
+        let threshold = (V6 * R87 + schmitt_out * R86) / (R86 + R87);
+        if self.schmitt_high && integrator > threshold {
+            self.schmitt_high = false;
+        } else if !self.schmitt_high && integrator < threshold {
+            self.schmitt_high = true;
+        }
+        let schmitt_out = if self.schmitt_high {
+            OPAMP_HI_V
+        } else {
+            OPAMP_LO_V
+        };
+
+        // The scaler inverts about +6 V at R91/R90, then the low-pass.
+        let scaled = V6 - (R91 / R90) * (schmitt_out - V6);
+        let smoothed = self.smooth.step(&[scaled])[2];
+
+        // U15, as a VCA on the signal's AC part, then C61 and R94 into SJ.
+        // U15's gain, FITTED: zero below the threshold, unity with C54 fully
+        // charged through D7.
+        let full = CMOS_HIGH_V - DIODE_DROP_V;
+        let gain = ((self.gate_env - U15_THRESHOLD_V) / (full - U15_THRESHOLD_V)).clamp(0.0, 1.0);
+        let gated = (smoothed - V6) * gain;
+        let current = (gated - self.coupling) / R94;
+        self.coupling += h * current / C61;
+        current
     }
 }
 
-impl CustomComponent for NoiseVoice {
+impl CustomComponent for Gorilla {
     fn reset(&mut self) {
+        self.control.reset();
+        self.smooth.reset();
+        self.mono_a = 0.0;
+        self.mono_b = 0.0;
+        self.pitch_env = 0.0;
+        self.gate_env = 0.0;
         self.lfsr = Self::SEED;
-        self.env = 0.0;
-        self.attacking = false;
-        self.trem_phase = 0.0;
-        self.last_gate = 0.0;
+        self.c62 = Self::REST_C62_V;
+        self.schmitt_high = true;
+        self.coupling = 0.0;
     }
 
-    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let gate = inputs[0];
-        if gate >= 0.5 && self.last_gate < 0.5 && !(self.one_shot && self.env > 0.01) {
-            if self.attack_s > 0.0 {
-                self.env = 0.0;
-                self.attacking = true;
-            } else {
-                self.env = 1.0;
-                self.attacking = false;
-            }
+    /// Input: `[edge]`, 1 for the one step after the PPI bit's falling edge,
+    /// however short the pulse was. Both monostables fire on it, and
+    /// retrigger on another. Output: the voice's share of `SOU`, in volts
+    /// about +6 V.
+    fn step(&mut self, inputs: &[f64], _dt: f64) -> f64 {
+        if inputs[0] >= 0.5 {
+            self.mono_a = MONO_A_S;
+            self.mono_b = MONO_B_S;
         }
-        self.last_gate = gate;
-        if self.env < ENV_FLOOR && !self.attacking {
-            return 0.0;
+        let mut sum = 0.0;
+        for _ in 0..OVERSAMPLE {
+            sum += self.substep();
         }
-
-        let noise = self.next_noise();
-        if self.attacking {
-            self.env += dt / self.attack_s;
-            if self.env >= 1.0 {
-                self.env = 1.0;
-                self.attacking = false;
-            }
-        } else {
-            self.env *= (-dt / self.tau).exp();
-        }
-
-        let trem = if self.tremolo_hz > 0.0 {
-            let t = 0.6 + 0.4 * self.trem_phase.sin();
-            self.trem_phase += TAU * self.tremolo_hz * dt;
-            if self.trem_phase >= TAU {
-                self.trem_phase -= TAU;
-            }
-            t
-        } else {
-            1.0
-        };
-        noise * self.env * trem
+        -R20 * sum / OVERSAMPLE as f64
     }
 
     fn save_state(&self, w: &mut StateWriter) {
+        self.control.save_state(w);
+        self.smooth.save_state(w);
+        w.write_f64_le(self.mono_a);
+        w.write_f64_le(self.mono_b);
+        w.write_f64_le(self.pitch_env);
+        w.write_f64_le(self.gate_env);
         w.write_u32_le(self.lfsr);
-        w.write_f64_le(self.env);
-        w.write_bool(self.attacking);
-        w.write_f64_le(self.trem_phase);
-        w.write_f64_le(self.last_gate);
+        w.write_f64_le(self.c62);
+        w.write_bool(self.schmitt_high);
+        w.write_f64_le(self.coupling);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.control.load_state(r)?;
+        self.smooth.load_state(r)?;
+        self.mono_a = r.read_f64_le()?;
+        self.mono_b = r.read_f64_le()?;
+        self.pitch_env = r.read_f64_le()?;
+        self.gate_env = r.read_f64_le()?;
         self.lfsr = r.read_u32_le()?;
-        self.env = r.read_f64_le()?;
-        self.attacking = r.read_bool()?;
-        self.trem_phase = r.read_f64_le()?;
-        self.last_gate = r.read_f64_le()?;
+        self.c62 = r.read_f64_le()?;
+        self.schmitt_high = r.read_bool()?;
+        self.coupling = r.read_f64_le()?;
         Ok(())
     }
 }
@@ -789,7 +1270,7 @@ impl CustomComponent for NoiseVoice {
 
 struct CongoInputs {
     psg: ExternalSourceId,
-    gorilla: LogicInputId,
+    gorilla: PulseInputId,
     bass: LogicInputId,
     conga_low: LogicInputId,
     conga_high: LogicInputId,
@@ -800,31 +1281,18 @@ fn build_circuit() -> (DiscreteCircuit, CongoInputs) {
     let mut b = DiscreteCircuitBuilder::new(sample_rate(), sample_rate());
 
     let psg = b.external_source("PSG");
-    let gorilla_g = b.logic_input("GORILLA");
+    let gorilla_g = b.pulse_input("GORILLA");
     let bass_g = b.logic_input("BASS");
     let conga_low_g = b.logic_input("CONGA_LOW");
     let conga_high_g = b.logic_input("CONGA_HIGH");
     let rim_g = b.logic_input("RIM");
 
-    // Gorilla: swelling growl → low-pass to a rumble.
-    let gorilla_raw = b.custom(
-        "GORILLA",
-        vec![gorilla_g.into()],
-        Box::new(NoiseVoice::gorilla()),
-    );
-    let gorilla_lp = b.second_order(
-        "GORILLA_LP",
-        gorilla_raw,
-        FilterMode::LowPass,
-        GORILLA_LP_HZ,
-        0.707,
-    );
-    // In volts at SOU about +6 V, like everything below: its old level, which
-    // was a fraction of full scale.
-    let gorilla = b.gain("GORILLA_OUT", gorilla_lp, GORILLA_GAIN * FULL_SCALE_V);
+    let h = 1.0 / (sample_rate() as f64 * OVERSAMPLE as f64);
+
+    // The gorilla, its share of SOU in volts about +6 V.
+    let gorilla = b.custom("GORILLA", vec![gorilla_g.into()], Box::new(Gorilla::new(h)));
 
     // The four drums, each its share of SOU in volts about +6 V.
-    let h = 1.0 / (sample_rate() as f64 * OVERSAMPLE as f64);
     let mut drum = |name: &str, gate: LogicInputId, parts: DrumParts| {
         b.custom(
             name,
@@ -874,6 +1342,9 @@ pub struct CongoSound {
     /// Input handles, fixed when the circuit is built.
     #[save_skip]
     ids: CongoInputs,
+    /// Port B as last written, to find the gorilla's falling edge.
+    #[save(id = 2)]
+    last_port_b: u8,
 }
 
 impl Default for CongoSound {
@@ -885,7 +1356,11 @@ impl Default for CongoSound {
 impl CongoSound {
     pub fn new() -> Self {
         let (circuit, ids) = build_circuit();
-        Self { circuit, ids }
+        Self {
+            circuit,
+            ids,
+            last_port_b: 0xff,
+        }
     }
 
     /// Feed one box-filtered PSG sample (the SN76489A mix) and advance the
@@ -896,12 +1371,22 @@ impl CongoSound {
         self.circuit.tick(1);
     }
 
-    /// Update the percussion gates from the PPI port B/C output latches. Each
-    /// gate is high while its bit is low. A drum strikes on the gate's falling
-    /// edge, when the bit returns high and its 7416 pulls down; the gorilla,
-    /// still synthesized, starts on the rising one.
+    /// Update the percussion from the PPI port B/C output latches.
+    ///
+    /// Each drum's gate is high while its bit is low, and a drum strikes when
+    /// the bit returns high and its 7416 pulls down. The game holds a drum bit
+    /// low for 15.6 ms, so a level sampled each step sees it.
+    ///
+    /// The gorilla is caught on the write instead. The game pulses PB1 low
+    /// for a few microseconds, between two output samples, and the 4538B
+    /// monostables trigger on that edge however short it is. So the falling
+    /// edge fires a pulse the next step consumes, rather than a level that
+    /// would be back high before anything read it.
     pub fn set_triggers(&mut self, port_b: u8, port_c: u8) {
-        self.circuit.set_logic(self.ids.gorilla, port_b & 0x02 == 0);
+        if self.last_port_b & 0x02 != 0 && port_b & 0x02 == 0 {
+            self.circuit.pulse(self.ids.gorilla);
+        }
+        self.last_port_b = port_b;
         self.circuit.set_logic(self.ids.bass, port_c & 0x01 == 0);
         self.circuit
             .set_logic(self.ids.conga_low, port_c & 0x02 == 0);
@@ -917,6 +1402,7 @@ impl CongoSound {
 
     pub fn reset(&mut self) {
         self.circuit.reset();
+        self.last_port_b = 0xff;
     }
 }
 
@@ -1031,15 +1517,100 @@ mod tests {
         }
     }
 
-    /// The gorilla is still synthesized, and still starts on its bit going
-    /// low.
+    /// The oscillator's rate in `seconds` of substeps, from its Schmitt's
+    /// flips, and how much of that time U17's noise stage spent at a rail.
+    fn run_gorilla(g: &mut Gorilla, seconds: f64) -> (f64, f64) {
+        let n = (seconds / g.h) as usize;
+        let (mut at_rail, mut flips) = (0, 0);
+        let mut last = g.schmitt_high;
+        for _ in 0..n {
+            let _ = g.substep();
+            if g.trace_lp <= OPAMP_LO_V + 1e-9 || g.trace_lp >= OPAMP_HI_V - 1e-9 {
+                at_rail += 1;
+            }
+            if g.schmitt_high != last {
+                flips += 1;
+                last = g.schmitt_high;
+            }
+            assert!(g.trace_cv.is_finite() && g.trace_integrator.is_finite());
+        }
+        (flips as f64 / 2.0 / seconds, at_rail as f64 / n as f64)
+    }
+
+    /// U17's noise stage filters, rather than latching as its drawn gain of 2
+    /// would, and the pitch envelope pulls the oscillator down while its NOR
+    /// window is open: the shape of the recording (`gorilla.wav` in the MAME
+    /// sample set), which rests high, dips, and recovers. The recording's
+    /// absolute pitch is about 1.5 times this one's, which is recorded rather
+    /// than fitted; the test holds the circuit's own figures.
+    ///
+    /// The rest pitch is above the 264 Hz the drawn oscillator gives with a
+    /// quiet control voltage, and only the noise reaching the Schmitt through
+    /// C62 unintegrated can put it there. Integrating the output alone, as
+    /// this model once did, rests at 256 Hz.
     #[test]
-    fn the_gorilla_sounds_on_its_bit() {
+    fn the_noise_stage_filters_and_the_pitch_envelope_dips_the_growl() {
+        let h = 1.0 / (sample_rate() as f64 * OVERSAMPLE as f64);
+        let mut g = Gorilla::new(h);
+        let (rest, at_rail) = run_gorilla(&mut g, 0.5);
+        assert!(
+            at_rail < 0.05,
+            "the noise stage is at a rail {:.1} % of the time",
+            at_rail * 100.0
+        );
+        assert!(
+            (270.0..300.0).contains(&rest),
+            "the growl rests at {rest:.0} Hz"
+        );
+
+        // Fire both monostables, wait out the first, and read the window.
+        g.mono_a = MONO_A_S;
+        g.mono_b = MONO_B_S;
+        let _ = run_gorilla(&mut g, MONO_A_S + 0.005);
+        let (dip, _) = run_gorilla(&mut g, MONO_B_S - MONO_A_S - 0.01);
+        assert!(
+            dip < rest * 0.6,
+            "the growl dips to {dip:.0} Hz from {rest:.0}"
+        );
+    }
+
+    /// What the game actually writes: PB1 low and straight back high, a few
+    /// microseconds apart (0x7D then 0x7F, five times 0.41 s apart, from a
+    /// MAME trace of a game), with no output sample between the two writes.
+    /// A level sampled per step never sees that; the gorilla was silent in
+    /// play until the edge was caught on the write.
+    #[test]
+    fn a_microsecond_pulse_on_pb1_still_fires_the_gorilla() {
         let mut snd = CongoSound::new();
-        snd.set_triggers(0xff, 0xff);
-        snd.feed_psg(0);
-        let out = render(&mut snd, 60, 0xfd, 0xff);
-        assert!(rms(&out) > 50.0, "rms {}", rms(&out));
+        let _ = render(&mut snd, 100, 0x7f, 0x7f);
+        snd.set_triggers(0x7d, 0x7f);
+        snd.set_triggers(0x7f, 0x7f);
+        let out = render(&mut snd, 60, 0x7f, 0x7f);
+        assert!(rms(&out) > 300.0, "rms {} after the pulse", rms(&out));
+    }
+
+    /// Both monostables fire on the bit's falling edge, so the gorilla
+    /// sounds from the press, and fades with the gate envelope (C54 through
+    /// R75, 470 ms) back to silence.
+    #[test]
+    fn the_gorilla_sounds_on_its_bit_and_fades_with_its_gate_envelope() {
+        let mut snd = CongoSound::new();
+        let idle = render(&mut snd, 100, 0xff, 0xff);
+        assert_eq!(rms(&idle), 0.0, "silent until triggered");
+        let early = render(&mut snd, 60, 0xfd, 0xff);
+        let _ = render(&mut snd, 1000, 0xff, 0xff);
+        let late = render(&mut snd, 200, 0xff, 0xff);
+        assert!(
+            rms(&early) > 300.0,
+            "rms {} just after the press",
+            rms(&early)
+        );
+        assert!(
+            rms(&late) < rms(&early) / 4.0,
+            "rms {} a second later, against {} at the start",
+            rms(&late),
+            rms(&early)
+        );
     }
 
     /// The game's own combined hit, bass, high conga and rim at once (port C

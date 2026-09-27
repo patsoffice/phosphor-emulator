@@ -113,8 +113,73 @@ its PPI bit returns high: the game holds each bit low for 15.6 ms, one tick of
 the sound CPU's interrupt (a MAME trace of the PPI), so every hit lands that
 much after the write MAME treats as the hit. The drums' level against the PSGs
 rests on the SN76489A's output swing, which the drawing does not give; the
-device picks it to keep the music where it was. The gorilla is still
-synthesized by ear. What follows is the comparison that motivated the rebuild.
+device picks it to keep the music where it was. What follows is the
+comparison that motivated the rebuild.
+
+*The gorilla is built from the drawing too, 2026-09-26*, as the oscillator
+described below, and then checked against the MAME sample set's `gorilla.wav`,
+which is a recording of a real board. The drums check against the same set's
+recordings to within a few percent (bass 73.3 Hz against 73.7, the congas and
+rim 3 to 6 percent sharp); the gorilla did not, and the recording settled two
+things the drawing could not.
+
+- **U17's noise stage is not the latch the drawing makes it.** Drawn, its
+  third-order Sallen-Key (pins 10/9/8) has a gain of 2 from R68 and R69, and
+  with the drawn capacitors two of its poles are real and in the right
+  half-plane, so it would slam from rail to rail with the noise and bury the
+  pitch envelope. The recording rests near 420 Hz, dips to about 305 Hz while
+  the envelope's window is open, and recovers: the envelope is there. So the
+  device runs the stage at unity gain, a 7 kHz low-pass, and every value around
+  it was rechecked at 3x and 5x first.
+- **U15's gain law is fitted.** Zero below 2.6 V on CY, linear to unity with
+  C54 fully charged, which matches the recording's level to 1.8 dB RMS: full
+  while C54 is charged, then a steep fade. U15 (`G501534`) has no part number
+  to read a law from.
+
+**The pitch does not match, and is left so.** The device rests at 282 Hz and
+dips to about 120; the recording rests at 420 and dips to 305. The timing
+components, the summer and the oscillator (R70/C52, R71/C53, R72/C55, R77/R79,
+R82/R85/C62, R86/R87) all read as transcribed at 4x. The gap is the board
+against its drawing, an unidentified part, or the recording, and fitting the
+oscillator to it would bury drawn values under fitted ones.
+
+*One part of the gap was the model, 2026-09-26.* U17's integrator has its +
+input at half the control voltage, and its output is that voltage less C62's.
+The device used to integrate the output alone, so the noise on the control
+voltage only ever changed the ramp's slope. On the board it also reaches the
+Schmitt directly at half size and crosses a threshold early, which raises the
+pitch: 256 to 282 Hz at rest, 112 to 125 in the dip. That is the drawing, not a
+fit.
+
+What is left is not one error. Measured cycle by cycle, the recording differs
+in four ways that no single cause fits:
+
+| | device | recording |
+|---|---|---|
+| rest | 282 Hz, steady | about 420 Hz, with bursts at 550 to 800 |
+| dip | about 120 Hz | about 305 Hz, steady |
+| window | 100 to 150 ms (R70 C52, R71 C53) | about 87 to 185 ms |
+| recovery | 330 ms (R72 C55) | about 30 ms |
+
+- **The recording's time base is not it.** A speed error scales every time
+  together, and these would need 0.87 (window opens), 1.23 (window closes),
+  about 0.09 (recovery) and 1.5 (pitch).
+- **The noise's level is not it.** Clocking the HM5837 slower puts more noise
+  in U17's band and raises the device's pitch (334 Hz at rest at 12 kHz), but
+  the dip ratio stays at 2.2 against the recording's 1.4. The HM5837's clock
+  is not read either way; the device steps it once per substep.
+- **The Schmitt's swing is not it.** A smaller swing scales rest and dip
+  together, and 420 Hz would take about 7 V, which is not an LM324's range.
+- **The envelope's supply is as modeled.** R70, R71 and R76 are on +5 V and D5
+  clamps the noise to +5 V for the 4001B, so C55 charges to about 4.4 V, and
+  with R77 and R79 that pulls the control voltage from 8.4 V to 3.6: a dip of
+  2.4 times, where the recording's 1.4 wants C55 near 2 V.
+
+A shallow dip, a window twice as long and a recovery ten times fast all point
+at the recorded board's envelope parts, not at the oscillator, and nothing on
+the sheet explains them. The slow drawn recovery is also why the game's five
+roars, 0.41 s apart, sit lower in play than the first: C55 still holds about
+2 V when the next one fires.
 
 The device plays the congas at 160 and 250 Hz and the rim as low-passed noise,
 so all three were tuned by ear to something the board does not do. These

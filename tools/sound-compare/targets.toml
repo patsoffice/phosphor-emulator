@@ -251,7 +251,7 @@ an emulator: the reference plays recorded WAVs because it never modelled this
 circuit. Comparing against those measures whoever made the recordings. The
 reference here is the drawing, so the next step is a rebuild and not a
 comparison, and `implemented-needs-validation` is unreachable until one exists.
-The drums are rebuilt from the drawing; the gorilla is tracked separately."""
+All five voices are now built from the drawing."""
 notes = """
 THE PHASE'S ORDERING RATIONALE FOR THIS TARGET WAS FALSE, and this row is where
 that is recorded. It was listed first on the grounds that its reference is a
@@ -272,8 +272,20 @@ the solver's 73.4, 265.5, 325.2 and 1079.9 Hz to 0.1 %. Each strikes when its
 PPI bit returns high, 15.6 ms after the write MAME treats as the hit, because
 the 7416 inverts the bit and the diode passes only the falling edge. Two
 assumptions carry the level: the 3614's 0 to 10.5 V range, and the SN76489A's
-output swing, chosen to keep the music where it was. The gorilla is still
-synthesized by ear.
+output swing, chosen to keep the music where it was.
+
+THE GORILLA IS NOW THE DRAWING, CHECKED AGAINST A RECORDING: two monostables,
+two envelopes, and a relaxation oscillator whose rate follows the pitch envelope
+and the noise, gated by U15. The MAME sample set's WAVs are recordings of a real
+board, and the drums match them within a few percent from the drawing alone.
+Against gorilla.wav two things changed: U17's noise stage runs at unity gain,
+because its drawn gain of 2 latches and would erase the pitch envelope the
+recording has; and U15's gain law is fitted (threshold 2.6 V on CY). The
+integrator passes the control voltage's noise straight to the Schmitt at half
+size, as drawn, which the model once left out. The gorilla still rests about
+1.5 times low (282 Hz against 420), dips 2.4 times where the recording dips
+1.4, and recovers from the dip in 330 ms against about 30; left unfitted, as
+the recorded board's envelope parts rather than the oscillator.
 
 The emulator's implementation choice was read as evidence about the hardware.
 Reading the drawing took twenty minutes; the belief had been in the plan for
