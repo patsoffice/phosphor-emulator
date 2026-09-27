@@ -710,10 +710,22 @@ sheet. phosphor-emulator-tesw."""
 [[target]]
 id = "btime-output"
 machines = ["burgertime"]
-status = "missing"
+status = "partial"
 notes = """
-EXAMINED. Off `unexamined` as `missing`, and the finding is structural rather
-than a filter value.
+EXAMINED, and the structure is now MODELED (phosphor-emulator-jenz,
+2026-09-27): `partial` because the mix and the band-pass are the drawing's,
+while the coupling corner, VR1, the 1181 and the ferrite are not yet. 9F is
+`ay2`, traced through 12C's decode to its BC1 and BDIR pins. `ay2` delivers its
+channels separately (`Ay8910::enable_channel_outputs`); `BtimeBoard::mix_audio`
+sums the five bussed channels, band-passes `ay2`'s A at f0 1.13 kHz, Q 1.14,
+gain -2.35, adds it inverted, and couples the result. The band-pass assumes the
+chip drives R52 as a voltage source (R1 = R51); at the other extreme, R1 = 2k,
+it would be 836 Hz, Q 0.84, gain -1.18. On the golden session
+(tools/script/examples/burgertime_listen.rhai) energy between 400 Hz and 3 kHz
+rises from 42.4 % to 52.0 % and nothing clips.
+
+The original finding, kept for the record, was structural rather than a filter
+value.
 
 THE BOARD DOES NOT SUM THE TWO CHIPS. Each AY-3-8910 brings its three analog
 channels out on pins 4, 3 and 38. Five of the six tie to one bus. The sixth,
@@ -724,9 +736,9 @@ inverted once. The crossing was checked at pixel level: 9F channel A passes the
 bus vertical with no dot, and 9F channel B one wire below meets it with a solid
 one.
 
-That is not expressible today, and not because of an omission in this board
-file: `Ay8910::fill_audio` already sums a chip's three channels internally, so
-the per-channel outputs the board needs do not exist at the device boundary.
+That was not expressible when this was read: `Ay8910::fill_audio` summed a
+chip's three channels internally, so the per-channel outputs the board needs did
+not exist at the device boundary. The chip now offers them.
 
 THE FILTER IS A BAND-PASS, NOT A LOW-PASS. R51 1k, R50 10k to ground, C27 and
 C28 0.068 uF, R49 4.7k feedback: f0 1.13 kHz, Q 1.14, gain at f0 -2.35. The same

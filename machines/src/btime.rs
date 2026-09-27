@@ -25,11 +25,17 @@
 //! **The board does not sum the two chips.** Five of the six analog channels tie
 //! to one bus; 9F's channel A crosses that bus without connecting and goes
 //! through its own band-pass at 1.13 kHz before being remixed inverted and
-//! louder. `fill_audio` below adds the two chip outputs, and [`Ay8910`] has
-//! already summed each chip's three channels, so the board's shape is not
-//! expressible at that boundary. See `phosphor-emulator-jenz`.
+//! louder. `fill_audio` below builds exactly that: `ay2` delivers its channels
+//! separately, its A through [`BtimeBoard::band_pass`], the other five summed.
+//!
+//! **9F is `ay2`.** Traced on sheet 9-3: 12C, a 74LS42 on SA13-SA15, decodes
+//! 0x2000/0x4000/0x6000/0x8000, and 9F's BC1 (pin 29) is 11C's NOR of the
+//! 0x8000 select while its BDIR (pin 27) is 10C's OR of the 0x6000 and 0x8000
+//! NORs. A write to 0x8000 raises both, which latches an address; one to 0x6000
+//! raises BDIR alone, which writes data. That is `ay2` in the sound map, and 10F
+//! takes the 0x2000/0x4000 pair, which is `ay1`.
 
-use phosphor_core::audio::DcBlocker;
+use phosphor_core::audio::{Biquad, DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
@@ -289,9 +295,10 @@ pub fn run_frame(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard)
     Drive {
         cpu,
         sound_cpu,
-        board,
+        board: &mut *board,
     }
     .run_frame();
+    board.mix_audio();
 }
 
 // The board is the bus for every machine on it: they differ only in the
@@ -368,6 +375,17 @@ pub struct BtimeBoard {
     /// this runs at the shared 10 Hz default. See the module header.
     #[save(id = 5)]
     ay_coupling: DcBlocker,
+    /// 9F channel A's band-pass on the `15J` 4558's first section; see
+    /// [`Self::band_pass`].
+    #[save(id = 26)]
+    ay2_a_band_pass: Biquad,
+    /// The board's mixed output, filled by [`Self::mix_audio`] at the end of
+    /// each frame and drained by [`Self::fill_audio`]. Mixing here rather than
+    /// on the drain is what keeps the two filters' saved state independent of
+    /// whether the host drains audio at all. Emptied on load, so audio queued
+    /// before a snapshot does not play after it.
+    #[save_skip(default = SampleRing::with_capacity(4096))]
+    audio_buffer: SampleRing<i16>,
     #[save(id = 6)]
     sound_ram: [u8; 0x0400],
     #[save(id = 7)]
@@ -505,12 +523,18 @@ impl BtimeBoard {
             )
             .mirror(0xF000, 0xE000, 0x1000);
 
+        // 9F's channels leave it separately; see the module header.
+        let mut ay2 = Ay8910::new(AY_CLOCK_HZ);
+        ay2.enable_channel_outputs();
+        let (f0, q, _) = Self::band_pass();
         let mut board = Self {
             main_map,
             sound_map,
             ay1: Ay8910::new(AY_CLOCK_HZ),
-            ay2: Ay8910::new(AY_CLOCK_HZ),
+            ay2,
             ay_coupling: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            ay2_a_band_pass: Biquad::band_pass(f0, q, phosphor_core::audio::host_sample_rate()),
+            audio_buffer: SampleRing::with_capacity(4096),
             sound_ram: [0; 0x0400],
             sound_irq: false,
             audio_nmi_enable: false,
@@ -706,6 +730,8 @@ impl BtimeBoard {
         self.clocks.reset();
         self.ay1.reset();
         self.ay2.reset();
+        self.ay2_a_band_pass.reset();
+        self.audio_buffer.clear();
         self.clock = 0;
         // The framebuffer is not cleared: the next frame's rows overwrite every
         // one of them as the beam reaches them.
@@ -743,24 +769,67 @@ impl BtimeBoard {
         buffer.copy_from_slice(&self.framebuffer);
     }
 
-    /// Drain both AY-3-8910s and mix them into `buffer` (mono, 44.1 kHz). Both
-    /// chips are ticked identically, so they produce the same sample count.
+    /// 9F channel A's multiple-feedback band-pass on the `15J` 4558's first
+    /// section, as `(f0, Q, gain at f0)`: R51 1k in, R50 10k from that node to
+    /// ground, C27 and C28 0.068 uF from it to the inverting input and back
+    /// from the output, R49 4.7k in the feedback. 1.13 kHz, Q 1.14, -2.35.
+    ///
+    /// ASSUMED: the AY's output drives R52 1k to ground as a voltage source, so
+    /// R51 alone is the section's input resistor. The chip's output impedance
+    /// is not on the sheet, and through R52's Thevenin it adds to R51; at the
+    /// far extreme, 2k, the section is 836 Hz, Q 0.84, gain -1.18.
+    fn band_pass() -> (f32, f32, f32) {
+        let (r1, r2, r3, c) = (1.0e3_f64, 10.0e3, 4.7e3, 0.068e-6);
+        let f0 = ((r1 + r2) / (r1 * r2 * r3)).sqrt() / (std::f64::consts::TAU * c);
+        let q = 0.5 * (r3 * (r1 + r2) / (r1 * r2)).sqrt();
+        (f0 as f32, q as f32, (-r3 / (2.0 * r1)) as f32)
+    }
+
+    /// Drain the board's mixed output (mono, at the host rate) into `buffer`.
+    /// The mixing happens in [`Self::mix_audio`], once per frame.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n1 = self.ay1.fill_audio(buffer);
-        let mut tmp = vec![0i16; n1];
-        let n2 = self.ay2.fill_audio(&mut tmp);
-        for (out, &s) in buffer.iter_mut().zip(tmp.iter()).take(n1.min(n2)) {
-            *out = out.saturating_add(s);
+        self.audio_buffer.pop_front_into(buffer)
+    }
+
+    /// Drain both AY-3-8910s and mix them into the board's output as the Sound
+    /// I/O board does. Called at the end of every frame. Both chips are ticked
+    /// identically, so every output they have produces the same sample count.
+    ///
+    /// Five channels meet on one bus (10F's three and 9F's B and C) and reach
+    /// the mixer, the 4558's second section, through R47 100k. 9F's A goes
+    /// through the band-pass, which inverts, and reaches the same mixer through
+    /// R46 100k. The mixer's -R45/100k, -0.1 on both, is common and left out,
+    /// so this is the bus plus the band-pass's inverted output: the separated
+    /// channel arrives in opposite polarity to the other five.
+    ///
+    /// ASSUMED, as the chip model already did: channels tied to a bus add. The
+    /// chips' outputs and their loading of each other are not on the sheet.
+    pub fn mix_audio(&mut self) {
+        let (_, _, gain) = Self::band_pass();
+        let mut bus = [0i16; 1024];
+        let mut chans = [[0i16; 1024]; 3];
+        // In chunks until the chips are empty: a debugger that steps without
+        // finishing frames can leave more than a frame's worth buffered.
+        loop {
+            let n = self.ay1.fill_audio(&mut bus);
+            if n == 0 {
+                break;
+            }
+            for (ch, buf) in chans.iter_mut().enumerate() {
+                self.ay2.fill_channel_audio(ch, &mut buf[..n]);
+            }
+            let band_pass = &mut self.ay2_a_band_pass;
+            let coupling = &mut self.ay_coupling;
+            self.audio_buffer.extend((0..n).map(|i| {
+                let bus = bus[i] as f32 + chans[1][i] as f32 + chans[2][i] as f32;
+                let band = gain * band_pass.process(chans[0][i] as f32);
+                // Coupled after the mix, because the capacitors sit between the
+                // mixer and the speaker rather than inside either chip.
+                coupling
+                    .process(bus + band)
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            }));
         }
-        // Coupled after the sum, because the capacitor sits between the chips
-        // and the amplifier rather than inside either chip.
-        for s in buffer.iter_mut().take(n1) {
-            *s = self
-                .ay_coupling
-                .process(*s as f32)
-                .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        }
-        n1
     }
 
     /// Draw one visible scanline into the framebuffer, out of the video state as
@@ -1254,6 +1323,63 @@ mod tests {
         let mut buf = vec![0i16; 512];
         let n = b.ay1.fill_audio(&mut buf);
         assert!(buf[..n].iter().any(|&s| s != 0), "AY1 should output a tone");
+    }
+
+    /// Run 9F (`ay2`) with the given channels on one tone at full volume, and
+    /// return the board's mixed output's RMS once settled.
+    fn ay2_rms(channels: &[usize], period: u8) -> f64 {
+        let mut b = board();
+        let mut write = |reg: u8, value: u8| {
+            b.sound_write(0x8000, reg); // 9F: address at 0x8000
+            b.sound_write(0x6000, value); // and data at 0x6000
+        };
+        let mut mixer = 0x3F;
+        for &ch in channels {
+            write(ch as u8 * 2, period);
+            write(ch as u8 * 2 + 1, 0);
+            write(8 + ch as u8, 0x0F);
+            mixer &= !(1 << ch);
+        }
+        write(7, mixer);
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            for _ in 0..(AY_CLOCK_HZ / 40) {
+                b.ay1.tick();
+                b.ay2.tick();
+            }
+            b.mix_audio();
+            let mut buf = vec![0i16; 4096];
+            let n = b.fill_audio(&mut buf);
+            out.extend_from_slice(&buf[..n]);
+        }
+        let settled = &out[out.len() / 2..];
+        (settled.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / settled.len() as f64).sqrt()
+    }
+
+    /// 9F's channel A is band-passed at 1.13 kHz with a gain of 2.35 there,
+    /// where its B goes straight to the bus. A square at the center comes out
+    /// of A as mostly its fundamental, 2.35 times up: about 2.1 times B's RMS.
+    #[test]
+    fn nine_f_channel_a_is_band_passed_and_louder_at_its_center() {
+        let period = (AY_CLOCK_HZ as f64 / 16.0 / 1130.0).round() as u8;
+        let a = ay2_rms(&[0], period);
+        let b = ay2_rms(&[1], period);
+        let ratio = a / b;
+        assert!(
+            (1.8..2.5).contains(&ratio),
+            "A {a:.0} against B {b:.0} rms, {ratio:.2} times"
+        );
+    }
+
+    /// The band-pass inverts and the bus does not, so the same tone on A and B
+    /// partly cancels: together they are quieter than A alone. In one polarity
+    /// they would add, and be louder than either.
+    #[test]
+    fn nine_f_channel_a_arrives_in_opposite_polarity() {
+        let period = (AY_CLOCK_HZ as f64 / 16.0 / 1130.0).round() as u8;
+        let a = ay2_rms(&[0], period);
+        let both = ay2_rms(&[0, 1], period);
+        assert!(both < a, "A and B together {both:.0} rms, A alone {a:.0}");
     }
 
     // --- DIP defaults + live VBLANK bit ---

@@ -27,9 +27,27 @@ monitor schematics are omitted from this scan, which its own first page says.
 
 ## What the model does today
 
-`BtimeBoard::fill_audio` fills from `ay1`, fills from `ay2` into a temporary
-buffer, adds the two with `saturating_add`, and runs the result through a shared
-`DcBlocker` at the default corner. That is the whole model.
+*Rebuilt 2026-09-27 (`phosphor-emulator-jenz`).* `ay2`, which is 9F (below),
+delivers its three channels separately (`Ay8910::enable_channel_outputs`). At
+the end of each frame `BtimeBoard::mix_audio` sums the bus (all of `ay1` and
+`ay2`'s B and C), runs `ay2`'s A through a band-pass at the section's f0, Q and
+gain, adds the two with the band path inverted, and couples the result through
+the shared `DcBlocker`, still at its default corner. Before this it added the
+two chips' summed outputs, which is all the chip model could then express.
+
+On the golden Burger Time session (`tools/script/examples/burgertime_listen.rhai`)
+this moves energy into the band-pass's band: 400 Hz to 3 kHz goes from 42.4 % to
+52.0 % of the total, the RMS rises 1.3 dB, and nothing clips.
+
+## Which chip is 9F
+
+**9F is `ay2`**, the chip the sound CPU writes at 0x6000 and 0x8000. 12C, a
+74LS42 on SA13-SA15, decodes the four selects at 0x2000, 0x4000, 0x6000 and
+0x8000. 9F's BC1 (pin 29) is 11C pin 4, the NOR of the 0x8000 select, and its
+BDIR (pin 27) is 10C pin 6, the OR of the 0x6000 and 0x8000 NORs. A write to
+0x8000 raises both, which latches a register address; one to 0x6000 raises BDIR
+alone, which writes data. 10F takes the 0x2000/0x4000 pair the same way, which
+is `ay1`.
 
 ## The chain
 
@@ -129,11 +147,6 @@ inverting input, with R45 10k and C26 150 pF in the feedback, so each arrives at
 
 ## What it does NOT establish
 
-- **Which of the model's `ay1` and `ay2` is 9F.** `ay1` is at 0x2000/0x4000 and
-  `ay2` at 0x6000/0x8000 on the sound CPU's map; the chip selects were not traced
-  back from 9F and 10F's BDIR and BC1 pins. Anyone implementing this has to
-  settle it first, because it decides which chip loses a channel to the
-  band-pass.
 - **The exact band-pass parameters**, because R52 1k sits between the chip and
   R51 and its Thevenin resistance adds to `R1` by an amount set by the AY's own
   output impedance, which is not on this sheet. The figures above are for `R1` =
