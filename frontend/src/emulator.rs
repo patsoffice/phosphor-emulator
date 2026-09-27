@@ -764,7 +764,7 @@ pub fn run(
                     ..
                 } => {
                     let chord = HostChord::from_event(*sc, *keymod);
-                    // `RUST_LOG=phosphor_frontend::emulator=debug` prints what
+                    // `RUST_LOG=info,phosphor::emulator=debug` prints what
                     // each press resolved to. A hotkey that does the wrong
                     // thing is otherwise invisible from outside: a chord that
                     // loses its modifier resolves to a real, different action

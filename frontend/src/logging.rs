@@ -4,7 +4,7 @@
 //! read live next to the window it describes. So the format is cargo's rather
 //! than a log file's: an `info!` is the bare message, because that level is
 //! reserved here for confirming something the user just asked for ("Screenshot
-//! saved: …") and a `[INFO phosphor_frontend::emulator]` in front of it is
+//! saved: …") and a `[INFO phosphor::emulator]` in front of it is
 //! only noise. `warn!` and `error!` take a colored prefix so they stand out in
 //! a scrollback, and `debug!` carries its module path, since that is the level
 //! you filter by target when you are chasing something.
@@ -30,7 +30,17 @@ use std::io::Write;
 ///
 /// Defaults to `info`, so a stock run shows confirmations and problems and
 /// nothing else. `RUST_LOG` overrides in the usual way, including per-module:
-/// `RUST_LOG=phosphor_frontend::video=debug`.
+/// `RUST_LOG=info,phosphor::video=debug`.
+///
+/// Two things about that filter fail silently, so they are written down:
+///
+/// - The targets start `phosphor::`, the binary's crate name, not the
+///   package's `phosphor_frontend`. The frontend has no library target, and
+///   a filter naming `phosphor_frontend::…` matches nothing at all.
+///   The test `targets_are_the_binary_crate_name` below holds this.
+/// - Name `info` as well. A filter of only `phosphor::video=debug` turns every
+///   other target off, and with it the `info!` confirmations the user is
+///   probably also watching for.
 pub fn init() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(|buf, record| {
@@ -51,4 +61,17 @@ pub fn init() {
             }
         })
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    /// A module's log target is its module path, so every `RUST_LOG` filter
+    /// written in this crate's comments depends on the crate name. It is the
+    /// binary's, `phosphor`, not the package's. Should the crate gain a library
+    /// target, or the binary be renamed, this fails and those comments need
+    /// the new prefix.
+    #[test]
+    fn targets_are_the_binary_crate_name() {
+        assert_eq!(module_path!(), "phosphor::logging::tests");
+    }
 }
