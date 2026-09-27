@@ -710,19 +710,28 @@ sheet. phosphor-emulator-tesw."""
 [[target]]
 id = "btime-output"
 machines = ["burgertime"]
-status = "partial"
+device = "machines/src/btime.rs"
+status = "implemented-unvalidated"
 notes = """
-EXAMINED, and the structure is now MODELED (phosphor-emulator-jenz,
-2026-09-27): `partial` because the mix and the band-pass are the drawing's,
-while the coupling corner, VR1, the 1181 and the ferrite are not yet. 9F is
-`ay2`, traced through 12C's decode to its BC1 and BDIR pins. `ay2` delivers its
-channels separately (`Ay8910::enable_channel_outputs`); `BtimeBoard::mix_audio`
-sums the five bussed channels, band-passes `ay2`'s A at f0 1.13 kHz, Q 1.14,
-gain -2.35, adds it inverted, and couples the result. The band-pass assumes the
-chip drives R52 as a voltage source (R1 = R51); at the other extreme, R1 = 2k,
-it would be 836 Hz, Q 0.84, gain -1.18. On the golden session
-(tools/script/examples/burgertime_listen.rhai) energy between 400 Hz and 3 kHz
-rises from 42.4 % to 52.0 % and nothing clips.
+EXAMINED and MODELED (phosphor-emulator-jenz, 2026-09-27): every stage on the
+drawing that shapes the sound is built, and nothing has been compared against a
+reference. 9F is `ay2`, traced through 12C's decode to its BC1 and BDIR pins.
+`ay2` delivers its channels separately (`Ay8910::enable_channel_outputs`);
+`BtimeBoard::mix_audio` sums the five bussed channels, band-passes `ay2`'s A at
+f0 1.13 kHz, Q 1.14, gain -2.35, adds it inverted, and couples the result at C21
+into the speaker, 199 Hz.
+
+ASSUMED: the chip drives R52 as a voltage source (R1 = R51; at the other
+extreme, R1 = 2k, the band-pass would be 836 Hz, Q 0.84, gain -1.18), tied
+channels add, and the speaker is 8 ohms (the corner scales inversely with it).
+NOT MODELED, and level or out of band only: VR1 (the operator's volume, which
+here moves no corner), the 1181's gain, and FB1 with C37 and C30, whose values
+were not read.
+
+On the golden session (tools/script/examples/burgertime_listen.rhai) the
+band-pass moved energy between 400 Hz and 3 kHz from 42.4 % to 52.0 %, and the
+199 Hz corner then took the share below 150 Hz from 8.9 % to 2.6 %. Nothing
+clips.
 
 The original finding, kept for the record, was structural rather than a filter
 value.

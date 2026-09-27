@@ -144,6 +144,19 @@ const fn display_bytes() -> usize {
 /// so each chip is ticked once per main tick).
 const AY_CLOCK_HZ: u64 = 1_500_000;
 
+/// The speaker the 1181 amplifier drives through C21. ASSUMED: the sheet
+/// shows only J6 pin 15, `SPEAKER +`, and gives no impedance. 8 ohms is the
+/// usual cabinet speaker, and the corner below scales inversely with it.
+const SPEAKER_OHMS: f32 = 8.0;
+
+/// C21 100 uF, the output coupling between the 1181 and the speaker.
+const C21_FARADS: f32 = 100e-6;
+
+/// The output coupling's corner, C21 into the speaker: about 199 Hz. The
+/// board's dominant high-pass, and what keeps the chips' unipolar offset out
+/// of the speaker.
+const COUPLING_HZ: f32 = 1.0 / (std::f32::consts::TAU * SPEAKER_OHMS * C21_FARADS);
+
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
@@ -370,9 +383,10 @@ pub struct BtimeBoard {
     ///
     /// The schematic has since been read, and it settles two things. The
     /// POSITION reasoned above is right: C25 10 uF and C21 100 uF are both
-    /// between the chips and the speaker, and neither is inside either chip. The
-    /// CORNER is wrong: C21 into a nominal 8 ohm speaker is about 199 Hz, where
-    /// this runs at the shared 10 Hz default. See the module header.
+    /// between the chips and the speaker, and neither is inside either chip.
+    /// The CORNER is C21's into the speaker, [`COUPLING_HZ`], about 199 Hz,
+    /// where this used to run at the shared 10 Hz default. C25 into VR1's 10k
+    /// is 1.6 Hz and changes nothing audible, so it is not a second stage.
     #[save(id = 5)]
     ay_coupling: DcBlocker,
     /// 9F channel A's band-pass on the `15J` 4558's first section; see
@@ -532,7 +546,10 @@ impl BtimeBoard {
             sound_map,
             ay1: Ay8910::new(AY_CLOCK_HZ),
             ay2,
-            ay_coupling: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            ay_coupling: DcBlocker::with_cutoff(
+                COUPLING_HZ,
+                phosphor_core::audio::host_sample_rate(),
+            ),
             ay2_a_band_pass: Biquad::band_pass(f0, q, phosphor_core::audio::host_sample_rate()),
             audio_buffer: SampleRing::with_capacity(4096),
             sound_ram: [0; 0x0400],
@@ -1380,6 +1397,36 @@ mod tests {
         let a = ay2_rms(&[0], period);
         let both = ay2_rms(&[0, 1], period);
         assert!(both < a, "A and B together {both:.0} rms, A alone {a:.0}");
+    }
+
+    /// Peak of a settled sine at `hz` through the board's output coupling.
+    fn coupled_peak(hz: f32) -> f32 {
+        let mut b = board();
+        let rate = phosphor_core::audio::host_sample_rate() as f32;
+        let n = rate as usize;
+        (0..n)
+            .map(|i| {
+                b.ay_coupling
+                    .process((std::f32::consts::TAU * hz * i as f32 / rate).sin())
+            })
+            .skip(n / 2)
+            .fold(0.0_f32, |m, y| m.max(y.abs()))
+    }
+
+    /// The output couples at C21 into the speaker, about 199 Hz: an octave
+    /// below it is down about 7 dB, and well above it passes untouched. At the
+    /// old shared 10 Hz default the octave below would be flat.
+    #[test]
+    fn the_output_couples_at_c21_into_the_speaker() {
+        assert!((COUPLING_HZ - 198.9).abs() < 0.5, "corner {COUPLING_HZ} Hz");
+        let at = |hz: f32| 20.0 * coupled_peak(hz).log10();
+        let (octave_below, corner, well_above) = (at(99.5), at(198.9), at(2000.0));
+        assert!(
+            (octave_below + 6.99).abs() < 0.3,
+            "octave below {octave_below:.2} dB"
+        );
+        assert!((corner + 3.01).abs() < 0.3, "corner {corner:.2} dB");
+        assert!(well_above > -0.1, "2 kHz {well_above:.2} dB");
     }
 
     // --- DIP defaults + live VBLANK bit ---

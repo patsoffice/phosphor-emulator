@@ -31,13 +31,15 @@ monitor schematics are omitted from this scan, which its own first page says.
 delivers its three channels separately (`Ay8910::enable_channel_outputs`). At
 the end of each frame `BtimeBoard::mix_audio` sums the bus (all of `ay1` and
 `ay2`'s B and C), runs `ay2`'s A through a band-pass at the section's f0, Q and
-gain, adds the two with the band path inverted, and couples the result through
-the shared `DcBlocker`, still at its default corner. Before this it added the
-two chips' summed outputs, which is all the chip model could then express.
+gain, adds the two with the band path inverted, and couples the result at C21
+into the speaker, 199 Hz, assuming an 8 ohm speaker. Before this it added the
+two chips' summed outputs, which is all the chip model could then express, and
+coupled at the shared 10 Hz default.
 
 On the golden Burger Time session (`tools/script/examples/burgertime_listen.rhai`)
-this moves energy into the band-pass's band: 400 Hz to 3 kHz goes from 42.4 % to
-52.0 % of the total, the RMS rises 1.3 dB, and nothing clips.
+the band-pass moves energy into its band: 400 Hz to 3 kHz goes from 42.4 % to
+52.0 % of the total and the RMS rises 1.3 dB. The 199 Hz corner then takes the
+share below 150 Hz from 8.9 % to 2.6 %. Nothing clips.
 
 ## Which chip is 9F
 
