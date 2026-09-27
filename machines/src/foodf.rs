@@ -875,6 +875,13 @@ impl FoodFightBoard {
 
     /// Recompute one RGB24 palette entry. Low byte: R=bits0-2, G=bits3-5,
     /// B=bits6-7, through 1K/470/220Ω resistor weights (no pulldown).
+    ///
+    /// Scaling each ladder to its own 255 looks like the defect the Zaxxon
+    /// family had, where a two-bit blue ladder must stop short of the three-bit
+    /// ones, but it is exact here. With no pulldown nothing loads the ladders,
+    /// so each one with every bit on reaches the full drive whatever its
+    /// conductance, and the shared cross-network scale changes nothing.
+    /// `palette_matches_the_shared_scale_model` holds this against that model.
     fn update_palette_entry(&mut self, idx: usize) {
         let rgb3 = compute_resistor_weights(&[1000.0, 470.0, 220.0], None);
         let b2 = compute_resistor_weights(&[470.0, 220.0], None);
@@ -1645,6 +1652,39 @@ crate::register_machine!(FoodFightSystem, "foodf", &["foodf"], FOODF_CONTROLS);
 mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
+
+    /// Every palette byte comes out the same as the three ladders solved as one
+    /// network: each bit's weight a Thevenin divider against the other bits,
+    /// one scale from the ladder with the greatest summed output. That is the
+    /// model a two-bit blue ladder needs where a pulldown loads it (Zaxxon),
+    /// and with none here it agrees with per-ladder scaling byte for byte.
+    #[test]
+    fn palette_matches_the_shared_scale_model() {
+        use phosphor_core::gfx::compute_resnet_weights;
+        let rg = compute_resnet_weights(&[1000.0, 470.0, 220.0], 0.0, 255.0);
+        let b = compute_resnet_weights(&[470.0, 220.0], 0.0, 255.0);
+        let scale = 255.0 / rg.iter().sum::<f64>().max(b.iter().sum::<f64>());
+        let level = |w: &[f64], bits: u8| -> u8 {
+            let v: f64 = w
+                .iter()
+                .enumerate()
+                .map(|(k, w)| w * scale * ((bits >> k) & 1) as f64)
+                .sum();
+            v.round().clamp(0.0, 255.0) as u8
+        };
+        let mut sys = FoodFightSystem::new();
+        for d in 0..=255u8 {
+            sys.board.palette_ram[0] = d;
+            sys.board.update_palette_entry(0);
+            let want = (
+                level(&rg, d & 7),
+                level(&rg, (d >> 3) & 7),
+                level(&b, d >> 6),
+            );
+            assert_eq!(sys.board.palette_rgb[0], want, "palette byte {d:#04x}");
+        }
+        assert_eq!(level(&b, 3), 255, "blue at full reaches the others' 255");
+    }
 
     #[test]
     fn dip_default_and_metadata() {
