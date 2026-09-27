@@ -191,15 +191,16 @@ impl ProfileState {
         self.frame_offset = Duration::ZERO;
     }
 
-    /// Stop profiling and write the trace file.
-    pub fn stop(&mut self) {
+    /// Stop profiling and write the trace file: a line saying where it went,
+    /// or why it was not written, for the caller to log and show.
+    pub fn stop(&mut self) -> Result<String, String> {
         self.active = false;
         match self.recorder.write_to_file() {
-            Ok(path) => log::info!(
+            Ok(path) => Ok(format!(
                 "Profile trace written: {path} ({} events)",
                 self.recorder.events.len()
-            ),
-            Err(e) => log::error!("failed to write profile trace: {e}"),
+            )),
+            Err(e) => Err(format!("failed to write profile trace: {e}")),
         }
     }
 

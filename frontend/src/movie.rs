@@ -63,6 +63,13 @@ impl<M: InputConfigurable + ?Sized> InputConfigurable for Recording<'_, M> {
     }
 }
 
+/// A movie [`MovieCapture::stop`] wrote.
+pub struct SavedMovie {
+    pub path: PathBuf,
+    /// The full line for the log: counts, path, and any warning.
+    pub message: String,
+}
+
 /// Owns the in-progress recording and where finished movies are written.
 pub struct MovieCapture {
     dir: PathBuf,
@@ -173,13 +180,15 @@ impl MovieCapture {
         }
     }
 
-    /// Stop recording and write the movie, returning a message for the user.
+    /// Stop recording and write the movie: where it went and a line for the
+    /// log, or why it was not written. The two used to share one `String`,
+    /// which logged a failed write as a confirmation.
     ///
     /// Written atomically via a temporary file and a rename, so an interrupted
     /// write cannot leave a half-file that decodes as a short session.
-    pub fn stop(&mut self) -> String {
+    pub fn stop(&mut self) -> Result<SavedMovie, String> {
         let Some(rec) = self.recorder.take() else {
-            return "Not recording".to_string();
+            return Err("Not recording".to_string());
         };
         let frames = rec.frame();
         let records = rec.len();
@@ -203,15 +212,15 @@ impl MovieCapture {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
             && let Err(e) = std::fs::create_dir_all(parent)
         {
-            return format!("Movie: cannot create {}: {e}", parent.display());
+            return Err(format!("Movie: cannot create {}: {e}", parent.display()));
         }
         let tmp = path.with_extension("phmi.tmp");
 
         if let Err(e) = std::fs::write(&tmp, movie.encode()) {
-            return format!("Movie: writing {}: {e}", tmp.display());
+            return Err(format!("Movie: writing {}: {e}", tmp.display()));
         }
         if let Err(e) = std::fs::rename(&tmp, &path) {
-            return format!("Movie: renaming into {}: {e}", path.display());
+            return Err(format!("Movie: renaming into {}: {e}", path.display()));
         }
 
         let mut msg = format!(
@@ -227,7 +236,7 @@ impl MovieCapture {
                  machine's table and were not recorded)"
             ));
         }
-        msg
+        Ok(SavedMovie { path, message: msg })
     }
 
     /// Message shown when a recording has just been armed.
@@ -432,8 +441,10 @@ mod tests {
             None,
         ));
         cap.advance_frame();
-        let msg = cap.stop();
+        let saved = cap.stop().expect("the movie is written");
+        let msg = &saved.message;
         assert!(wanted.is_file(), "{msg}");
+        assert_eq!(saved.path, wanted);
         assert!(msg.contains(&wanted.display().to_string()), "{msg}");
         assert!(!cap.is_recording(), "stopping clears the recorder");
         // And no stray temporary is left beside it.
@@ -448,7 +459,7 @@ mod tests {
             Vec::new(),
             None,
         ));
-        let msg = cap.stop();
+        let msg = cap.stop().expect("the movie is written").message;
         let generated: Vec<_> = std::fs::read_dir(&movies)
             .expect("movies dir was created")
             .filter_map(Result::ok)

@@ -505,6 +505,9 @@ pub fn run(
         movie_capture.set_output_path(path);
     }
 
+    // The window's confirmation of each host action, beside the log line.
+    let mut notices = crate::overlay::Notices::default();
+
     // Playback binds before the first frame, resetting to power-on: a movie
     // carries no save state and replays only from there. A bad movie is fatal
     // rather than a warning — the session was launched to watch it, and silently
@@ -576,6 +579,7 @@ pub fn run(
             // released and pressed again.
             pending_resync = true;
             log::info!("Hard reset: machine rebuilt from ROM");
+            notices.info("Hard reset");
         }
 
         if arm_requested {
@@ -592,6 +596,7 @@ pub fn run(
             *session.borrow_mut() = DebugSession::from_machine(fresh);
             debug_state.frame_count = 0;
             log::info!("{}", movie_capture.armed_message());
+            notices.info("Recording movie from power-on");
         }
 
         let mut sess = session.borrow_mut();
@@ -887,7 +892,16 @@ pub fn run(
                 // there; stopping writes the file.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::MovieRecord) => {
                     if movie_capture.is_recording() {
-                        log::info!("{}", movie_capture.stop());
+                        match movie_capture.stop() {
+                            Ok(saved) => {
+                                log::info!("{}", saved.message);
+                                notices.info(format!("Movie saved: {}", file_name(&saved.path)));
+                            }
+                            Err(e) => {
+                                log::error!("{e}");
+                                notices.error(e);
+                            }
+                        }
                     } else {
                         // Deferred: arming rebuilds the machine from ROM, which
                         // cannot happen while it is borrowed for this frame.
@@ -899,11 +913,18 @@ pub fn run(
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickSave) => {
                     if let Some(data) = machine.save_state() {
                         match std::fs::write(save_path, &data) {
-                            Ok(()) => log::info!("Save state written ({} bytes)", data.len()),
-                            Err(e) => log::error!("save state failed: {e}"),
+                            Ok(()) => {
+                                log::info!("Save state written ({} bytes)", data.len());
+                                notices.info("State saved");
+                            }
+                            Err(e) => {
+                                log::error!("save state failed: {e}");
+                                notices.error(format!("Save state failed: {e}"));
+                            }
                         }
                     } else {
                         log::warn!("save states not supported for this machine");
+                        notices.error("Save states not supported for this machine");
                     }
                 }
 
@@ -913,14 +934,21 @@ pub fn run(
                         Ok(data) => match machine.load_state(&data) {
                             Ok(()) => {
                                 log::info!("Save state loaded");
+                                notices.info("State loaded");
                                 // Port bits live inside the snapshot, so the
                                 // restored state can contradict what is physically
                                 // held right now.
                                 needs_resync = true;
                             }
-                            Err(e) => log::error!("load state failed: {e}"),
+                            Err(e) => {
+                                log::error!("load state failed: {e}");
+                                notices.error(format!("Load state failed: {e}"));
+                            }
                         },
-                        Err(e) => log::warn!("no save file found: {e}"),
+                        Err(e) => {
+                            log::warn!("no save file found: {e}");
+                            notices.error("No saved state to load");
+                        }
                     }
                 }
 
@@ -928,7 +956,16 @@ pub fn run(
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::ToggleProfiler) => {
                     if profile_state.active {
                         machine.set_profiling(false);
-                        profile_state.stop();
+                        match profile_state.stop() {
+                            Ok(msg) => {
+                                log::info!("{msg}");
+                                notices.info(msg);
+                            }
+                            Err(e) => {
+                                log::error!("{e}");
+                                notices.error(e);
+                            }
+                        }
                     } else {
                         machine.set_profiling(true);
                         profile_state.start();
@@ -1099,8 +1136,14 @@ pub fn run(
                         screenshot_dir,
                         machine_name,
                     ) {
-                        Ok(path) => log::info!("Screenshot saved: {}", path.display()),
-                        Err(e) => log::error!("screenshot failed: {e}"),
+                        Ok(path) => {
+                            log::info!("Screenshot saved: {}", path.display());
+                            notices.info(format!("Screenshot saved: {}", file_name(&path)));
+                        }
+                        Err(e) => {
+                            log::error!("screenshot failed: {e}");
+                            notices.error(format!("Screenshot failed: {e}"));
+                        }
                     }
                 }
 
@@ -1335,6 +1378,7 @@ pub fn run(
                 // Tempest) is exercised today; the shader special-cases it.
                 let rot = orientation_degrees(machine.orientation());
                 let paused = debug_state.global_paused;
+                let recording = movie_capture.is_recording();
                 if show_fps || paused || movie_status.is_some() {
                     let fps = show_fps.then(|| fps_text.clone());
                     let stats = overlay_stats_with_movie(
@@ -1354,18 +1398,20 @@ pub fn run(
                                 stats.as_deref(),
                                 paused,
                             );
+                            crate::overlay::draw_status(ctx, &notices, recording);
                         },
                     );
                 } else {
                     // Still run egui pass to consume input events (prevents stale
-                    // state buildup), but render no UI widgets.
+                    // state buildup). Only a notice or the REC mark draws here,
+                    // and neither does when there is nothing to say.
                     video.present_vectors_with_overlay(
                         renderer,
                         lines,
                         ds,
                         view_aspect,
                         rot,
-                        |_ctx| {},
+                        |ctx| crate::overlay::draw_status(ctx, &notices, recording),
                     );
                 }
             } else {
@@ -1422,6 +1468,8 @@ pub fn run(
                     // Relabel the run/step buttons from the live bindings, so a
                     // rebound step key is what the button advertises.
                     debug_state.key_hints = step_key_hints(&host_bindings);
+                    let recording = movie_capture.is_recording();
+                    let notices_ref = &notices;
                     video.present_with_debug(|ctx, tex_id| {
                         // Profiler side panel (outermost right, drawn first)
                         if profiling {
@@ -1476,6 +1524,8 @@ pub fn run(
                             // Game central panel with aspect ratio preservation
                             draw_game_panel(ctx, tex_id, view_aspect);
                         }
+                        // Last, so it lays over whichever panel is at the edge.
+                        crate::overlay::draw_status(ctx, notices_ref, recording);
                     });
 
                     // The debug panel sizes its columns to what they drew, so
@@ -1541,8 +1591,10 @@ pub fn run(
                         movie_status.as_deref(),
                     );
                     let paused = debug_state.global_paused;
+                    let recording = movie_capture.is_recording();
                     video.present_game_only(view_aspect, |ctx| {
                         crate::overlay::draw_overlay(ctx, fps.as_deref(), stats.as_deref(), paused);
+                        crate::overlay::draw_status(ctx, &notices, recording);
                     });
                 }
             }
@@ -1620,7 +1672,10 @@ pub fn run(
     // A session quit while recording still gets its movie: the in-memory records
     // are the only copy, so dropping them would silently discard the take.
     if movie_capture.is_recording() {
-        log::info!("{}", movie_capture.stop());
+        match movie_capture.stop() {
+            Ok(saved) => log::info!("{}", saved.message),
+            Err(e) => log::error!("{e}"),
+        }
     }
 
     // Reclaim the machine from the session (drop the console handle so the Rc is
@@ -1649,7 +1704,10 @@ pub fn run(
     // Flush profiler trace if still recording
     if profile_state.active {
         machine.set_profiling(false);
-        profile_state.stop();
+        match profile_state.stop() {
+            Ok(msg) => log::info!("{msg}"),
+            Err(e) => log::error!("{e}"),
+        }
     }
 
     // Signal fade-out, wait for the ramp to complete, then stop the callback.
@@ -1755,6 +1813,13 @@ pub fn fit_aspect(available: egui::Vec2, aspect: f32) -> (egui::Vec2, egui::Vec2
 /// The movie line comes first because it is the reason the window is open
 /// during a replay, and it is the number a golden pin's `frames` field wants
 /// read off the screen.
+/// A path's file name, for a notice over the picture; the log keeps the path.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn overlay_stats_with_movie(stats: Option<String>, movie: Option<&str>) -> Option<String> {
     match (movie, stats) {
         (Some(m), Some(s)) => Some(format!("{m}\n{s}")),
