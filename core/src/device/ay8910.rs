@@ -42,8 +42,18 @@ const VOLUME_TABLE: [i32; 16] = [
 ];
 
 /// AY-8910 Programmable Sound Generator.
+///
+/// # One output or three
+///
+/// By default the chip delivers the sum of its three channels through
+/// [`Self::fill_audio`], which is what a board that ties A, B and C together
+/// gets. A board that treats the channels differently (filters one, pans them,
+/// meets them at different gains) calls [`Self::enable_channel_outputs`] once
+/// and drains each channel with [`Self::fill_channel_audio`] instead. The two
+/// modes are exclusive, so a chip only ever resamples what its board reads: a
+/// buffer nobody drains would fill and count overruns.
 #[derive(Saveable)]
-#[save_version(1)]
+#[save_version(2)]
 pub struct Ay8910 {
     registers: [u8; 16],
     address_latch: u8,
@@ -77,6 +87,15 @@ pub struct Ay8910 {
 
     // Per-channel gain for external volume modulation (0–255, 255 = full)
     channel_gain: [u8; 3],
+
+    /// One resampler per channel, run instead of `resampler` once
+    /// [`Self::enable_channel_outputs`] is called.
+    channel_resamplers: [AudioResampler<i16>; 3],
+
+    /// Which of the two outputs this chip feeds. Configuration fixed by the
+    /// board at construction, not state, so it is not saved.
+    #[save_skip]
+    channel_outputs: bool,
 }
 
 impl Ay8910 {
@@ -113,7 +132,18 @@ impl Ay8910 {
             prescaler_count: 0,
             resampler: AudioResampler::new(chip_clock_hz, host_sample_rate() as u64),
             channel_gain: [255; 3],
+            channel_resamplers: std::array::from_fn(|_| {
+                AudioResampler::new(chip_clock_hz, host_sample_rate() as u64)
+            }),
+            channel_outputs: false,
         }
+    }
+
+    /// Deliver the three channels separately, through
+    /// [`Self::fill_channel_audio`], instead of their sum through
+    /// [`Self::fill_audio`]. Call once, when the board is built.
+    pub fn enable_channel_outputs(&mut self) {
+        self.channel_outputs = true;
     }
 
     /// Latch a register address (0–15). Subsequent data_write/data_read
@@ -176,8 +206,14 @@ impl Ay8910 {
             self.clock_generators();
         }
 
-        let output = self.compute_output();
-        self.resampler.tick(output as i16);
+        let levels = self.channel_levels();
+        if self.channel_outputs {
+            for (r, &level) in self.channel_resamplers.iter_mut().zip(&levels) {
+                r.tick(level as i16);
+            }
+        } else {
+            self.resampler.tick(levels.iter().sum::<i32>() as i16);
+        }
     }
 
     /// Set the external input value for I/O Port A.
@@ -216,10 +252,19 @@ impl Ay8910 {
         }
     }
 
-    /// Drain accumulated audio samples into the provided buffer.
-    /// Returns the number of samples written.
+    /// Drain accumulated audio samples, the three channels summed, into the
+    /// provided buffer. Returns the number of samples written. Produces nothing
+    /// once [`Self::enable_channel_outputs`] has been called.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
         self.resampler.fill_audio(buffer)
+    }
+
+    /// Drain one channel's samples (0 = A, 1 = B, 2 = C) into `buffer`.
+    /// Returns the number written, which is the same for all three since they
+    /// share a clock. Produces nothing unless [`Self::enable_channel_outputs`]
+    /// has been called.
+    pub fn fill_channel_audio(&mut self, ch: usize, buffer: &mut [i16]) -> usize {
+        self.channel_resamplers[ch].fill_audio(buffer)
     }
 
     /// Reset the PSG to initial state.
@@ -243,6 +288,9 @@ impl Ay8910 {
         self.prescaler_count = 0;
         self.resampler.reset();
         self.channel_gain = [255; 3];
+        self.channel_resamplers
+            .iter_mut()
+            .for_each(AudioResampler::reset);
     }
 
     // -- Private methods -------------------------------------------------------
@@ -282,14 +330,14 @@ impl Ay8910 {
         }
     }
 
-    /// Compute the mixed output level from all three channels.
-    fn compute_output(&self) -> i32 {
+    /// Each channel's output level.
+    fn channel_levels(&self) -> [i32; 3] {
         let mixer = self.registers[7];
         let noise_out = (self.noise_lfsr & 1) != 0;
 
-        let mut output: i32 = 0;
+        let mut output = [0i32; 3];
 
-        for ch in 0..3 {
+        for (ch, out) in output.iter_mut().enumerate() {
             // R7 enable bits are active-low: 1 = disabled
             let tone_disable = (mixer >> ch) & 1 != 0;
             let noise_disable = (mixer >> (ch + 3)) & 1 != 0;
@@ -305,7 +353,7 @@ impl Ay8910 {
                     amp_reg & 0x0F
                 };
                 let level = VOLUME_TABLE[volume as usize];
-                output += (level * self.channel_gain[ch] as i32) / 255;
+                *out = (level * self.channel_gain[ch] as i32) / 255;
             }
         }
 
@@ -602,6 +650,95 @@ mod tests {
             max_half < max_full,
             "half gain ({max_half}) should be less than full ({max_full})"
         );
+    }
+
+    /// Program tone B only, loud, on a chip in either mode, and run it.
+    fn tone_b_only(channel_outputs: bool) -> Ay8910 {
+        let mut ay = Ay8910::new(2_000_000);
+        if channel_outputs {
+            ay.enable_channel_outputs();
+        }
+        for (reg, value) in [(2, 50), (3, 0), (7, 0b0011_1101), (9, 0x0F)] {
+            ay.address_write(reg);
+            ay.data_write(value);
+        }
+        for _ in 0..20_000 {
+            ay.tick();
+        }
+        ay
+    }
+
+    #[test]
+    fn a_channel_appears_on_its_own_output_only() {
+        let mut ay = tone_b_only(true);
+        let mut bufs = [[0i16; 400]; 3];
+        let counts: Vec<usize> = (0..3)
+            .map(|ch| ay.fill_channel_audio(ch, &mut bufs[ch]))
+            .collect();
+        assert!(
+            counts[0] > 0 && counts.iter().all(|&n| n == counts[0]),
+            "{counts:?}"
+        );
+        assert!(bufs[0].iter().all(|&s| s == 0), "channel A is silent");
+        assert!(bufs[2].iter().all(|&s| s == 0), "channel C is silent");
+        assert!(
+            bufs[1].iter().any(|&s| s != 0),
+            "channel B carries the tone"
+        );
+        let mut mixed = [0i16; 400];
+        assert_eq!(ay.fill_audio(&mut mixed), 0, "the summed output is not fed");
+    }
+
+    /// The three outputs add up to what the chip delivers summed, to within
+    /// each resampler rounding once.
+    #[test]
+    fn the_channel_outputs_sum_to_the_mixed_output() {
+        let program = |ay: &mut Ay8910| {
+            for (reg, value) in [
+                (0, 40),
+                (2, 57),
+                (4, 91),
+                (7, 0b0011_1000),
+                (8, 0x0F),
+                (9, 0x0B),
+                (10, 0x08),
+            ] {
+                ay.address_write(reg);
+                ay.data_write(value);
+            }
+        };
+        let mut mixed = Ay8910::new(2_000_000);
+        let mut split = Ay8910::new(2_000_000);
+        split.enable_channel_outputs();
+        program(&mut mixed);
+        program(&mut split);
+        for _ in 0..40_000 {
+            mixed.tick();
+            split.tick();
+        }
+        let mut m = [0i16; 1000];
+        let n = mixed.fill_audio(&mut m);
+        let mut chans = [[0i16; 1000]; 3];
+        for (ch, buf) in chans.iter_mut().enumerate() {
+            assert_eq!(split.fill_channel_audio(ch, buf), n);
+        }
+        for i in 0..n {
+            let sum: i32 = chans.iter().map(|c| c[i] as i32).sum();
+            assert!(
+                (sum - m[i] as i32).abs() <= 2,
+                "sample {i}: channels sum to {sum}, mixed is {}",
+                m[i]
+            );
+        }
+        assert!(m[..n].iter().any(|&s| s != 0));
+    }
+
+    #[test]
+    fn a_mixed_chip_feeds_no_channel_output() {
+        let mut ay = tone_b_only(false);
+        let mut buf = [0i16; 400];
+        assert_eq!(ay.fill_channel_audio(1, &mut buf), 0);
+        assert!(ay.fill_audio(&mut buf) > 0);
     }
 
     #[test]

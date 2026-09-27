@@ -26,8 +26,8 @@
 
 /// A two-pole section.
 ///
-/// Construct with [`Self::low_pass`]; the state is two samples of history and
-/// the coefficients are fixed at construction.
+/// Construct with [`Self::low_pass`] or [`Self::band_pass`]; the state is two
+/// samples of history and the coefficients are fixed at construction.
 #[derive(Debug, Clone)]
 pub struct Biquad {
     b0: f32,
@@ -48,6 +48,26 @@ impl Biquad {
     /// it by using one capacitor value and doubling it, which is worth
     /// recognising in a transcription.
     pub fn low_pass(f0_hz: f32, q: f32, sample_rate: u32) -> Self {
+        let (cos_w0, alpha) = Self::corner(f0_hz, q, sample_rate);
+        let b0 = (1.0 - cos_w0) / 2.0;
+        Self::normalized([b0, 1.0 - cos_w0, b0], cos_w0, alpha)
+    }
+
+    /// A two-pole band-pass centered on `f0_hz`, with unity gain there and a
+    /// bandwidth of `f0 / q` between its -3 dB points.
+    ///
+    /// This is the shape of a multiple-feedback band-pass section, an op-amp
+    /// with a capacitor to its inverting input and one back from its output.
+    /// That section also has a gain at `f0` (`-R3 / 2 R1` for equal
+    /// capacitors) and inverts; both belong at the call site beside the parts,
+    /// so this is normalized to a peak of one.
+    pub fn band_pass(f0_hz: f32, q: f32, sample_rate: u32) -> Self {
+        let (cos_w0, alpha) = Self::corner(f0_hz, q, sample_rate);
+        Self::normalized([alpha, 0.0, -alpha], cos_w0, alpha)
+    }
+
+    /// `cos(w0)` and the cookbook's `alpha` for a section at `f0_hz`.
+    fn corner(f0_hz: f32, q: f32, sample_rate: u32) -> (f32, f32) {
         let fs = sample_rate.max(1) as f32;
         // Keep the corner inside the band the bilinear transform can represent.
         // A board filter above Nyquist is a transcription error, not something
@@ -60,21 +80,19 @@ impl Biquad {
 
         let w0 = std::f32::consts::TAU * f0 / fs;
         let (sin_w0, cos_w0) = w0.sin_cos();
-        let alpha = sin_w0 / (2.0 * q);
+        (cos_w0, sin_w0 / (2.0 * q))
+    }
 
-        let b0 = (1.0 - cos_w0) / 2.0;
-        let b1 = 1.0 - cos_w0;
-        let b2 = b0;
+    /// A section from numerator coefficients and the shared denominator
+    /// `1 + alpha, -2 cos(w0), 1 - alpha`, divided through by its first term.
+    fn normalized([b0, b1, b2]: [f32; 3], cos_w0: f32, alpha: f32) -> Self {
         let a0 = 1.0 + alpha;
-        let a1 = -2.0 * cos_w0;
-        let a2 = 1.0 - alpha;
-
         Self {
             b0: b0 / a0,
             b1: b1 / a0,
             b2: b2 / a0,
-            a1: a1 / a0,
-            a2: a2 / a0,
+            a1: -2.0 * cos_w0 / a0,
+            a2: (1.0 - alpha) / a0,
             s1: 0.0,
             s2: 0.0,
         }
@@ -201,6 +219,31 @@ mod tests {
         }
         f.reset();
         assert_eq!(f.process(0.0), 0.0);
+    }
+
+    /// A band-pass passes its center at unity and nothing at DC.
+    #[test]
+    fn a_band_pass_peaks_at_unity_on_its_center() {
+        let mut f = Biquad::band_pass(1130.0, 1.14, RATE);
+        assert!((response(&mut f, 1130.0) - 1.0).abs() < 0.01);
+        let mut f = Biquad::band_pass(1130.0, 1.14, RATE);
+        for _ in 0..RATE {
+            f.process(1.0);
+        }
+        assert!(f.process(1.0).abs() < 1e-3, "DC is blocked");
+    }
+
+    /// The -3 dB points sit `f0 / Q` apart, geometrically either side of the
+    /// center: that is what Q means for a band-pass.
+    #[test]
+    fn a_band_pass_is_3db_down_at_its_band_edges() {
+        let (f0, q) = (1130.0_f32, 1.14_f32);
+        let half = (1.0 + 1.0 / (4.0 * q * q)).sqrt();
+        for edge in [f0 * (half - 1.0 / (2.0 * q)), f0 * (half + 1.0 / (2.0 * q))] {
+            let mut f = Biquad::band_pass(f0, q, RATE);
+            let db = 20.0 * response(&mut f, edge).log10();
+            assert!((db + 3.01).abs() < 0.3, "{edge:.0} Hz read {db:.2} dB");
+        }
     }
 
     /// A degenerate rate or a corner above Nyquist must not produce NaN.
