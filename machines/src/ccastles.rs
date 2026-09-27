@@ -830,8 +830,16 @@ impl CrystalCastlesBoard {
     ///   G = data & 7                                      → 3-bit inverted
     /// The 6-bit offset (0-63) provides the red MSB via bit 5.
     /// Weighted by 22K/10K/4.7K resistor network with 1K pulldown.
+    ///
+    /// Each bit's weight is its conductance over the node's whole conductance,
+    /// the pulldown and every other bit included, since a bit driven low loads
+    /// the node as much as the pulldown does. That is exact by superposition
+    /// for ideal drivers. Weighing each bit against the pulldown alone, as this
+    /// once did, put the mid-levels 4 to 7 counts off (a 3 came out 111 for
+    /// 104, a 4 came out 144 for 151). All three channels are the same ladder,
+    /// so one scale puts every bit on at 255.
     fn update_palette_entry(&mut self, offset: usize) {
-        use phosphor_core::gfx::{combine_weights, compute_resistor_weights};
+        use phosphor_core::gfx::{combine_weights, compute_resnet_weights};
 
         let data = self.palette_ram[offset];
         let r_raw = ((data & 0xC0) >> 6) | (((offset as u8) & 0x20) >> 3);
@@ -843,7 +851,9 @@ impl CrystalCastlesBoard {
         let g_inv = g_raw ^ 0x07;
         let b_inv = b_raw ^ 0x07;
 
-        let w = compute_resistor_weights(&PALETTE_RESISTORS, Some(PALETTE_PULLDOWN));
+        let mut w = compute_resnet_weights(&PALETTE_RESISTORS, PALETTE_PULLDOWN, 255.0);
+        let scale = 255.0 / w.iter().sum::<f64>();
+        w.iter_mut().for_each(|x| *x *= scale);
         let r = combine_weights(&w, &[r_inv & 1, (r_inv >> 1) & 1, (r_inv >> 2) & 1]);
         let g = combine_weights(&w, &[g_inv & 1, (g_inv >> 1) & 1, (g_inv >> 2) & 1]);
         let b = combine_weights(&w, &[b_inv & 1, (b_inv >> 1) & 1, (b_inv >> 2) & 1]);
@@ -1623,14 +1633,12 @@ mod tests {
         Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9F80, 0x00);
         assert_eq!(sys.board.palette_rgb[0], (255, 255, 255));
 
-        // Write all-ones (0xFF) → r_raw = 3, g_raw = 7, b_raw = 7
-        // Inverted: r = 7^7=4 (wait, r_raw = ((0xC0>>6) | (0&0x20)>>3) = 3)
-        // r_inv = 3^7=4 → bits 2,0 set → 144+36=180? No: 4 = 0b100 → bit2=1 → 144
-        // Actually: 3 ^ 7 = 0b011 ^ 0b111 = 0b100 = 4. bit0=0, bit1=0, bit2=1 → 144
-        // g_inv = 7^7=0 → all zero → 0
-        // b_inv = 7^7=0 → 0
+        // Write all-ones (0xFF) at offset 0: r_raw = (0xC0 >> 6) | 0 = 3,
+        // g_raw = b_raw = 7. Inverted, red is 3 ^ 7 = 4 (only the 4.7K bit)
+        // and green and blue are 0. The 4.7K bit alone, against the 1K
+        // pulldown and the other two bits driven low, is 151 of 255.
         Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9F80, 0xFF);
-        assert_eq!(sys.board.palette_rgb[0], (144, 0, 0));
+        assert_eq!(sys.board.palette_rgb[0], (151, 0, 0));
     }
 
     #[test]

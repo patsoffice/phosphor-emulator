@@ -52,7 +52,7 @@ machine = "ccastles"
 frames = 1800
 shows = "Attract mode: the isometric first castle, the red bonus-timer bar top left, and the CRYSTAL CASTLES / 1983 Atari copyright panel."
 size = [256, 232]
-frame = "sha256:39ff4e58f61aeaaf8d92f89627fca75ad94e9ed258b786885fd42667f99c14ab"
+frame = "sha256:e51a189a658900694c97c3bae36b01da9eac76ae8ce913060b31346aaf62e926"
 
 [[frame]]
 machine = "ccastles"
@@ -61,7 +61,7 @@ frames = 1600
 shows = "Level 3 in play at score 140,105 with three lives in reserve: the isometric castle in gray and green, Bentley Bear on the left-hand walkway, the HIDDEN RAMP / LEVEL 3 panel at the top right, and gem dots still lining most of the paths. Replayed from a recorded trackball session, so this pins scoring, the level indicator and a player-driven sprite position, none of which the attract castle reaches."
 movie = "movies/ccastles-1787707168.phmi"
 size = [256, 232]
-frame = "sha256:1df3a38c86de02c95a097054d0c5e296b9d6b57f1ddedd73e9e2c2ce8791840c"
+frame = "sha256:49910b5a953b7f70a431fda311f8e07016f01485146550a0723f298466eb25d3"
 
 [[frame]]
 machine = "congobongo"
