@@ -77,14 +77,32 @@ corrected three filters the summing resistors load, the explosion's most of all
 (C24's corner is 86 Hz, not 52). Full scale is anchored to thrust less 1.6 dB of
 headroom, the one number with no part behind it.
 
-THE LEVELS HAVE MOVED AND ARE NOT YET RE-COMPARED. Against the previous device,
-thrust is 1.6 dB down by construction and every other voice is up by its balance
-change: thump 1.3 dB, explosion 1.9, life 2.6, saucer 4.2, the fires 4.2 and
-4.8. The explosion's crest rose from 3.4 to 5.4 and its centroid by 14 Hz, most
-of it the onset step the gated legs make on the board. Before this change six
-scenarios were within tolerance full band and the two fires above 150 Hz, with a
-low-frequency pedestal on the fires that the board has and the reference does
-not; the comparison needs re-running against the references."""
+RE-COMPARED against references re-captured from MAME 0.289 at 192 kHz, which
+reproduce every earlier figure (thrust -20.48 dBFS, crest 3.25; life's crest
+1.24, so not chopped). Absolute level is a calibration on both sides, so the
+measure is each voice's level against thrust, ours minus the reference's:
+
+  voice            adder weights   summing resistors
+  explosion            -3.74            -0.22
+  life                 -3.31            +0.87
+  thump                -1.65            +1.22
+  saucer (both)        -3.31            +2.50
+  saucer fire >150Hz   -2.58            +3.85
+  ship fire >150Hz     -3.19            +2.64
+
+Mean disagreement falls from 3.0 dB to 2.0. What is left sits where the
+reference is not built from parts: its fires are a square primitive about a zero
+bias with tweaked levels, and its saucer is literals. The explosion, built from
+the same legs on both sides, agrees to 0.2 dB.
+
+ONE METRIC MOVED AWAY, and the drawing is why. The explosion's centroid is now
++30 Hz against the reference (it was +16) and its crest 5.4 against 3.8: C24's
+corner is 86 Hz with R82's load, where the reference keeps the unloaded 52 Hz,
+and the gated legs make an onset step the reference's bipolar source does not.
+
+Six scenarios are within tolerance full band. The two fires are within
+tolerance above 150 Hz only, with a low-frequency pedestal the board has and
+the reference does not, as before."""
 
 [[target]]
 id = "dkong-discrete"
