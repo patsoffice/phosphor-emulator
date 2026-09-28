@@ -11,10 +11,10 @@
 # resistor, and on the board thrust and explosion are EQUAL, both 4.7k. Deriving
 # the mix from this file is what retires the last fitted constants there.
 #
-# AN EXCERPT, NOT YET THE WHOLE AUDIO. So far this holds the mixer, the AUDIO 2
-# inverter, and the thrust, thump, explosion and both fire voices complete.
-# The saucer arrives as a port at its summing resistor and is transcribed in a
-# later pass.
+# AN EXCERPT, NOT YET THE WHOLE AUDIO. This holds the mixer, the AUDIO 2
+# inverter, and every voice drawn on the sheet. What drives them, the M10
+# latch, the noise register and the address decode, arrives as ports and is
+# transcribed in a later pass.
 #
 # LIFE IS NOT ON THIS SHEET. LIFEEN leaves the M10 latch here and LIFESND
 # arrives at R78 here, and nothing between them is drawn. The caption calls it
@@ -45,7 +45,7 @@ assembly = "034986-XX F"
 source = "arcade-museum.com/manuals-videogames/A/Asteroids-sp.pdf, DP-143-02 3rd printing, sheet 2 side B, PDF pages 7 and 8. Each page image is 5100 x 6600 at 1 bit per pixel on a 17 x 22 inch sheet, a true 300 dpi"
 sheets = "2B"
 dpi = 300
-excerpt = "the AUDIO OUTPUT mixer and inverter, and the thrust, thump, explosion, saucer fire and ship fire voices. Life and saucer are ports at their summing resistors, and the M10 latch, the noise register and the decode that drive the voices are ports too"
+excerpt = "the AUDIO OUTPUT mixer and inverter, and six of the seven voices: thrust, thump, explosion, saucer, saucer fire and ship fire. Life is not drawn on this sheet and is a port at its summing resistor. The M10 latch, the noise register and the decode that drive the voices are ports too"
 
 # ---------------------------------------------------------------------------
 # P11. One LM324, all four sections used: two for thrust, one mixer, one
@@ -578,14 +578,15 @@ note = "bypasses +22 V to ground at L8 pin 4. Inert for the audio."
 ref = "N9"
 kind = "U"
 device = "7406"
-pins = ["3", "4", "10", "11"]
-out = ["4", "10"]
+pins = ["1", "2", "3", "4", "10", "11", "12", "13"]
+out = ["2", "4", "10", "12"]
 group = "fires"
 note = """
 Open-collector hex inverter, drawn `OC` inside each symbol and `06` beside it. \
 Sections 11/10 and 3/4 invert the two fire enables onto the M9 hold switches' \
-controls, each with its own pull-up. Other sections of N9 serve the saucer \
-and are transcribed with it. Supply pins are not drawn."""
+controls; 13/12 inverts SAUCRSNDEN onto the saucer's hold switch, and 1/2 \
+makes SAUCRSEL-bar. Each output has its own pull-up. Supply pins are not \
+drawn."""
 
 [[parts]]
 ref = "M9"
@@ -979,13 +980,193 @@ node, so its time constant is set by the four legs in parallel with R82, not \
 by the legs alone."""
 
 # ---------------------------------------------------------------------------
+# SAUCER. A free-running 555 whose timing ramp is the warble, a transistor
+# that turns the ramp into a current pulled from a 566's modulation input, and
+# the 566's triangle output as SAUCRSND.
+#
+# ENABLE BY HOLDING THE RAMP. The 555's reset is tied high, so it never stops.
+# Instead an N10 section shorts its timing node to ground while the saucer is
+# off, which also parks Q6's base.
+#
+# SAUCRSEL CHANGES TWO THINGS AT ONCE. SAUCRSEL-bar closes one N10 section
+# that puts R68 across R69, changing the warble's rate, and another that
+# shorts CR7 out of Q6's emitter leg, changing the warble's depth.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R10"
+kind = "U"
+device = "555"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8"]
+out = ["3"]
+group = "saucer"
+nc = [
+  { pin = "3", why = "the output is drawn with its pin number and a stub and reaches nothing: the warble is the timing ramp, not the square" },
+]
+note = """
+The warble timer, on +5 V with reset tied to +5 V, so it runs whenever the \
+saucer's hold switch lets its timing node move. Designated by grid location: \
+this R10 is a 555, not a resistor."""
+
+[[parts]]
+ref = "R67"
+kind = "R"
+kohms = 5.6
+group = "saucer"
+note = "from +5 V to R10's discharge pin."
+
+[[parts]]
+ref = "R69"
+kind = "R"
+kohms = 10
+group = "saucer"
+note = "from R10's discharge pin to its timing node."
+
+[[parts]]
+ref = "R68"
+kind = "R"
+kohms = 15
+group = "saucer"
+note = "switched across R69 by N10 section 8/9 when SAUCRSEL-bar is high."
+
+[[parts]]
+ref = "C45"
+kind = "C"
+uf = 10.0
+group = "saucer"
+note = "drawn `10, TANT`. R10's timing capacitor, whose ramp is the warble."
+
+[[parts]]
+ref = "C55"
+kind = "C"
+uf = 0.01
+group = "saucer"
+note = "on R10's control-voltage pin to ground."
+
+[[parts]]
+ref = "C63"
+kind = "C"
+uf = 0.1
+group = "saucer"
+note = "bypasses +5 V to ground at R10 pins 8 and 4. Inert for the audio."
+
+[[parts]]
+ref = "N10"
+kind = "U"
+device = "4016B"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "13"]
+group = "saucer"
+note = """
+Quad analog switch drawn `(+12V)`, three sections used. The fourth, on pins \
+10, 11 and 12, is not drawn. The on-resistance is not on the drawing and is \
+left off."""
+
+[[parts.switches]]
+name = "warble hold"
+pins = ["1", "2"]
+control = "13"
+
+[[parts.switches]]
+name = "warble rate select"
+pins = ["8", "9"]
+control = "6"
+
+[[parts.switches]]
+name = "warble depth select"
+pins = ["4", "3"]
+control = "5"
+
+[[parts]]
+ref = "R85"
+kind = "R"
+kohms = 1
+group = "saucer"
+note = "the pull-up on N9 pin 12, the warble hold's control, to +12 V."
+
+[[parts]]
+ref = "R63"
+kind = "R"
+kohms = 10
+group = "saucer"
+note = "the pull-up on SAUCRSEL-bar, N9 pin 2, to +12 V."
+
+[[parts]]
+ref = "Q6"
+kind = "Q"
+device = "2N3643"
+group = "saucer"
+note = """
+NPN. Base on the warble ramp, collector on the 566's modulation input with R62 \
+from +12 V, emitter through R64 to the depth node. As the ramp rises it pulls \
+more current out of the modulation input."""
+
+[[parts]]
+ref = "R62"
+kind = "R"
+kohms = 5.6
+group = "saucer"
+note = "from +12 V to the 566's modulation input."
+
+[[parts]]
+ref = "R64"
+kind = "R"
+kohms = 3.9
+group = "saucer"
+note = "Q6's emitter resistor, to the depth node."
+
+[[parts]]
+ref = "CR7"
+kind = "D"
+device = "1N914"
+group = "saucer"
+note = """
+Anode on the depth node, cathode on ground. In series with Q6's emitter leg \
+unless N10 section 4/3 shorts the node to ground, so SAUCRSEL decides whether \
+a diode drop comes out of the ramp before it becomes a current."""
+
+[[parts]]
+ref = "P10"
+kind = "U"
+device = "566"
+pins = ["1", "3", "4", "5", "6", "7", "8"]
+out = ["3", "4"]
+group = "saucer"
+nc = [
+  { pin = "3", why = "the square output is drawn with its pin number and a stub and reaches nothing" },
+]
+note = """
+The saucer's VCO, labeled `566 f-GEN`, on +12 V. Pin 4, the triangle output, \
+is SAUCRSND. Pin 2 is not drawn."""
+
+[[parts]]
+ref = "R70"
+kind = "R"
+kohms = 10
+group = "saucer"
+note = "the 566's timing resistor, from +12 V to pin 6."
+
+[[parts]]
+ref = "C56"
+kind = "C"
+uf = 0.001
+group = "saucer"
+note = "from pin 6 to pin 5, the usual 566 stabilizing capacitor."
+
+[[parts]]
+ref = "C46"
+kind = "C"
+uf = 0.047
+group = "saucer"
+note = "drawn `.047, MYL`. The 566's timing capacitor on pin 7."
+
+# ---------------------------------------------------------------------------
 # NETS
 # ---------------------------------------------------------------------------
 
 [[nets]]
 name = "+5V"
 rail = true
-on = ["P11.3", "P11.5", "P11.10", "P11.12", "C62.a", "C54.a", "R100.a", "R80.a", "R49.a", "R50.a", "N8.8", "C34.a", "M8.8", "L9.8", "C51.a", "M9.1", "M9.9", "M9.10"]
+on = ["P11.3", "P11.5", "P11.10", "P11.12", "C62.a", "C54.a", "R100.a", "R80.a", "R49.a", "R50.a", "N8.8", "C34.a", "M8.8", "L9.8", "C51.a", "M9.1", "M9.9", "M9.10", "R67.a", "R10.8", "R10.4", "C63.a"]
 note = "every LM324 section's non-inverting input sits here."
 
 [[nets]]
@@ -997,13 +1178,13 @@ note = "both LM324s' positive supply."
 [[nets]]
 name = "+12V"
 rail = true
-on = ["CR3.a", "R54.a", "R56.a", "R52.a", "R65.a", "R59.a"]
-note = "the fires' current sources and the ship's hold-control pull-up."
+on = ["CR3.a", "R54.a", "R56.a", "R52.a", "R65.a", "R59.a", "R85.a", "R63.a", "R62.a", "R70.a", "P10.8"]
+note = "the fires' current sources, the 566 and its modulation input, and the switch-control pull-ups."
 
 [[nets]]
 name = "GND"
 rail = true
-on = ["P11.11", "C65.b", "C54.b", "C27.b", "R44.b", "C33.b", "C32.b", "C34.b", "C64.b", "N8.1", "R53.b", "L8.5", "L8.10", "L8.11", "C37.b", "C38.b", "C35.b", "C36.b", "M8.1", "C39.b", "C47.b", "C50.b", "C40.b", "C51.b", "L9.1", "C48.b", "C24.b"]
+on = ["P11.11", "C65.b", "C54.b", "C27.b", "R44.b", "C33.b", "C32.b", "C34.b", "C64.b", "N8.1", "R53.b", "L8.5", "L8.10", "L8.11", "C37.b", "C38.b", "C35.b", "C36.b", "M8.1", "C39.b", "C47.b", "C50.b", "C40.b", "C51.b", "L9.1", "C48.b", "C24.b", "C45.b", "C55.b", "C63.b", "R10.1", "N10.1", "N10.3", "CR7.k", "C46.b", "P10.1"]
 
 [[nets]]
 name = "NOISE"
@@ -1247,9 +1428,66 @@ name = "THUMPSND"
 on = ["R74.b", "C64.a", "R83.a"]
 
 [[nets]]
-name = "SAUCRSND"
+name = "SAUCRSNDEN"
 port = "input"
-on = ["R77.a"]
+on = ["N9.13"]
+note = "from the M10 latch, transcribed in a later pass."
+
+[[nets]]
+name = "SAUCRSEL"
+port = "input"
+on = ["N9.1"]
+note = "from the M10 latch, transcribed in a later pass."
+
+[[nets]]
+name = "SAUCRSEL-bar"
+on = ["N9.2", "R63.b", "N10.6", "N10.5"]
+note = "named by the drawing's overbarred SAUCRSEL label at all three places."
+
+[[nets]]
+name = "warble hold control"
+on = ["N9.12", "R85.b", "N10.13"]
+
+[[nets]]
+name = "R10 discharge"
+on = ["R67.b", "R69.a", "R68.a", "R10.7"]
+
+[[nets]]
+name = "R68 switched"
+on = ["R68.b", "N10.8"]
+
+[[nets]]
+name = "warble ramp"
+on = ["R69.b", "C45.a", "R10.2", "R10.6", "N10.9", "N10.2", "Q6.b"]
+note = "R10's timing node, the hold switch's output, and Q6's base."
+
+[[nets]]
+name = "R10 control voltage"
+on = ["R10.5", "C55.a"]
+
+[[nets]]
+name = "566 modulation input"
+on = ["Q6.c", "R62.b", "C56.b", "P10.5"]
+
+[[nets]]
+name = "566 timing resistor"
+on = ["R70.b", "C56.a", "P10.6"]
+
+[[nets]]
+name = "Q6 emitter"
+on = ["Q6.e", "R64.a"]
+
+[[nets]]
+name = "warble depth node"
+on = ["R64.b", "CR7.a", "N10.4"]
+
+[[nets]]
+name = "566 timing capacitor"
+on = ["P10.7", "C46.a"]
+
+[[nets]]
+name = "SAUCRSND"
+on = ["P10.4", "R77.a"]
 
 [[nets]]
 name = "LIFESND"
