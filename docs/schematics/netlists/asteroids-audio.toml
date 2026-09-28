@@ -12,8 +12,9 @@
 # the mix from this file is what retires the last fitted constants there.
 #
 # AN EXCERPT, NOT YET THE WHOLE AUDIO. So far this holds the mixer, the AUDIO 2
-# inverter and the thrust voice complete. The other six voices arrive as ports
-# at their summing resistors and are transcribed in later passes.
+# inverter, and the thrust, thump and both fire voices complete. Life, saucer
+# and explosion arrive as ports at their summing resistors and are transcribed
+# in later passes.
 #
 # HOW TO READ THE SCAN. The PDF's page images are 5100 x 6600 at 1 bit on a
 # 17 x 22 inch sheet, a genuine 300 dpi. Earlier notes on this board, in
@@ -38,7 +39,7 @@ assembly = "034986-XX F"
 source = "arcade-museum.com/manuals-videogames/A/Asteroids-sp.pdf, DP-143-02 3rd printing, sheet 2 side B, PDF pages 7 and 8. Each page image is 5100 x 6600 at 1 bit per pixel on a 17 x 22 inch sheet, a true 300 dpi"
 sheets = "2B"
 dpi = 300
-excerpt = "the AUDIO OUTPUT mixer and inverter, and the thrust voice from the R11 noise switch to SHPSND. The other six voices are ports at their summing resistors"
+excerpt = "the AUDIO OUTPUT mixer and inverter, and the thrust, thump, saucer fire and ship fire voices. Life, saucer and explosion are ports at their summing resistors, and the latches, noise register and decode that drive the voices are ports too"
 
 # ---------------------------------------------------------------------------
 # P11. One LM324, all four sections used: two for thrust, one mixer, one
@@ -319,25 +320,540 @@ group = "thrust"
 note = "drawn `.1, MYL`, across R103. The one pole, 159.2 Hz."
 
 # ---------------------------------------------------------------------------
+# THUMP. A five-bit register, a four-resistor DAC onto Q2's base, a current
+# source into C33, and the N8 555 with R51 on its discharge pin. Pin 3, the
+# square, reaches THUMPSND through R74 with C64 to ground.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "N7"
+kind = "U"
+device = "74LS174"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["2", "5", "7", "10", "12", "15"]
+group = "thump"
+note = """
+Hex D flip-flop, clocked by THUMP (active low) and cleared by RESET (active \
+low). The bit order is not the pin order: DB4 enters at 1D and leaves at 1Q to \
+enable the 555, and DB3 to DB0 enter at 5D, 2D, 4D and 3D. Section 6 has its \
+6Q on pin 15 wired back to its own 6D on pin 14, so it only ever holds what it \
+powered up with and drives nothing else. Supply pins 8 and 16 are not drawn."""
+
+[[parts]]
+ref = "R45"
+kind = "R"
+kohms = 22
+group = "thump"
+note = "the DB3 leg of the pitch DAC, from N7 5Q. The strongest of the four."
+
+[[parts]]
+ref = "R48"
+kind = "R"
+kohms = 47
+group = "thump"
+note = "the DB2 leg, from N7 2Q."
+
+[[parts]]
+ref = "R46"
+kind = "R"
+kohms = 100
+group = "thump"
+note = "the DB1 leg, from N7 4Q."
+
+[[parts]]
+ref = "R47"
+kind = "R"
+kohms = 220
+group = "thump"
+note = "the DB0 leg, from N7 3Q. The weakest of the four."
+
+[[parts]]
+ref = "R49"
+kind = "R"
+kohms = 6.8
+group = "thump"
+note = "from +5 V to CR2's anode: the DAC's bias leg."
+
+[[parts]]
+ref = "CR2"
+kind = "D"
+device = "1N914"
+group = "thump"
+note = """
+Drawn with its anode on R49 and its cathode on the DAC node, so the bias leg \
+only ever sources current into the node. The device models it as a fixed \
+0.7 V drop (its 4.3 V bias)."""
+
+[[parts]]
+ref = "C27"
+kind = "C"
+uf = 0.01
+group = "thump"
+note = """
+From the DAC node to ground. NOT IN THE DEVICE. Against the node's roughly \
+4.0k Thevenin resistance it is a time constant near 40 us, well under a period \
+of the lowest thump pitch, so it smooths the register's steps rather than \
+setting anything audible."""
+
+[[parts]]
+ref = "R44"
+kind = "R"
+kohms = 47
+group = "thump"
+note = "from the DAC node to ground."
+
+[[parts]]
+ref = "Q2"
+kind = "Q"
+device = "2N3906"
+group = "thump"
+note = """
+PNP current source. Base on the DAC node, emitter to +5 V through R50, \
+collector into C33. A higher DAC voltage leaves less across R50, so a higher \
+code is a smaller current and a lower pitch. Its base current loads the DAC \
+node, which the device does not model."""
+
+[[parts]]
+ref = "R50"
+kind = "R"
+kohms = 22
+group = "thump"
+note = "Q2's emitter resistor, which sets the current: (5 - Vbase - Vbe) / R50."
+
+[[parts]]
+ref = "C33"
+kind = "C"
+uf = 0.22
+group = "thump"
+note = "drawn `.22, MYL`. The 555's timing capacitor, charged by Q2's collector."
+
+[[parts]]
+ref = "R51"
+kind = "R"
+kohms = 18
+group = "thump"
+note = """
+Between the timing node and the 555's discharge pin, so the capacitor empties \
+through it rather than in one step, which is what gives pin 3 a usable duty. \
+Q2 feeds the capacitor side, not the pin, so while the pin sinks the source \
+keeps feeding R51 and the capacitor relaxes toward Q2's current times R51. \
+The device's `Feed555::Capacitor`."""
+
+[[parts]]
+ref = "N8"
+kind = "U"
+device = "555"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8"]
+out = ["3"]
+group = "thump"
+note = """
+The thump timer. Reset on pin 4 is N7's 1Q, so the enable stops and starts \
+the oscillator rather than gating its output. Trigger and threshold are tied to \
+the timing node."""
+
+[[parts]]
+ref = "C32"
+kind = "C"
+uf = 0.01
+group = "thump"
+note = "on N8's control-voltage pin to ground, the usual noise bypass."
+
+[[parts]]
+ref = "C34"
+kind = "C"
+uf = 0.1
+group = "thump"
+note = "bypasses +5 V to ground at N8 pin 8. Inert for the audio."
+
+[[parts]]
+ref = "R74"
+kind = "R"
+kohms = 3.3
+group = "thump"
+note = "from N8 pin 3 to THUMPSND."
+
+[[parts]]
+ref = "C64"
+kind = "C"
+uf = 0.1
+group = "thump"
+note = "drawn `.1, MYL`, from THUMPSND to ground. With R74, 482 Hz before R83 loads it."
+
+# ---------------------------------------------------------------------------
+# THE TWO FIRES. Identical circuits apart from values: a pitch capacitor
+# charged by a PNP from a shared two-diode bias, an LM324 follower that puts
+# its voltage on a second PNP's emitter, and that transistor's falling current
+# into a 555's discharge pin. The 555's output pulls the voice's SND net down
+# through a diode, and an amplitude capacitor feeds the same net through a
+# series resistor. Two 4016B sections per voice hold both capacitors at +5 V
+# until the enable releases them.
+#
+#   saucer fire  Q3 R54 10k  C38 10u  L8 3/2/1  Q4 R56  M8  R57 C35  CR6  R58 C39 10u
+#   ship fire    Q1 R52 33k  C47 1u   L8 12/13/14 Q5 R65  L9  R61 C50  CR8  R66 2.7k C48 10u
+#
+# THE PAGE BREAK falls through the saucer's M9 and pull-up. The saucer's hold
+# switch output (M9 pin 3) and its pull-up's supply end (R60) both rise into
+# the seam under the LIFE caption and end there without a label. The ship's
+# twins of both are labeled: M9 pin 10 on +5 V, R59 on +12 V. The saucer's are
+# left unread rather than copied from the twin.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "CR3"
+kind = "D"
+device = "1N914"
+group = "fires"
+note = "the upper of two diodes in series from +12 V to the fires' shared bias node, anode on +12 V."
+
+[[parts]]
+ref = "CR4"
+kind = "D"
+device = "1N914"
+group = "fires"
+note = "the lower of the pair, cathode on the bias node."
+
+[[parts]]
+ref = "R53"
+kind = "R"
+kohms = 1
+group = "fires"
+note = "from the bias node to ground. With the two diodes it holds both current sources' bases two drops below +12 V."
+
+[[parts]]
+ref = "L8"
+kind = "U"
+device = "LM324"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+group = "fires"
+note = """
+THE PART NUMBER IS PRINTED beside each section. Pin 4 is +22 V with C37 to \
+ground and pin 11 is ground, drawn on the ship's section. Sections on 3/2/1 \
+and 12/13/14 are the two fires' followers; sections on 5/6/7 and 10/9/8 are \
+drawn unused, each with its + input grounded and its output tied back to its \
+- input."""
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "saucer fire follower"
+group = "fires"
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "ship fire follower"
+group = "fires"
+op_amp = { plus = "12", minus = "13", out = "14" }
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "unused, tied off"
+group = "fires"
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "unused, tied off"
+group = "fires"
+op_amp = { plus = "10", minus = "9", out = "8" }
+
+[[parts]]
+ref = "C37"
+kind = "C"
+uf = 0.1
+group = "fires"
+note = "bypasses +22 V to ground at L8 pin 4. Inert for the audio."
+
+[[parts]]
+ref = "N9"
+kind = "U"
+device = "7406"
+pins = ["3", "4", "10", "11"]
+out = ["4", "10"]
+group = "fires"
+note = """
+Open-collector hex inverter, drawn `OC` inside each symbol and `06` beside it. \
+Sections 11/10 and 3/4 invert the two fire enables onto the M9 hold switches' \
+controls, each with its own pull-up. Other sections of N9 serve the saucer \
+and are transcribed with it. Supply pins are not drawn."""
+
+[[parts]]
+ref = "M9"
+kind = "U"
+device = "4016B"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+group = "fires"
+read = "partial"
+unread = [
+  { pin = "3", why = "the saucer pitch-hold switch's output rises into the page break under the LIFE caption and ends without a label. Its twin on the ship side, pin 10, is labeled +5 V" },
+]
+note = """
+Quad analog switch, all four sections used, drawn `(+12V)` inside each symbol, \
+which is the switch's supply. Each voice has one section holding its pitch \
+capacitor and one holding its amplitude capacitor at +5 V while the voice is \
+idle. The on-resistance is not on the drawing and is left off."""
+
+[[parts.switches]]
+name = "saucer pitch hold"
+pins = ["4", "3"]
+control = "5"
+
+[[parts.switches]]
+name = "saucer amplitude hold"
+pins = ["9", "8"]
+control = "6"
+
+[[parts.switches]]
+name = "ship pitch hold"
+pins = ["11", "10"]
+control = "12"
+
+[[parts.switches]]
+name = "ship amplitude hold"
+pins = ["1", "2"]
+control = "13"
+
+[[parts]]
+ref = "R60"
+kind = "R"
+kohms = 10
+group = "fires"
+read = "partial"
+unread = [
+  { pin = "a", why = "the supply end rises into the page break under the LIFE caption and ends without a label. Its twin R59 on the ship side is labeled +12 V" },
+]
+note = "the pull-up on N9 pin 10, the saucer's hold-switch control. Drawn on both pages, where they overlap."
+
+[[parts]]
+ref = "R59"
+kind = "R"
+kohms = 10
+group = "fires"
+note = """
+The pull-up on N9 pin 4, the ship's hold-switch control, to +12 V: the 4016B's \
+own supply, so an idle voice's switches are fully on."""
+
+# Saucer fire.
+
+[[parts]]
+ref = "R54"
+kind = "R"
+kohms = 10
+group = "fires"
+note = "Q3's emitter resistor from +12 V. Sets the saucer's pitch-capacitor charging current."
+
+[[parts]]
+ref = "Q3"
+kind = "Q"
+device = "2N3906"
+group = "fires"
+note = "PNP current source, base on the shared bias, collector into C38."
+
+[[parts]]
+ref = "C38"
+kind = "C"
+uf = 10.0
+group = "fires"
+note = "drawn `10, TANT`, positive plate on the collector node. The saucer fire's pitch capacitor."
+
+[[parts]]
+ref = "Q4"
+kind = "Q"
+device = "2N3906"
+group = "fires"
+note = """
+Base on L8 pin 1, emitter on R56 and back to L8 pin 2, so the follower puts \
+C38's voltage on the emitter and R56 carries (12 - Vc38) / 3.3k. The collector \
+feeds M8's discharge pin, so the current falls as C38 charges."""
+
+[[parts]]
+ref = "R56"
+kind = "R"
+kohms = 3.3
+group = "fires"
+
+[[parts]]
+ref = "M8"
+kind = "U"
+device = "555"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8"]
+out = ["3"]
+group = "fires"
+note = """
+The saucer fire timer, on +5 V, reset by SAUCRFIREEN directly. THE CURRENT \
+SOURCE FEEDS PIN 7 and R57 sits between the pin and the capacitor, the \
+opposite of thump's N8, so while the pin sinks it swallows the source's \
+current and the capacitor empties toward ground. The device's \
+`Feed555::DischargePin`."""
+
+[[parts]]
+ref = "R57"
+kind = "R"
+ohms = 680
+group = "fires"
+note = "from M8's discharge pin to its timing node."
+
+[[parts]]
+ref = "C35"
+kind = "C"
+uf = 1.0
+group = "fires"
+note = "drawn `1, TANT`. M8's timing capacitor."
+
+[[parts]]
+ref = "C36"
+kind = "C"
+uf = 0.01
+group = "fires"
+note = "on M8's control-voltage pin to ground."
+
+[[parts]]
+ref = "CR6"
+kind = "D"
+device = "1N914"
+group = "fires"
+note = """
+CATHODE ON M8 PIN 3, anode on SAUCRFIRESND. A pull-down: while the 555's \
+output is low it clamps the voice's net, and while it is high the diode is off \
+and the net follows the amplitude capacitor through R58."""
+
+[[parts]]
+ref = "R58"
+kind = "R"
+kohms = 10
+group = "fires"
+note = "from C39 to SAUCRFIRESND. On page 8."
+
+[[parts]]
+ref = "C39"
+kind = "C"
+uf = 10.0
+group = "fires"
+note = "drawn `10, TANT`, positive plate on R58. The saucer fire's amplitude capacitor. On page 8."
+
+# Ship fire.
+
+[[parts]]
+ref = "R52"
+kind = "R"
+kohms = 33
+group = "fires"
+note = "Q1's emitter resistor from +12 V."
+
+[[parts]]
+ref = "Q1"
+kind = "Q"
+device = "2N3906"
+group = "fires"
+note = "PNP current source, base on the shared bias, collector into C47."
+
+[[parts]]
+ref = "C47"
+kind = "C"
+uf = 1.0
+group = "fires"
+note = "drawn `1, TANT`, a tenth of the saucer's C38. The ship fire's pitch capacitor."
+
+[[parts]]
+ref = "Q5"
+kind = "Q"
+device = "2N3906"
+group = "fires"
+note = "the ship's follower-driven source, as Q4: base on L8 pin 14, emitter on R65 and L8 pin 13, collector into L9's discharge pin."
+
+[[parts]]
+ref = "R65"
+kind = "R"
+kohms = 3.3
+group = "fires"
+
+[[parts]]
+ref = "L9"
+kind = "U"
+device = "555"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8"]
+out = ["3"]
+group = "fires"
+note = "the ship fire timer, drawn as M8's twin, reset by SHPFIREEN."
+
+[[parts]]
+ref = "R61"
+kind = "R"
+ohms = 680
+group = "fires"
+
+[[parts]]
+ref = "C50"
+kind = "C"
+uf = 1.0
+group = "fires"
+note = "drawn `1, TANT`. L9's timing capacitor."
+
+[[parts]]
+ref = "C40"
+kind = "C"
+uf = 0.01
+group = "fires"
+note = "on L9's control-voltage pin to ground."
+
+[[parts]]
+ref = "C51"
+kind = "C"
+uf = 0.1
+group = "fires"
+note = "bypasses +5 V to ground at L9 pin 8. Inert for the audio. M8 has no bypass drawn."
+
+[[parts]]
+ref = "CR8"
+kind = "D"
+device = "1N914"
+group = "fires"
+note = "cathode on L9 pin 3, anode on SHPFIRESND. The same pull-down as CR6."
+
+[[parts]]
+ref = "R66"
+kind = "R"
+kohms = 2.7
+group = "fires"
+note = "from C48 to SHPFIRESND. On page 8. A quarter of the saucer's R58."
+
+[[parts]]
+ref = "C48"
+kind = "C"
+uf = 10.0
+group = "fires"
+note = "drawn `10, TANT`. The ship fire's amplitude capacitor. On page 8."
+
+# ---------------------------------------------------------------------------
 # NETS
 # ---------------------------------------------------------------------------
 
 [[nets]]
 name = "+5V"
 rail = true
-on = ["P11.3", "P11.5", "P11.10", "P11.12", "C62.a", "C54.a", "R100.a", "R80.a"]
+on = ["P11.3", "P11.5", "P11.10", "P11.12", "C62.a", "C54.a", "R100.a", "R80.a", "R49.a", "R50.a", "N8.8", "C34.a", "M8.8", "L9.8", "C51.a", "M9.1", "M9.9", "M9.10"]
 note = "every LM324 section's non-inverting input sits here."
 
 [[nets]]
 name = "+22V"
 rail = true
-on = ["P11.4", "C65.a"]
-note = "the LM324's positive supply."
+on = ["P11.4", "C65.a", "L8.4", "C37.a"]
+note = "both LM324s' positive supply."
+
+[[nets]]
+name = "+12V"
+rail = true
+on = ["CR3.a", "R54.a", "R56.a", "R52.a", "R65.a", "R59.a"]
+note = "the fires' current sources and the ship's hold-control pull-up."
 
 [[nets]]
 name = "GND"
 rail = true
-on = ["P11.11", "C65.b", "C54.b"]
+on = ["P11.11", "C65.b", "C54.b", "C27.b", "R44.b", "C33.b", "C32.b", "C34.b", "C64.b", "N8.1", "R53.b", "L8.5", "L8.10", "L8.11", "C37.b", "C38.b", "C35.b", "C36.b", "M8.1", "C39.b", "C47.b", "C50.b", "C40.b", "C51.b", "L9.1", "C48.b"]
 
 [[nets]]
 name = "NOISE"
@@ -381,9 +897,99 @@ on = ["P11.1", "R103.b", "C69.b", "R102.a"]
 note = "the thrust voice's output, named on the drawing."
 
 [[nets]]
-name = "THUMPSND"
+name = "THUMP strobe"
 port = "input"
-on = ["R83.a"]
+on = ["N7.9"]
+note = "the drawing's THUMP, active low: N7's clock, from the address decoder."
+
+[[nets]]
+name = "RESET"
+port = "input"
+on = ["N7.1"]
+note = "active low, clearing N7 and with it the thump enable."
+
+[[nets]]
+name = "DB0"
+port = "input"
+on = ["N7.6"]
+
+[[nets]]
+name = "DB1"
+port = "input"
+on = ["N7.11"]
+
+[[nets]]
+name = "DB2"
+port = "input"
+on = ["N7.4"]
+
+[[nets]]
+name = "DB3"
+port = "input"
+on = ["N7.13"]
+
+[[nets]]
+name = "DB4"
+port = "input"
+on = ["N7.3"]
+
+[[nets]]
+name = "N7 section 6 hold"
+on = ["N7.14", "N7.15"]
+note = "6Q wired back to 6D and to nothing else."
+
+[[nets]]
+name = "thump enable"
+on = ["N7.2", "N8.4"]
+note = "N7 1Q, DB4 as latched, onto N8's reset."
+
+[[nets]]
+name = "thump DB3 leg"
+on = ["N7.12", "R45.a"]
+
+[[nets]]
+name = "thump DB2 leg"
+on = ["N7.5", "R48.a"]
+
+[[nets]]
+name = "thump DB1 leg"
+on = ["N7.10", "R46.a"]
+
+[[nets]]
+name = "thump DB0 leg"
+on = ["N7.7", "R47.a"]
+
+[[nets]]
+name = "thump bias"
+on = ["R49.b", "CR2.a"]
+
+[[nets]]
+name = "thump DAC node"
+on = ["CR2.k", "R45.b", "R48.b", "R46.b", "R47.b", "C27.a", "R44.a", "Q2.b"]
+
+[[nets]]
+name = "Q2 emitter"
+on = ["Q2.e", "R50.b"]
+
+[[nets]]
+name = "thump timing node"
+on = ["Q2.c", "C33.a", "R51.b", "N8.2", "N8.6"]
+
+[[nets]]
+name = "N8 discharge"
+on = ["N8.7", "R51.a"]
+
+[[nets]]
+name = "N8 control voltage"
+on = ["N8.5", "C32.a"]
+
+[[nets]]
+name = "thump square"
+on = ["N8.3", "R74.a"]
+
+[[nets]]
+name = "THUMPSND"
+on = ["R74.b", "C64.a", "R83.a"]
 
 [[nets]]
 name = "SAUCRSND"
@@ -396,14 +1002,121 @@ port = "input"
 on = ["R78.a"]
 
 [[nets]]
-name = "SAUCRFIRESND"
+name = "CR3/CR4"
+on = ["CR3.k", "CR4.a"]
+
+[[nets]]
+name = "fire bias"
+on = ["CR4.k", "R53.a", "Q3.b", "Q1.b"]
+note = "shared by both fires' current sources. The wire runs down the left of both blocks."
+
+[[nets]]
+name = "L8b tie"
+on = ["L8.6", "L8.7"]
+
+[[nets]]
+name = "L8c tie"
+on = ["L8.9", "L8.8"]
+
+[[nets]]
+name = "SAUCRFIREEN"
 port = "input"
-on = ["R81.a"]
+on = ["M8.4", "N9.11"]
+note = "from the M10 latch, transcribed in a later pass."
+
+[[nets]]
+name = "saucer fire hold control"
+on = ["N9.10", "M9.5", "M9.6", "R60.b"]
+
+[[nets]]
+name = "Q3 emitter"
+on = ["Q3.e", "R54.b"]
+
+[[nets]]
+name = "saucer fire pitch"
+on = ["Q3.c", "C38.a", "L8.3", "M9.4"]
+
+[[nets]]
+name = "saucer fire follower out"
+on = ["L8.1", "Q4.b"]
+
+[[nets]]
+name = "Q4 emitter"
+on = ["Q4.e", "R56.b", "L8.2"]
+
+[[nets]]
+name = "M8 discharge"
+on = ["Q4.c", "M8.7", "R57.a"]
+
+[[nets]]
+name = "M8 timing node"
+on = ["R57.b", "C35.a", "M8.6", "M8.2"]
+
+[[nets]]
+name = "M8 control voltage"
+on = ["M8.5", "C36.a"]
+
+[[nets]]
+name = "M8 output"
+on = ["M8.3", "CR6.k"]
+
+[[nets]]
+name = "SAUCRFIRESND"
+on = ["CR6.a", "R58.a", "R81.a"]
+
+[[nets]]
+name = "saucer fire amplitude"
+on = ["R58.b", "C39.a", "M9.8"]
+
+[[nets]]
+name = "SHPFIREEN"
+port = "input"
+on = ["L9.4", "N9.3"]
+note = "from the M10 latch, transcribed in a later pass."
+
+[[nets]]
+name = "ship fire hold control"
+on = ["N9.4", "M9.12", "M9.13", "R59.b"]
+
+[[nets]]
+name = "Q1 emitter"
+on = ["Q1.e", "R52.b"]
+
+[[nets]]
+name = "ship fire pitch"
+on = ["Q1.c", "C47.a", "L8.12", "M9.11"]
+
+[[nets]]
+name = "ship fire follower out"
+on = ["L8.14", "Q5.b"]
+
+[[nets]]
+name = "Q5 emitter"
+on = ["Q5.e", "R65.b", "L8.13"]
+
+[[nets]]
+name = "L9 discharge"
+on = ["Q5.c", "L9.7", "R61.a"]
+
+[[nets]]
+name = "L9 timing node"
+on = ["R61.b", "C50.a", "L9.6", "L9.2"]
+
+[[nets]]
+name = "L9 control voltage"
+on = ["L9.5", "C40.a"]
+
+[[nets]]
+name = "L9 output"
+on = ["L9.3", "CR8.k"]
 
 [[nets]]
 name = "SHPFIRESND"
-port = "input"
-on = ["R84.a"]
+on = ["CR8.a", "R66.a", "R84.a"]
+
+[[nets]]
+name = "ship fire amplitude"
+on = ["R66.b", "C48.a", "M9.2"]
 
 [[nets]]
 name = "EXPLOSND"
