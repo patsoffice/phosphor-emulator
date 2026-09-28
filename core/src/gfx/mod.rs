@@ -118,8 +118,9 @@ impl Orientation {
 ///
 /// The transform is a transpose (when `SWAP_XY`) followed by the horizontal /
 /// vertical mirrors in the transposed space. That ordering makes the named
-/// constants match the legacy helpers: `ROT90` == [`rotate_90_ccw`], `ROT270`
-/// == [`rotate_270_indexed`] (identity palette), `ROT180` == a full reverse.
+/// constants match the legacy helper and the obvious mappings: `ROT90` ==
+/// [`rotate_90_ccw`], `ROT270` sends native `(nx, ny)` to `(ny, src_w - 1 - nx)`,
+/// and `ROT180` is a full reverse.
 pub fn apply_orientation(src: &[u8], dst: &mut [u8], src_w: usize, src_h: usize, o: Orientation) {
     let swap = o.swap_xy();
     let flip_x = o.flip_x();
@@ -159,158 +160,9 @@ pub fn rotate_90_ccw(src: &[u8], dst: &mut [u8], src_w: usize, src_h: usize) {
     }
 }
 
-/// Rotate an indexed pixel buffer 90° counter-clockwise, applying an RGB palette.
-///
-/// Performs the same rotation as `rotate_90_ccw` but converts indexed pixels
-/// to RGB24 in a single pass. Each source byte is used as an index into
-/// `palette` (masked to `palette.len() - 1`).
-pub fn rotate_90_ccw_indexed(
-    src: &[u8],
-    dst: &mut [u8],
-    src_w: usize,
-    src_h: usize,
-    palette: &[(u8, u8, u8)],
-) {
-    let dst_w = src_h;
-    let mask = palette.len() - 1;
-    for ny in 0..src_h {
-        let ox = (src_h - 1) - ny;
-        for nx in 0..src_w {
-            let oy = nx;
-            let idx = src[ny * src_w + nx] as usize & mask;
-            let (r, g, b) = palette[idx];
-            let di = (oy * dst_w + ox) * 3;
-            dst[di] = r;
-            dst[di + 1] = g;
-            dst[di + 2] = b;
-        }
-    }
-}
-
-/// Rotate an indexed pixel buffer 90° counter-clockwise with block tiling.
-///
-/// Same transformation as `rotate_90_ccw_indexed`, but processes the source
-/// in `block_size × block_size` tiles. Within each block, destination writes
-/// span only `block_size` rows, keeping the working set in L1 cache.
-///
-/// Both `src_w` and `src_h` are handled correctly regardless of whether they
-/// divide evenly by `block_size`.
-pub fn rotate_90_ccw_indexed_blocked(
-    src: &[u8],
-    dst: &mut [u8],
-    src_w: usize,
-    src_h: usize,
-    palette: &[(u8, u8, u8)],
-    block_size: usize,
-) {
-    let dst_w = src_h;
-    let mask = palette.len() - 1;
-
-    for by in (0..src_h).step_by(block_size) {
-        let y_end = (by + block_size).min(src_h);
-        for bx in (0..src_w).step_by(block_size) {
-            let x_end = (bx + block_size).min(src_w);
-            for ny in by..y_end {
-                let ox = (src_h - 1) - ny;
-                let src_row = ny * src_w;
-                for nx in bx..x_end {
-                    let idx = src[src_row + nx] as usize & mask;
-                    let (r, g, b) = palette[idx];
-                    let di = (nx * dst_w + ox) * 3;
-                    dst[di] = r;
-                    dst[di + 1] = g;
-                    dst[di + 2] = b;
-                }
-            }
-        }
-    }
-}
-
-/// Rotate an indexed pixel buffer 270° CW (= 90° CCW), applying an RGB palette.
-///
-/// Transforms a `src_w × src_h` image into a `src_h × src_w` output.
-/// Native pixel `(nx, ny)` maps to output pixel `(ny, src_w - 1 - nx)`.
-///
-/// This is the opposite direction of `rotate_90_ccw_indexed` and is used
-/// for MAME ROT270 games (e.g., Q*Bert on the Gottlieb platform).
-pub fn rotate_270_indexed(
-    src: &[u8],
-    dst: &mut [u8],
-    src_w: usize,
-    src_h: usize,
-    palette: &[(u8, u8, u8)],
-) {
-    let dst_w = src_h;
-    let mask = palette.len() - 1;
-    for ny in 0..src_h {
-        let src_row = ny * src_w;
-        let ox = ny;
-        for nx in 0..src_w {
-            let oy = src_w - 1 - nx;
-            let idx = src[src_row + nx] as usize & mask;
-            let (r, g, b) = palette[idx];
-            let di = (oy * dst_w + ox) * 3;
-            dst[di] = r;
-            dst[di + 1] = g;
-            dst[di + 2] = b;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blocked_rotation_matches_naive_aligned() {
-        // 16×16 — divides evenly by block_size=4
-        let src_w = 16;
-        let src_h = 16;
-        let palette: Vec<(u8, u8, u8)> = (0..=255).map(|i| (i, i, i)).collect();
-        let src: Vec<u8> = (0..src_w * src_h).map(|i| (i & 0xFF) as u8).collect();
-
-        let mut dst_naive = vec![0u8; src_w * src_h * 3];
-        let mut dst_blocked = vec![0u8; src_w * src_h * 3];
-
-        rotate_90_ccw_indexed(&src, &mut dst_naive, src_w, src_h, &palette);
-        rotate_90_ccw_indexed_blocked(&src, &mut dst_blocked, src_w, src_h, &palette, 4);
-
-        assert_eq!(dst_naive, dst_blocked);
-    }
-
-    #[test]
-    fn blocked_rotation_matches_naive_unaligned() {
-        // 13×7 — does not divide evenly by block_size=4
-        let src_w = 13;
-        let src_h = 7;
-        let palette: Vec<(u8, u8, u8)> = (0..=255).map(|i| (i, i, i)).collect();
-        let src: Vec<u8> = (0..src_w * src_h).map(|i| (i & 0xFF) as u8).collect();
-
-        let mut dst_naive = vec![0u8; src_w * src_h * 3];
-        let mut dst_blocked = vec![0u8; src_w * src_h * 3];
-
-        rotate_90_ccw_indexed(&src, &mut dst_naive, src_w, src_h, &palette);
-        rotate_90_ccw_indexed_blocked(&src, &mut dst_blocked, src_w, src_h, &palette, 4);
-
-        assert_eq!(dst_naive, dst_blocked);
-    }
-
-    #[test]
-    fn blocked_rotation_matches_mcr2_dimensions() {
-        // 512×480 with block_size=16 (actual MCR2 dimensions)
-        let src_w = 512;
-        let src_h = 480;
-        let palette: Vec<(u8, u8, u8)> = (0..=255).map(|i| (i, i / 2, i / 3)).collect();
-        let src: Vec<u8> = (0..src_w * src_h).map(|i| (i % 64) as u8).collect();
-
-        let mut dst_naive = vec![0u8; src_w * src_h * 3];
-        let mut dst_blocked = vec![0u8; src_w * src_h * 3];
-
-        rotate_90_ccw_indexed(&src, &mut dst_naive, src_w, src_h, &palette);
-        rotate_90_ccw_indexed_blocked(&src, &mut dst_blocked, src_w, src_h, &palette, 16);
-
-        assert_eq!(dst_naive, dst_blocked);
-    }
 
     // A small asymmetric RGB24 image where every pixel is uniquely tagged, so
     // any wrong axis/flip in a transform is caught. Pixel (nx,ny) = (nx+1, ny+1, 0).
@@ -375,17 +227,20 @@ mod tests {
     }
 
     #[test]
-    fn apply_rot270_matches_rotate_270_indexed() {
+    fn apply_rot270_maps_native_pixels_explicitly() {
+        // Native (nx, ny) lands at (ny, w - 1 - nx) in the h-wide output.
         let (w, h) = (3usize, 2usize);
-        // Identity palette: indexed byte i -> (i,i,i). Build the RGB source to
-        // match so apply_orientation (RGB) and rotate_270_indexed agree.
-        let palette: Vec<(u8, u8, u8)> = (0..=255).map(|i| (i, i, i)).collect();
-        let idx: Vec<u8> = (0..w * h).map(|i| (i * 11 + 1) as u8).collect();
-        let src_rgb: Vec<u8> = idx.iter().flat_map(|&i| [i, i, i]).collect();
+        let src = tagged_rgb(w, h);
         let mut expected = vec![0u8; w * h * 3];
+        for ny in 0..h {
+            for nx in 0..w {
+                let s = (ny * w + nx) * 3;
+                let d = ((w - 1 - nx) * h + ny) * 3;
+                expected[d..d + 3].copy_from_slice(&src[s..s + 3]);
+            }
+        }
         let mut actual = vec![0u8; w * h * 3];
-        rotate_270_indexed(&idx, &mut expected, w, h, &palette);
-        apply_orientation(&src_rgb, &mut actual, w, h, Orientation::ROT270);
+        apply_orientation(&src, &mut actual, w, h, Orientation::ROT270);
         assert_eq!(expected, actual);
     }
 
@@ -416,22 +271,5 @@ mod tests {
         let mut back = vec![0u8; w * h * 3];
         apply_orientation(&rot, &mut back, h, w, Orientation::ROT270);
         assert_eq!(src, back);
-    }
-
-    #[test]
-    fn blocked_rotation_block_size_1_matches_naive() {
-        // block_size=1 should degenerate to the same result
-        let src_w = 5;
-        let src_h = 3;
-        let palette: Vec<(u8, u8, u8)> = (0..=255).map(|i| (i, 255 - i, i / 2)).collect();
-        let src: Vec<u8> = (0..src_w * src_h).map(|i| (i * 17) as u8).collect();
-
-        let mut dst_naive = vec![0u8; src_w * src_h * 3];
-        let mut dst_blocked = vec![0u8; src_w * src_h * 3];
-
-        rotate_90_ccw_indexed(&src, &mut dst_naive, src_w, src_h, &palette);
-        rotate_90_ccw_indexed_blocked(&src, &mut dst_blocked, src_w, src_h, &palette, 1);
-
-        assert_eq!(dst_naive, dst_blocked);
     }
 }
