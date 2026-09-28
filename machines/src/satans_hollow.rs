@@ -1,7 +1,8 @@
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    MachineCore, Nvram, Profilable, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
+    Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -257,10 +258,24 @@ pub struct SatansHollowSystem {
 
 impl SatansHollowSystem {
     pub fn new() -> Self {
-        Self {
+        let mut sys = Self {
             cpu: phosphor_core::cpu::z80::Z80::new(),
             board: Mcr2Board::new(),
-        }
+        };
+        // Switch positions are set here, once, and not on reset: a switch
+        // keeps its position through a reset on the board, and the frontend's
+        // saved DIP settings are applied after construction.
+        //
+        // IP3 is Switch 1, the DIP at B3 (see SHOLLOW_DIP_BANKS). Every switch
+        // closed reads 0x00, which is the historical power-on value.
+        sys.board.ssio.set_input_port(3, SHOLLOW_IP3_POWER_ON);
+        // The byte the sound CPU reads at 0xF000. The manual gives only
+        // diagnostic switches for the Sound I/O board (Switch 3 at D14: sound
+        // I/O diagnostic mode, RAM/ROM test, oscillator test, filter test, all
+        // off for play), and which bits they occupy is not established, so
+        // this keeps its historical power-on value and is not exposed.
+        sys.board.ssio.set_dip_switches(0x81);
+        sys
     }
 
     /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
@@ -302,12 +317,6 @@ impl SatansHollowSystem {
         let bg_data = SHOLLOW_BG_ROM.load(rom_set)?;
         let fg_data = SHOLLOW_FG_ROM.load(rom_set)?;
         self.board.decode_gfx(&bg_data, &fg_data);
-
-        // Set IP3 to active-high idle (0x00 instead of default 0xFF)
-        self.board.ssio.set_input_port(3, 0x00);
-
-        // DIP switches: MAME defaults = 0x81 (Free Play OFF, coinage 1C/1C)
-        self.board.ssio.set_dip_switches(0x81);
 
         Ok(())
     }
@@ -490,8 +499,8 @@ impl MachineCore for SatansHollowSystem {
     fn reset(&mut self) {
         self.board.reset_board();
         self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
-        // Re-initialize IP3 to active-high idle
-        self.board.ssio.set_input_port(3, 0x00);
+        // IP3 and the SSIO switch byte are switch positions and are left as
+        // they are: see `new`.
     }
 }
 
@@ -512,16 +521,78 @@ impl Nvram for SatansHollowSystem {
 }
 
 impl Profilable for SatansHollowSystem {}
-// DipSwitches intentionally left at the empty default. Satan's Hollow's user
-// options are the SSIO sound board's 8 DIP switches (the byte set via
-// ssio.set_dip_switches and read by the sound CPU at 0xF000). MAME treats this
-// port as 8 IPT_UNKNOWN switches for every MCR game — the coin/option meaning
-// lives in the SSIO sound ROM firmware, not a documented per-bit layout — so
-// there is no verifiable table to expose here. The game-side DIPs MAME does
-// document (Coin Meters, Cabinet) sit on a separate SSIO input port, not the
-// persisted DIP byte. Exposing this would require reverse-engineering the SSIO
-// coinage routine; left for follow-up rather than guessed.
-impl phosphor_core::core::machine::DipSwitches for SatansHollowSystem {}
+/// IP3's power-on value: every switch of Switch 1 closed.
+const SHOLLOW_IP3_POWER_ON: u8 = 0x00;
+
+/// Satan's Hollow's option switches, from Figure 2-6 of the Parts and Operating
+/// Manual (Oct 1982, `arcarc.xmission.com/PDF_Arcade_Bally_Midway/`, PDF p13).
+///
+/// COINAGE IS NOT ON A SWITCH. The manual sets it, and the game's other common
+/// options, in the MACHINE SETUP part of self-test, so they live in NVRAM.
+///
+/// Switch 1 is the 10-position DIP at B3 on the Sound I/O board, which the game
+/// reads through the SSIO's IP3. A closed (ON) switch reads 0 and switch `n` is
+/// bit `n - 1`: SW#1 ON is 2 coin meters and SW#2 ON is an upright cabinet.
+/// SW#3 to SW#9 are marked not used. SW#10, freeze video, is not modeled: a
+/// 10-position switch does not fit IP3's 8 bits, and where SW#10 goes has not
+/// been traced. The factory setting is SW#1 off, one coin meter; the power-on
+/// value here keeps the historical 0x00.
+const SHOLLOW_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "Switch 1 (B3)",
+    options: &[
+        DipOption {
+            name: "Coin Meters",
+            mask: 0x01,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "2",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1",
+                    value: 0x01,
+                },
+            ],
+            conditional: &[],
+        },
+        DipOption {
+            name: "Cabinet",
+            mask: 0x02,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Upright",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Cocktail",
+                    value: 0x02,
+                },
+            ],
+            conditional: &[],
+        },
+    ],
+}];
+
+impl DipSwitches for SatansHollowSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        SHOLLOW_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.ssio.input_port(3),
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.board.ssio.set_input_port(3, value);
+        }
+    }
+}
 crate::impl_map_debug_trace!(SatansHollowSystem, board.map);
 
 // ---------------------------------------------------------------------------
@@ -750,4 +821,20 @@ mod tests {
         assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC000), 0x55);
         assert_eq!(sys.board.map.region_data(mcr2::Region::Nvram)[0], 0x55);
     }
+
+    /// A switch keeps its position through a reset. The reset used to force
+    /// IP3 back to 0x00, which would have undone any DIP setting on every
+    /// reset, and it must not reach the SSIO's own switch byte either.
+    #[test]
+    fn a_reset_keeps_the_switch_positions() {
+        let mut sys = SatansHollowSystem::new();
+        sys.set_dip_option(0, 1, 0x02); // Cabinet: cocktail
+        MachineCore::reset(&mut sys);
+        assert_eq!(sys.dip_bank_value(0), 0x02);
+        assert_eq!(sys.board.ssio.input_port(3), 0x02);
+    }
 }
+
+// Switch 1 at its historical power-on value: every switch closed.
+#[cfg(test)]
+crate::dip_test_suite!(SatansHollowSystem, &[0x00]);
