@@ -10,10 +10,13 @@
 //! Side B, with every component named for its designator at the call site. The
 //! saucer's warble and the explosion's pitch divider are not: those still carry
 //! literals taken from the reference netlist, and they are the two left to do.
-//! Relative mix levels are the reference's adder weights throughout, which is a
-//! board-wide question — the schematic gives all seven summing resistors, so
-//! expressing every voice in volts and letting the mixer weight them would
-//! retire the last constant in the file.
+//!
+//! Every voice is expressed in volts at its own net, and the mix is the board's:
+//! each voice enters AUDIO1 through its summing resistor into R86, with weights
+//! solved from `docs/schematics/netlists/asteroids-audio.toml` into
+//! `asteroids_sound_derived.rs`, along with the filters that net's summing
+//! resistor loads. What the solver cannot give, a source's output swing, is
+//! stated beside each voice as a part property.
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
@@ -24,6 +27,11 @@ use phosphor_core::device::{
 use phosphor_macros::Saveable;
 
 use crate::atari_dvg::TIMING;
+
+// Solved from the transcription by `netlist derive`; see the file's header for
+// how to regenerate it.
+#[path = "asteroids_sound_derived.rs"]
+mod derived;
 
 /// MAME's pitch-divider mapping for the explosion path: register bits 6-7 select
 /// the noise re-clock divider (`12 kHz / divider`).
@@ -40,11 +48,25 @@ fn explosion_divider(reg: u8) -> f64 {
 // Explosion noise generator (custom escape-hatch component)
 // ---------------------------------------------------------------------------
 
-/// 16-bit XNOR LFSR re-clocked at `12 kHz / divider`, scaled by volume. This is
-/// circuit-specific (variable re-clock rate + register-cleared reset), so it
-/// rides the framework's `Custom` escape hatch rather than a shared primitive.
+/// 16-bit XNOR LFSR re-clocked at `12 kHz / divider`, gated onto four weighted
+/// legs by the volume bits. This is circuit-specific (variable re-clock rate +
+/// register-cleared reset), so it rides the framework's `Custom` escape hatch
+/// rather than a shared primitive.
 ///
-/// Inputs: `[volume 0..1, divider, noise_reset 0/1]`.
+/// The board samples the shared noise register through R8 where this clocks a
+/// register of its own; the two are the same polynomial, so the difference is
+/// which stretch of the sequence plays, not its spectrum.
+///
+/// The four R7 AND gates each pass the noise bit only while their volume bit is
+/// set, so every leg sits at an LS gate's low level except those whose bit and
+/// the noise are both high. The legs meet at EXPLOSND through R40 to R42, and
+/// the output is that node's DC level: each leg's volts times the solver's gain
+/// from that leg, which already carries R82's load into the mixer. The weights
+/// run about 8.4 : 3.9 : 2.1 : 1, not a binary 8 : 4 : 2 : 1, so the volume law
+/// is the parts' rather than a linear 0 to 15.
+///
+/// Inputs: `[volume code 0..=15, divider, noise_reset 0/1]`. Output: EXPLOSND
+/// in volts above its all-legs-low rest, before C24.
 struct ExplosionNoise {
     lfsr: u16,
     clock_acc: f64,
@@ -63,7 +85,7 @@ impl CustomComponent for ExplosionNoise {
     }
 
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let volume = inputs[0];
+        let code = (inputs[0].round() as u32).min(15);
         let divider = inputs[1].max(1.0);
         if inputs[2] > 0.5 {
             // Noise reset clears the register (XNOR feedback recovers from 0).
@@ -76,8 +98,16 @@ impl CustomComponent for ExplosionNoise {
             let fb = !(((self.lfsr >> 6) ^ (self.lfsr >> 14)) & 1) & 1;
             self.lfsr = (self.lfsr << 1) | fb;
         }
-        let level = if self.lfsr & 1 != 0 { 1.0 } else { -1.0 };
-        level * volume
+        // Measured from where EXPLOSND rests with every leg low, so power-on is
+        // not a step the board never makes. A leg that goes high adds its gain
+        // times the gate's swing.
+        let noise = self.lfsr & 1 != 0;
+        EXPLOSION_LEG_GAINS
+            .iter()
+            .enumerate()
+            .filter(|&(bit, _)| noise && code & (1 << bit) != 0)
+            .map(|(_, gain)| gain * (LS_HIGH_V - LS_LOW_V))
+            .sum()
     }
 
     fn save_state(&self, w: &mut StateWriter) {
@@ -282,22 +312,54 @@ struct AsteroidsDiscreteInputs {
 // Circuit construction
 // ---------------------------------------------------------------------------
 
-/// Relative mix levels from MAME's final adder (`asteroid_a.cpp`). Normalized so
-/// the summed output stays within [-1, 1].
-const LVL_EXPLOSION: f64 = 1000.0;
-const LVL_THRUST: f64 = 600.0;
-const LVL_LIFE: f64 = 100.0;
-const LVL_THUMP: f64 = 131.6;
-const LVL_SAUCER: f64 = 76.1;
-const LVL_SHIP_FIRE: f64 = 53.0;
-const LVL_SAUCER_FIRE: f64 = 49.5;
-const LVL_TOTAL: f64 = LVL_EXPLOSION
-    + LVL_THRUST
-    + LVL_LIFE
-    + LVL_THUMP
-    + LVL_SAUCER
-    + LVL_SHIP_FIRE
-    + LVL_SAUCER_FIRE;
+/// An LS-TTL output's high and low levels, the datasheet typicals for the
+/// SN74LS00 family (VOH 3.4 V, VOL 0.25 V). Not on the drawing: a part
+/// property, and the swing the noise register's N5 gate and the explosion's R7
+/// gates put into their legs.
+const LS_HIGH_V: f64 = 3.4;
+const LS_LOW_V: f64 = 0.25;
+/// Half an LS output's swing: the amplitude a ±1 logic source carries in volts
+/// once its mean is dropped, which the voice's coupling does downstream.
+const LS_HALF_SWING_V: f64 = (LS_HIGH_V - LS_LOW_V) / 2.0;
+
+/// The explosion's four legs, indexed by the volume code's bit. The register's
+/// DB5 is EXPAUD0 on the heaviest leg, R40, and DB2 is EXPAUD3 on R42, so code
+/// bit 3 takes leg 0.
+const EXPLOSION_LEG_GAINS: [f64; 4] = [
+    derived::EXPLOSION_LEG3_GAIN,
+    derived::EXPLOSION_LEG2_GAIN,
+    derived::EXPLOSION_LEG1_GAIN,
+    derived::EXPLOSION_LEG0_GAIN,
+];
+
+/// Half the 566's triangle output, peak to peak 2.4 V typical at a 12 V supply
+/// on the LM566 datasheet. A part property; the drawing gives none.
+const SAUCER_TRIANGLE_HALF_V: f64 = 1.2;
+
+/// The voltage across the AUDIO1/AUDIO2 pair that renders as full scale. The
+/// Regulator/Audio PCB drives the speaker from the difference of AUDIO1 and its
+/// inverse AUDIO2, so the pair carries twice AUDIO1's excursion.
+///
+/// THE ONE NUMBER IN THIS FILE WITH NO PART BEHIND IT, and deliberately so.
+/// Every voice's weight against every other is the board's, from its summing
+/// resistors. How loud the whole board renders is not a property of any part:
+/// on the cabinet it is the volume control and the speaker. So it is anchored
+/// to one voice instead of fitted to all of them, and then given headroom.
+///
+/// The anchor is thrust, which was matched to the reference to 0.02 dB before
+/// the mix changed; 0.832 V would leave its scenario level exactly where it
+/// was, -20.50 dBFS. But the parts make the explosion 3.5 dB hotter against
+/// thrust than the old adder did, and over the committed gameplay movie that
+/// anchor puts the true peak at +0.6 dBFS. This is 1.6 dB below it: thrust
+/// reads -22.1 dBFS and the movie peaks near -1 dBFS. The board itself is
+/// nowhere near clipping at either value; AUDIO1 moves under half a volt of
+/// the 5 V it has.
+///
+/// Lunar Lander, wired the same way, uses AUDIO1's full 5 V swing doubled,
+/// 10 V. That definition puts this board 15 to 22 dB below its reference,
+/// where Lunar Lander's lands within a decibel of its own, so it was not
+/// carried across.
+const MIX_FULL_SCALE: f64 = 1.0;
 
 /// Thrust band-pass: a multiple-feedback stage around one section of the LM324.
 ///
@@ -316,10 +378,6 @@ const THRUST_BP_R_REF: f64 = 1_200.0; // R100, to the +5 V reference
 const THRUST_BP_RF: f64 = 270_000.0; // R101
 const THRUST_BP_C: f64 = 0.1e-6; // C67 and C68
 
-/// Centre gain of the band-pass above, `Rf/(2·R_in)`, which the path's own gain
-/// divides back out so the mix weight is the only thing it applies.
-const THRUST_BP_CENTRE_GAIN: f64 = THRUST_BP_RF / (2.0 * THRUST_BP_R_IN);
-
 /// Thrust output stage: an inverting active low-pass on the next LM324 section.
 ///
 /// R104 sets the input, R103 the feedback and C69 sits across R103. That is a
@@ -334,56 +392,6 @@ const THRUST_LP_R_IN: f64 = 6_800.0; // R104
 const THRUST_LP_RF: f64 = 10_000.0; // R103
 const THRUST_LP_C: f64 = 0.1e-6; // C69
 const THRUST_LP_GAIN: f64 = THRUST_LP_RF / THRUST_LP_R_IN;
-
-/// Q of the thrust band-pass, which is also its energy make-up factor.
-///
-/// A band-pass this narrow throws away most of the noise handed to it, so a path
-/// carrying its mix weight through one arrives far too quiet. Multiplying the
-/// weight by Q is the compensation, and the reference makes the same correction
-/// in the same place for the same reason.
-const THRUST_Q: f64 = 7.6;
-
-/// Output gain after the thrust band-pass: the path's mix weight, scaled by the
-/// filter's energy make-up, with the band-pass primitive's own resonant gain
-/// divided back out so it is not counted twice.
-///
-/// Dividing out the band-pass's centre gain makes this path algebraically the
-/// reference's: a weight-times-Q scaling, filters with unity centre gain, and
-/// one output normalisation. That is why the two agree on absolute level once
-/// the stages either side of it are right.
-///
-/// STILL NOT DERIVED FROM PARTS, and the distinction matters. The measured level
-/// agrees with the board to well inside the window-to-window spread, but the
-/// weight is the reference's own tweaked 600 rather than the 1000 its summing
-/// resistor implies, and Q is here as an energy correction rather than as a
-/// component. What would retire it is expressing every voice in volts and
-/// letting the mixer weight them, which the schematic now makes possible:
-/// thrust enters the LM324 mixer through R102 4.7 kΩ against R86's 1 kΩ, the
-/// same pair the explosion uses. That is a board-wide change, not a thrust one.
-///
-/// It was 0.12, fitted against a reference capture, and that value was standing
-/// in for the broken noise source upstream: a ringing filter needs far more
-/// make-up than a genuinely excited one, so once the register was corrected the
-/// old gain drove the path into hard clipping at full scale. That is what a gain
-/// fitted over a broken stage does.
-const THRUST_GAIN: f64 = (LVL_THRUST / LVL_TOTAL) * THRUST_Q / THRUST_BP_CENTRE_GAIN;
-
-/// Half the 555's output swing, which is the amplitude its square carries once
-/// the amplifier's coupling capacitor has centred it. `out_high` is `vcc − 1.2`.
-const THUMP_555_SWING: f64 = (5.0 - 1.2) / 2.0;
-
-/// Output gain after the thump 555/RC chain: the path's mix weight, applied to a
-/// signal first normalised out of volts, which is the same shape thrust uses.
-///
-/// This was 0.135, "calibrated to the reference thump level", and it was fitted
-/// against the capacitor tap. With the square, which is what the board takes, it
-/// ran the voice 10 dB hot.
-///
-/// The residual is about a decibel, and it is the reference's own doing: its
-/// thump carries a bare `GAIN 30` where the mix level its table documents would
-/// want 69. That is the same kind of tweak as thrust's 600 against the 1000 its
-/// summing resistor implies, and it is not something to reproduce.
-const THUMP_GAIN: f64 = (LVL_THUMP / LVL_TOTAL) / THUMP_555_SWING;
 
 // ---------------------------------------------------------------------------
 // Fire voices — the two "pew" chains, built from the board's own parts
@@ -450,12 +458,6 @@ const FIRE_MIX_R: f64 = 100_000.0; // R81 / R84
 /// hundred microamps R58/R66 hands it.
 const FIRE_CLAMP_V: f64 = 0.1 + 0.6;
 
-/// Half the summing node's full swing, from the diode clamp it rests at up to
-/// the +5 V it reaches with a full output capacitor. Dividing by it turns the
-/// node's volts into the normalised units the mix weights are expressed in,
-/// which is the shape thrust and thump use.
-const FIRE_HALF_SWING: f64 = (FIRE_REST_V - FIRE_CLAMP_V) / 2.0;
-
 /// The board's noise register: 16 bits, XNOR of bits 6 and 14 fed back into the
 /// bottom, clocked at 12 kHz.
 ///
@@ -496,8 +498,8 @@ struct FireParts {
     r_series: f64,
     /// Output-network storage capacitor: C39 / C48.
     c_amp: f64,
-    /// The path's weight in the final adder.
-    level: f64,
+    /// The voice net's gain into AUDIO1, R86 over R81 / R84, solved.
+    mix: f64,
 }
 
 /// Build one fire "pew" from the board's parts.
@@ -512,7 +514,7 @@ fn build_fire(
         c_pitch,
         r_series,
         c_amp,
-        level,
+        mix,
     } = parts;
     let cv = b.custom(
         &format!("{name}_FIRE_CV"),
@@ -561,11 +563,9 @@ fn build_fire(
             FIRE_CLAMP_V,
         )),
     );
-    b.gain(
-        &format!("{name}_FIRE_OUT"),
-        node,
-        (level / LVL_TOTAL) / FIRE_HALF_SWING,
-    )
+    // The node is already in volts, so it enters the mix at its summing
+    // resistor's weight and nothing else.
+    b.gain(&format!("{name}_FIRE_OUT"), node, mix)
 }
 
 fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
@@ -600,16 +600,23 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
             clock_acc: 0.0,
         }),
     );
-    let expl_lp = b.rc_low_pass("EXPLODE_LP", expl_noise, 3_042.0, 1e-6);
-    let expl = b.gain("EXPLODE", expl_lp, LVL_EXPLOSION / LVL_TOTAL);
+    // C24 against the four legs in parallel AND R82's load into the mixer,
+    // 1.85 ms. This was the legs alone, 3.04 ms, which put the corner at 52 Hz
+    // where the board's is 86.
+    let expl_lp = b.low_pass_tau("EXPLODE_LP", expl_noise, derived::EXPLOSION_C24_TAU);
+    let expl = b.gain("EXPLODE", expl_lp, derived::MIX_EXPLOSION);
 
     // --- Thrust: 12 kHz noise -> RC pre-filter (~72 Hz) -> gate -> resonant
     // op-amp multiple-feedback band-pass (~89.5 Hz, Q ~7.6) -> output low-pass
     // -> mix weight. The noise source, the pre-filter, the gate and the
     // band-pass all match the reference stage for stage. ---
     let thrust_noise = b.lfsr_noise("THRUST_NOISE", 12_000.0, THRUST_NOISE_LFSR);
-    // R75 and C62: one pole at 72.3 Hz.
-    let thrust_rc = b.rc_low_pass("THRUST_RC", thrust_noise, 2_200.0, 1e-6);
+    // N5's output in volts, about its mean.
+    let thrust_noise_v = b.gain("THRUST_NOISE_V", thrust_noise, LS_HALF_SWING_V);
+    // R75 and C62, loaded by the band-pass input's R76 and R100: one pole at
+    // 75.6 Hz and a DC gain of 0.956, where R75 and C62 alone give 72.3 Hz and 1.
+    let thrust_rc_in = b.gain("THRUST_RC_IN", thrust_noise_v, derived::THRUST_C62_GAIN);
+    let thrust_rc = b.low_pass_tau("THRUST_RC", thrust_rc_in, derived::THRUST_C62_TAU);
     // The board gates with a 4016B analog switch BEFORE this RC, not after it,
     // so its attack and release are shaped differently from what this does.
     // Left as is for now: it moves the edges of the effect and nothing in the
@@ -630,10 +637,11 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
         -12.0,
         12.0,
     );
-    // One pole at 159 Hz, from R103 across C69. The stage's own gain and the
-    // path's mix weight are applied together at the node below.
+    // One pole at 159 Hz, from R103 across C69, and the stage's DC gain of
+    // R103/R104: SHPSND in volts. The band-pass above carries its own gain of
+    // 2.87 from the parts, so nothing here makes up for it.
     let thrust_lp = b.rc_low_pass("THRUST_LP", thrust_bp, THRUST_LP_RF, THRUST_LP_C);
-    let thrust = b.gain("THRUST", thrust_lp, THRUST_LP_GAIN * THRUST_GAIN);
+    let thrust = b.gain("THRUST", thrust_lp, THRUST_LP_GAIN * derived::MIX_THRUST);
 
     // --- Thump: a 4-bit R-1 DAC sets the control voltage of a constant-current
     // 555 VCO (the cap sawtooth), AC-coupled, RC-smoothed and gated. Higher data
@@ -681,11 +689,14 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
         // centroid with 7 points too much energy below 150 Hz.
         Output555::Square,
     );
-    let thump_rc = b.rc_low_pass("THUMP_RC", thump_555, 3.3e3, 0.1e-6); // R74, C64: 482 Hz
+    // R74 and C64, loaded by R83 into the mixer: 516 Hz and a DC gain of 0.934,
+    // where the two parts alone give 482 Hz and 1.
+    let thump_rc_in = b.gain("THUMP_RC_IN", thump_555, derived::THUMP_C64_GAIN);
+    let thump_rc = b.low_pass_tau("THUMP_RC", thump_rc_in, derived::THUMP_C64_TAU);
     // No gate here: the 555's reset above is the gate, as on the board. A
     // multiply at this point would also have to cut the RC's stored charge,
     // which is a discontinuity the hardware does not make.
-    let thump = b.gain("THUMP", thump_rc, THUMP_GAIN);
+    let thump = b.gain("THUMP", thump_rc, derived::MIX_THUMP);
 
     // --- Saucer (MAME asteroid_a.cpp): a triangle warble LFO (8.25 Hz small /
     // 5.75 Hz large) sweeps a triangle tone VCO. SAUCER_SEL shifts both the
@@ -701,7 +712,11 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let saucer_freq = b.add("SAUCER_FREQ", &[saucer_base, warble_dev, saucer_seloff]);
     let saucer_tone = b.variable_triangle("SAUCER_TONE", saucer_freq);
     let saucer_gated = b.multiply("SAUCER_G", saucer_tone, saucer_en);
-    let saucer = b.gain("SAUCER", saucer_gated, LVL_SAUCER / LVL_TOTAL);
+    let saucer = b.gain(
+        "SAUCER",
+        saucer_gated,
+        SAUCER_TRIANGLE_HALF_V * derived::MIX_SAUCER,
+    );
 
     // --- Fire paths: two identical chains, differing in four components. ---
     //
@@ -717,7 +732,7 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
             c_pitch: 1e-6,   // C47
             r_series: 2.7e3, // R66
             c_amp: 10e-6,    // C48
-            level: LVL_SHIP_FIRE,
+            mix: derived::MIX_SHIP_FIRE,
         },
     );
     // Saucer: 10 kΩ into 10 µF is 8.4 V/s, twelve times slower on the pitch, so
@@ -733,14 +748,17 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
             c_pitch: 10e-6, // C38
             r_series: 10e3, // R58
             c_amp: 10e-6,   // C39
-            level: LVL_SAUCER_FIRE,
+            mix: derived::MIX_SAUCER_FIRE,
         },
     );
 
     // --- Life: fixed 3 kHz tone, gated ---
+    // The gate that makes LIFESND is not drawn anywhere in the manual, so its
+    // swing is an assumption: an LS output, like every other logic source on
+    // this sheet.
     let life_tone = b.fixed_square("LIFE_TONE", 3_000.0);
     let life_gated = b.multiply("LIFE_G", life_tone, life_en);
-    let life = b.gain("LIFE", life_gated, LVL_LIFE / LVL_TOTAL);
+    let life = b.gain("LIFE", life_gated, LS_HALF_SWING_V * derived::MIX_LIFE);
 
     // --- Final mix ---
     let mix = b.add(
@@ -760,7 +778,9 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     // cheat to make the waveform AC, and which leaves a residual whenever the
     // duty is not 50 %. That is worth not reproducing.
     let out = b.rc_high_pass("AUDIO_COUPLING", mix, 10e3, 10e-6);
-    b.output(out, OutputGain::unity());
+    // `mix` is AUDIO1's excursion in volts. The speaker sees AUDIO1 against its
+    // inverse, twice that, and full scale is the pair's largest symmetric swing.
+    b.output(out, OutputGain::linear(2.0 / MIX_FULL_SCALE));
 
     let circuit = b.build();
     (
@@ -823,8 +843,8 @@ impl AsteroidsDiscreteSound {
     /// 0x3600: explosion. Bits 2-5 are volume (0-15); bits 6-7 the pitch divider.
     pub fn write_explosion(&mut self, data: u8) {
         self.explosion_reg = data;
-        let volume = ((data >> 2) & 0x0F) as f64 / 15.0;
-        self.circuit.set_data(self.ids.explosion_vol, volume);
+        let volume = (data >> 2) & 0x0F;
+        self.circuit.set_data(self.ids.explosion_vol, volume as f64);
         self.circuit
             .set_data(self.ids.explosion_pitch, explosion_divider(data));
     }

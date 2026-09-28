@@ -1,0 +1,131 @@
+# What `machines/src/asteroids_sound.rs` takes from the solver rather than from
+# a hand derivation or from the reference's adder. Regenerate with
+#
+#     cargo run -p phosphor-netlist -- derive docs/schematics/netlists/asteroids-audio.derive.toml
+#
+# and `tools/netlist/tests/asteroids_derive_test.rs` fails while the output is
+# stale. Filed as `phosphor-emulator-kfby.6`.
+#
+# THE MIX, and the reason this file exists. Each voice reaches AUDIO1 through
+# its own summing resistor into P11 section c, whose feedback is R86. The
+# device used to weight the voices with the reference netlist's adder
+# constants, explosion 1000 and thrust 600 among them; on the board the two
+# are the same 4.7k. Solved with the op-amps ideal, which is what a gain
+# through a stage with feedback needs, and with each voice's net driven so
+# that its weight is read on its own.
+#
+# THE VOICES' OWN LOADS. Every voice net sees its summing resistor into a node
+# P11 holds at +5 V, so a filter that ends on that net is loaded by it. Those
+# scenarios hold `P11c summing node` at 5 V, which is what the op-amp does, and
+# are solved passively for the modes.
+#
+# WHAT IS NOT HERE, because the solver opens every pin that is not an R, C or
+# L: the sources' swings (an LS gate's output levels, a 555's high level, a
+# 566's triangle amplitude), the band-pass and output low-pass around P11
+# sections b and a, the 555 timings, and the fire voices' diode-switched
+# network. Those stay in the device, stated as part properties.
+
+netlist = "asteroids-audio.toml"
+out = "../../../machines/src/asteroids_sound_derived.rs"
+device = "machines/src/asteroids_sound.rs"
+
+# The seven weights. Each voice net is driven at the +5 V reference; a gain is
+# the difference of two solves a volt apart, so the level does not enter it.
+[[scenarios]]
+ideal_op_amps = true
+drives = { THUMPSND = 5.0, SAUCRSND = 5.0, LIFESND = 5.0, SAUCRFIRESND = 5.0, SHPFIRESND = 5.0, EXPLOSND = 5.0, SHPSND = 5.0 }
+
+[[scenarios.gain]]
+name = "MIX_THUMP"
+node = "AUDIO1"
+per = "THUMPSND"
+
+[[scenarios.gain]]
+name = "MIX_SAUCER"
+node = "AUDIO1"
+per = "SAUCRSND"
+
+[[scenarios.gain]]
+name = "MIX_LIFE"
+node = "AUDIO1"
+per = "LIFESND"
+
+[[scenarios.gain]]
+name = "MIX_SAUCER_FIRE"
+node = "AUDIO1"
+per = "SAUCRFIRESND"
+
+[[scenarios.gain]]
+name = "MIX_SHIP_FIRE"
+node = "AUDIO1"
+per = "SHPFIRESND"
+
+[[scenarios.gain]]
+name = "MIX_EXPLOSION"
+node = "AUDIO1"
+per = "EXPLOSND"
+
+[[scenarios.gain]]
+name = "MIX_THRUST"
+node = "AUDIO1"
+per = "SHPSND"
+
+# Thump's output filter: R74 and C64, loaded by R83 into the held summing node.
+# The 555's pin 3 is the drive.
+[[scenarios]]
+drives = { "thump square" = 0.0, "P11c summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "THUMP_C64_TAU"
+mode_of = "C64"
+
+[[scenarios.gain]]
+name = "THUMP_C64_GAIN"
+node = "THUMPSND"
+per = "thump square"
+
+# The explosion's volume network: four AND-gate legs onto C24, loaded by R82.
+# Each leg is driven at an LS gate's low level; a gain is per volt of its leg
+# with the other three held, so the four add.
+[[scenarios]]
+drives = { "explosion leg 0" = 0.25, "explosion leg 1" = 0.25, "explosion leg 2" = 0.25, "explosion leg 3" = 0.25, "P11c summing node" = 5.0 }
+
+[[scenarios.tau]]
+name = "EXPLOSION_C24_TAU"
+mode_of = "C24"
+
+[[scenarios.gain]]
+name = "EXPLOSION_LEG0_GAIN"
+node = "EXPLOSND"
+per = "explosion leg 0"
+
+[[scenarios.gain]]
+name = "EXPLOSION_LEG1_GAIN"
+node = "EXPLOSND"
+per = "explosion leg 1"
+
+[[scenarios.gain]]
+name = "EXPLOSION_LEG2_GAIN"
+node = "EXPLOSND"
+per = "explosion leg 2"
+
+[[scenarios.gain]]
+name = "EXPLOSION_LEG3_GAIN"
+node = "EXPLOSND"
+per = "explosion leg 3"
+
+# Thrust's pre-filter: R75 and C62, loaded by the band-pass input's R76 and
+# R100 to +5 V. The switched noise is the drive, which is R11 closed. P11
+# section b holds its inverting input at +5 V and its output is an AC ground
+# to a passive mode, so both are held.
+[[scenarios]]
+drives = { "thrust gated noise" = 0.25, "P11b summing node" = 5.0, "band-pass out" = 5.0 }
+
+[[scenarios.tau]]
+name = "THRUST_C62_TAU"
+mode_of = "C62"
+
+[[scenarios.gain]]
+name = "THRUST_C62_GAIN"
+node = "thrust RC node"
+per = "thrust gated noise"

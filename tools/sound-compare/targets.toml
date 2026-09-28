@@ -64,14 +64,27 @@ scenarios = [
   "asteroids/ship-fire",
 ]
 notes = """
-Rebuilt from the schematic voice by voice. Six scenarios are within tolerance
-full band and the two fires above 150 Hz, for the reason below. Thrust was the long-standing open question and is settled: its noise
-register was a 42-state tone, fixed in
-phosphor-emulator-asteroids-sound-postprocessing-hm4. The relative mix is still
-the reference's adder weights rather than the board's summing resistors, which
-phosphor-emulator-kfby.6 retires through a netlist. Its fire voices match
-above 150 Hz on every metric, with a low-frequency pedestal the board has and
-the reference does not, which is documented rather than fitted away."""
+Rebuilt from the schematic voice by voice. Thrust was the long-standing open
+question and is settled: its noise register was a 42-state tone, fixed in
+phosphor-emulator-asteroids-sound-postprocessing-hm4.
+
+THE MIX IS NOW THE BOARD'S, from a pin-level netlist
+(docs/schematics/netlists/asteroids-audio.toml) solved into
+machines/src/asteroids_sound_derived.rs under phosphor-emulator-kfby.6. Every
+voice is in volts at its own net and enters AUDIO1 at R86 over its summing
+resistor, where it used to carry the reference's adder weights. The parts also
+corrected three filters the summing resistors load, the explosion's most of all
+(C24's corner is 86 Hz, not 52). Full scale is anchored to thrust less 1.6 dB of
+headroom, the one number with no part behind it.
+
+THE LEVELS HAVE MOVED AND ARE NOT YET RE-COMPARED. Against the previous device,
+thrust is 1.6 dB down by construction and every other voice is up by its balance
+change: thump 1.3 dB, explosion 1.9, life 2.6, saucer 4.2, the fires 4.2 and
+4.8. The explosion's crest rose from 3.4 to 5.4 and its centroid by 14 Hz, most
+of it the onset step the gated legs make on the board. Before this change six
+scenarios were within tolerance full band and the two fires above 150 Hz, with a
+low-frequency pedestal on the fires that the board has and the reference does
+not; the comparison needs re-running against the references."""
 
 [[target]]
 id = "dkong-discrete"
