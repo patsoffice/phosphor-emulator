@@ -64,8 +64,12 @@ scenarios = [
   "asteroids/ship-fire",
 ]
 notes = """
-Rebuilt from the schematic voice by voice. Thrust is the open question: see
-phosphor-emulator-asteroids-sound-postprocessing-hm4t. Its fire voices match
+Rebuilt from the schematic voice by voice. Six scenarios are within tolerance
+full band and the two fires above 150 Hz, for the reason below. Thrust was the long-standing open question and is settled: its noise
+register was a 42-state tone, fixed in
+phosphor-emulator-asteroids-sound-postprocessing-hm4. The relative mix is still
+the reference's adder weights rather than the board's summing resistors, which
+phosphor-emulator-kfby.6 retires through a netlist. Its fire voices match
 above 150 Hz on every metric, with a low-frequency pedestal the board has and
 the reference does not, which is documented rather than fitted away."""
 

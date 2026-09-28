@@ -1,0 +1,436 @@
+# Asteroids' audio, DP-143-02 sheet 2 side B, at pin level.
+#
+# The fourth board in the format `docs/designs/schematic-transcription.md`
+# describes, filed as `phosphor-emulator-kfby.6`. Lunar Lander's file is the
+# template: the same Atari family, the same LM324 summing mixer into an inverter,
+# and the same grid-location designators for the ICs.
+#
+# WHY THIS BOARD. `machines/src/asteroids_sound.rs` weights its seven voices with
+# the reference netlist's adder constants (explosion 1000, thrust 600 and so on).
+# The board weights them with seven summing resistors into one 1k feedback
+# resistor, and on the board thrust and explosion are EQUAL, both 4.7k. Deriving
+# the mix from this file is what retires the last fitted constants there.
+#
+# AN EXCERPT, NOT YET THE WHOLE AUDIO. So far this holds the mixer, the AUDIO 2
+# inverter and the thrust voice complete. The other six voices arrive as ports
+# at their summing resistors and are transcribed in later passes.
+#
+# HOW TO READ THE SCAN. The PDF's page images are 5100 x 6600 at 1 bit on a
+# 17 x 22 inch sheet, a genuine 300 dpi. Earlier notes on this board, in
+# `phosphor-emulator-asteroids-sound-postprocessing-hm4`, say "400 dpi"; that
+# was a render, not what the file holds. Extract rather than render:
+#
+#   pdfimages -png -f 7 -l 8 Asteroids-sp.pdf sp
+#   magick sp-001.png -crop 1600x800+380+130 +repage mixer.png
+#
+# The sheet is split across the two pages: every voice is on page 7, and the
+# AUDIO OUTPUT block (mixer and inverter) and the Regulator/Audio PCB are on
+# page 8.
+#
+# DESIGNATORS. ICs are named by grid location, so `R11` here is a 4016B and
+# `R9` a 74LS164, not resistors. The Regulator/Audio PCB is a separate board
+# with its own numbering (its own R11 is a 10 ohm resistor), which is why it is
+# not in this file.
+
+[board]
+name = "Asteroids audio"
+assembly = "034986-XX F"
+source = "arcade-museum.com/manuals-videogames/A/Asteroids-sp.pdf, DP-143-02 3rd printing, sheet 2 side B, PDF pages 7 and 8. Each page image is 5100 x 6600 at 1 bit per pixel on a 17 x 22 inch sheet, a true 300 dpi"
+sheets = "2B"
+dpi = 300
+excerpt = "the AUDIO OUTPUT mixer and inverter, and the thrust voice from the R11 noise switch to SHPSND. The other six voices are ports at their summing resistors"
+
+# ---------------------------------------------------------------------------
+# P11. One LM324, all four sections used: two for thrust, one mixer, one
+# inverter.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "P11"
+kind = "U"
+device = "LM324"
+pins = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"]
+out = ["1", "7", "8", "14"]
+note = """
+THE PART NUMBER IS PRINTED beside every section. All four sections are drawn: \
+5/6/7 and 3/2/1 in the thrust block on page 7, 10/9/8 and 12/13/14 in the \
+AUDIO OUTPUT block on page 8.
+
+PIN 4 IS +22 V AND PIN 11 IS GROUND, drawn on the mixer section, and an LM324 \
+has one supply pair for all four, so the thrust filters run from the same \
++22 V. Every non-inverting input is tied to +5 V, which makes +5 V the signal \
+reference for the whole block."""
+
+# The op-amp roles are read off the symbols, which mark `+` and `-` at each
+# section's inputs: 5 + and 6 -, 3 + and 2 -, 10 + and 9 -, 12 + and 13 -.
+
+[[parts.sections]]
+name = "b"
+pins = ["5", "6", "7"]
+role = "thrust band-pass"
+group = "thrust"
+op_amp = { plus = "5", minus = "6", out = "7" }
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+role = "thrust output low-pass"
+group = "thrust"
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[parts.sections]]
+name = "c"
+pins = ["8", "9", "10"]
+role = "summing amplifier"
+group = "mixer"
+op_amp = { plus = "10", minus = "9", out = "8" }
+
+[[parts.sections]]
+name = "d"
+pins = ["12", "13", "14"]
+role = "unity inverter"
+group = "mixer"
+op_amp = { plus = "12", minus = "13", out = "14" }
+
+[[parts]]
+ref = "C65"
+kind = "C"
+uf = 0.1
+group = "mixer"
+note = """
+Bypasses the +22 V rail to ground at P11 pin 4. Inert for the audio, both ends \
+being held, and here so that a part nobody models is visible as one."""
+
+# ---------------------------------------------------------------------------
+# THE MIXER. Seven summing resistors into P11 section c, R86 1k feedback.
+#
+# THIS IS THE BLOCK THE FILE EXISTS FOR. Each voice's gain into AUDIO 1 is
+# R86 over its own resistor, so thrust and explosion enter at the same weight
+# and the two fires at a forty-seventh of it.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R83"
+kind = "R"
+kohms = 47
+group = "mixer"
+note = "THUMPSND's summing resistor."
+
+[[parts]]
+ref = "R77"
+kind = "R"
+kohms = 39
+group = "mixer"
+note = "SAUCRSND's summing resistor."
+
+[[parts]]
+ref = "R78"
+kind = "R"
+kohms = 47
+group = "mixer"
+note = "LIFESND's summing resistor."
+
+[[parts]]
+ref = "R81"
+kind = "R"
+kohms = 100
+group = "mixer"
+note = "SAUCRFIRESND's summing resistor."
+
+[[parts]]
+ref = "R84"
+kind = "R"
+kohms = 100
+group = "mixer"
+note = "SHPFIRESND's summing resistor."
+
+[[parts]]
+ref = "R82"
+kind = "R"
+kohms = 4.7
+group = "mixer"
+note = "EXPLOSND's summing resistor, the same value as thrust's R102."
+
+[[parts]]
+ref = "R102"
+kind = "R"
+kohms = 4.7
+group = "mixer"
+note = """
+SHPSND's summing resistor. SHPSND is the thrust voice, P11 pin 1; the name is \
+the drawing's."""
+
+[[parts]]
+ref = "R86"
+kind = "R"
+kohms = 1
+group = "mixer"
+note = "the summing amplifier's feedback, from P11 pin 8 to pin 9. There is no capacitor across it."
+
+# ---------------------------------------------------------------------------
+# THE INVERTER. AUDIO 1 through C113 and R111 into P11 section d, R110 feedback.
+#
+# THE TWO OUTPUTS ARE NOT SYMMETRIC. AUDIO 1 leaves pin 8 DC coupled; AUDIO 2
+# is built from AUDIO 1 through C113, a 15.9 Hz high-pass with R111. The
+# Regulator/Audio PCB drives the speaker from their difference.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "C113"
+kind = "C"
+uf = 1.0
+group = "mixer"
+note = """
+Drawn `1, TANT` with the positive plate toward P11 pin 8, so `a` is the \
+positive plate. With R111 into the inverter's virtual ground it is a 15.9 Hz \
+high-pass on AUDIO 2 only."""
+
+[[parts]]
+ref = "R111"
+kind = "R"
+kohms = 10
+group = "mixer"
+note = "the inverter's input resistor, from C113 to P11 pin 13."
+
+[[parts]]
+ref = "R110"
+kind = "R"
+kohms = 10
+group = "mixer"
+note = "the inverter's feedback. Equal to R111, so the stage is unity and AUDIO 2 is AUDIO 1 inverted above 15.9 Hz."
+
+# ---------------------------------------------------------------------------
+# THRUST. The shared noise, switched by R11, an RC low-pass, a multiple
+# feedback band-pass on P11 section b, and an inverting low-pass on section a.
+#
+# THE SWITCH IS BEFORE THE RC. The device and the reference both gate after
+# it, which changes attack and release shape and no steady-state figure.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "R11"
+kind = "U"
+device = "4016B"
+pins = ["6", "8", "9"]
+group = "thrust"
+note = """
+One section of a quad analog switch, labeled `4016B` with `(+5V)` inside the \
+symbol, which is the switch's supply. The other three sections and the supply \
+pins are not drawn in this block.
+
+THE ON-RESISTANCE IS NOT ON THE DRAWING and is left off rather than guessed. \
+For a 4016B at a 5 V supply it is a few hundred ohms, which is a noticeable \
+fraction of R75's 2.2k, so it matters to the RC corner and belongs in a \
+derivation as a stated assumption rather than here as a reading."""
+
+[[parts.switches]]
+name = "a"
+pins = ["9", "8"]
+control = "6"
+
+[[parts]]
+ref = "R80"
+kind = "R"
+kohms = 10
+group = "thrust"
+note = "pulls R11's control pin up to +5 V, on the SHPTHRUSTEN line from the M10 latch."
+
+[[parts]]
+ref = "R75"
+kind = "R"
+kohms = 2.2
+group = "thrust"
+
+[[parts]]
+ref = "C62"
+kind = "C"
+uf = 1.0
+group = "thrust"
+note = """
+Drawn `1, TANT` with the positive plate on +5 V, so `a` is on +5 V. IT GOES TO \
++5 V, NOT TO GROUND. The corner with R75 is the same 72.3 Hz either way, since \
+both rails are AC ground; the DC level at the node is set by the resistive \
+paths, not by this part."""
+
+[[parts]]
+ref = "C54"
+kind = "C"
+uf = 0.1
+group = "thrust"
+note = "bypasses +5 V to ground beside C62 and R100. Inert for the audio."
+
+[[parts]]
+ref = "R76"
+kind = "R"
+kohms = 47
+group = "thrust"
+note = "the band-pass input leg."
+
+[[parts]]
+ref = "R100"
+kind = "R"
+kohms = 1.2
+group = "thrust"
+note = """
+Ties the band-pass input node to +5 V. The device once passed R76 and R100 as \
+one parallel 1170 ohm argument, which gave the right corner and Q and a gain \
+at resonance 40 times too high; see the 2026-08-22 comments on hm4."""
+
+[[parts]]
+ref = "C68"
+kind = "C"
+uf = 0.1
+group = "thrust"
+note = "drawn `.1, MYL`, from the band-pass input node to P11 pin 6."
+
+[[parts]]
+ref = "C67"
+kind = "C"
+uf = 0.1
+group = "thrust"
+note = "drawn `.1, MYL`, from the band-pass input node to P11 pin 7, the other capacitor of the multiple-feedback pair."
+
+[[parts]]
+ref = "R101"
+kind = "R"
+kohms = 270
+group = "thrust"
+note = "the band-pass feedback, P11 pin 6 to pin 7."
+
+[[parts]]
+ref = "R104"
+kind = "R"
+kohms = 6.8
+group = "thrust"
+note = "the output low-pass's input, P11 pin 7 to pin 2."
+
+[[parts]]
+ref = "R103"
+kind = "R"
+kohms = 10
+group = "thrust"
+note = "the output low-pass's feedback, P11 pin 2 to pin 1. With R104, a DC gain of 1.47."
+
+[[parts]]
+ref = "C69"
+kind = "C"
+uf = 0.1
+group = "thrust"
+note = "drawn `.1, MYL`, across R103. The one pole, 159.2 Hz."
+
+# ---------------------------------------------------------------------------
+# NETS
+# ---------------------------------------------------------------------------
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["P11.3", "P11.5", "P11.10", "P11.12", "C62.a", "C54.a", "R100.a", "R80.a"]
+note = "every LM324 section's non-inverting input sits here."
+
+[[nets]]
+name = "+22V"
+rail = true
+on = ["P11.4", "C65.a"]
+note = "the LM324's positive supply."
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["P11.11", "C65.b", "C54.b"]
+
+[[nets]]
+name = "NOISE"
+port = "input"
+on = ["R11.9"]
+note = "the shared noise register's output. The register and its feedback are on this sheet and are transcribed in a later pass."
+
+[[nets]]
+name = "SHPTHRUSTEN"
+port = "input"
+on = ["R11.6", "R80.b"]
+note = "from the M10 74LS259 latch, which is on this sheet and is transcribed in a later pass."
+
+[[nets]]
+name = "thrust gated noise"
+on = ["R11.8", "R75.a"]
+
+[[nets]]
+name = "thrust RC node"
+on = ["R75.b", "C62.b", "R76.a"]
+
+[[nets]]
+name = "band-pass in"
+on = ["R76.b", "R100.b", "C67.a", "C68.a"]
+
+[[nets]]
+name = "P11b summing node"
+on = ["C68.b", "R101.a", "P11.6"]
+
+[[nets]]
+name = "band-pass out"
+on = ["P11.7", "C67.b", "R101.b", "R104.a"]
+
+[[nets]]
+name = "P11a summing node"
+on = ["R104.b", "R103.a", "C69.a", "P11.2"]
+
+[[nets]]
+name = "SHPSND"
+on = ["P11.1", "R103.b", "C69.b", "R102.a"]
+note = "the thrust voice's output, named on the drawing."
+
+[[nets]]
+name = "THUMPSND"
+port = "input"
+on = ["R83.a"]
+
+[[nets]]
+name = "SAUCRSND"
+port = "input"
+on = ["R77.a"]
+
+[[nets]]
+name = "LIFESND"
+port = "input"
+on = ["R78.a"]
+
+[[nets]]
+name = "SAUCRFIRESND"
+port = "input"
+on = ["R81.a"]
+
+[[nets]]
+name = "SHPFIRESND"
+port = "input"
+on = ["R84.a"]
+
+[[nets]]
+name = "EXPLOSND"
+port = "input"
+on = ["R82.a"]
+
+[[nets]]
+name = "P11c summing node"
+on = ["R83.b", "R77.b", "R78.b", "R81.b", "R84.b", "R82.b", "R102.b", "R86.a", "P11.9"]
+note = "the seven voices and the feedback resistor. Nothing else lands here."
+
+[[nets]]
+name = "AUDIO1"
+port = "output"
+on = ["P11.8", "R86.b", "C113.a"]
+note = "the summing amplifier's output, test point AUD 1, leaving on connector J20 pin 5."
+
+[[nets]]
+name = "C113/R111 junction"
+on = ["C113.b", "R111.a"]
+
+[[nets]]
+name = "P11d summing node"
+on = ["R111.b", "R110.a", "P11.13"]
+
+[[nets]]
+name = "AUDIO2"
+port = "output"
+on = ["P11.14", "R110.b"]
+note = "AUDIO 1 inverted above 15.9 Hz, leaving on connector J20 pin E."
