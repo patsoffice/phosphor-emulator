@@ -11,10 +11,10 @@
 # resistor, and on the board thrust and explosion are EQUAL, both 4.7k. Deriving
 # the mix from this file is what retires the last fitted constants there.
 #
-# AN EXCERPT, NOT YET THE WHOLE AUDIO. This holds the mixer, the AUDIO 2
-# inverter, and every voice drawn on the sheet. What drives them, the M10
-# latch, the noise register and the address decode, arrives as ports and is
-# transcribed in a later pass.
+# AN EXCERPT, BUT THE WHOLE AUDIO ON THE SHEET. This holds the enable latch,
+# the noise register, every voice drawn on the sheet, and the mixer and AUDIO 2
+# inverter. What drives them from elsewhere, the address decode, the data bus
+# and the 12 kHz clock, arrives as ports.
 #
 # LIFE IS NOT ON THIS SHEET. LIFEEN leaves the M10 latch here and LIFESND
 # arrives at R78 here, and nothing between them is drawn. The caption calls it
@@ -45,7 +45,7 @@ assembly = "034986-XX F"
 source = "arcade-museum.com/manuals-videogames/A/Asteroids-sp.pdf, DP-143-02 3rd printing, sheet 2 side B, PDF pages 7 and 8. Each page image is 5100 x 6600 at 1 bit per pixel on a 17 x 22 inch sheet, a true 300 dpi"
 sheets = "2B"
 dpi = 300
-excerpt = "the AUDIO OUTPUT mixer and inverter, and six of the seven voices: thrust, thump, explosion, saucer, saucer fire and ship fire. Life is not drawn on this sheet and is a port at its summing resistor. The M10 latch, the noise register and the decode that drive the voices are ports too"
+excerpt = "the whole audio on the sheet: the enable latch, the noise register, six of the seven voices and the AUDIO OUTPUT mixer and inverter. Life is not drawn on this sheet and is a port at its summing resistor. The address decode and the clock circuitry are on other sheets and arrive as ports"
 
 # ---------------------------------------------------------------------------
 # P11. One LM324, all four sections used: two for thrust, one mixer, one
@@ -1160,6 +1160,90 @@ group = "saucer"
 note = "drawn `.047, MYL`. The 566's timing capacitor on pin 7."
 
 # ---------------------------------------------------------------------------
+# THE ENABLE LATCH AND THE NOISE REGISTER. Logic, transcribed so that every
+# voice's enable and the shared noise have a source in this file rather than
+# a port.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "M10"
+kind = "U"
+device = "74LS259"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["4", "5", "6", "7", "9", "10", "11", "12"]
+group = "latch"
+nc = [
+  { pin = "11", why = "Q6 is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "12", why = "Q7 is drawn with its pin number and a stub and reaches nothing" },
+]
+note = """
+Addressable latch: AB0 to AB2 pick the output, DB7 is the bit, AUDIO (active \
+low) is the enable, RESET (active low) the clear. Q0 to Q5 are SAUCRSNDEN, \
+SAUCRFIREEN, SAUCRSEL, SHPTHRUSTEN, SHPFIREEN and LIFEEN, the order of the \
+memory map on the manual's page 4 and of the device's \
+`write_audio_latch_bit`. Supply pins 8 and 16 are not drawn."""
+
+[[parts]]
+ref = "R9"
+kind = "U"
+device = "74LS164"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "4", "5", "6", "10", "11", "12", "13"]
+group = "noise"
+nc = [
+  { pin = "3", why = "QA is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "4", why = "QB is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "5", why = "QC is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "6", why = "QD is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "10", why = "QE is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "11", why = "QF is drawn with its pin number and a stub and reaches nothing" },
+]
+note = """
+The first eight bits, both serial inputs tied to the feedback. QG on pin 12 is \
+bit 6 counting from zero, the low tap, and QH on pin 13 carries on to P9. \
+Designated by grid location: this R9 is a shift register."""
+
+[[parts]]
+ref = "P9"
+kind = "U"
+device = "74LS164"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "4", "5", "6", "10", "11", "12", "13"]
+group = "noise"
+nc = [
+  { pin = "3", why = "QA is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "4", why = "QB is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "5", why = "QC is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "6", why = "QD is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "10", why = "QE is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "11", why = "QF is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "13", why = "QH is drawn with its pin number and a stub and reaches nothing: bit 15 exists and nothing reads it" },
+]
+note = "the second eight bits. QG on pin 12 is bit 14, the high tap."
+
+[[parts]]
+ref = "P5"
+kind = "U"
+device = "74LS86"
+pins = ["1", "2", "3"]
+out = ["3"]
+group = "noise"
+note = "one XOR section, bit 14 against bit 6."
+
+[[parts]]
+ref = "N5"
+kind = "U"
+device = "74LS00"
+pins = ["1", "2", "3"]
+out = ["3"]
+group = "noise"
+note = """
+One NAND section with both inputs on the XOR, so an inverter: the feedback is \
+XNOR, which makes all zeros an ordinary state and all ones the lock. Its \
+output is both the feedback and NOISE, so the noise is taken from the gate \
+rather than from a register bit, as the device does."""
+
+# ---------------------------------------------------------------------------
 # NETS
 # ---------------------------------------------------------------------------
 
@@ -1188,18 +1272,64 @@ on = ["P11.11", "C65.b", "C54.b", "C27.b", "R44.b", "C33.b", "C32.b", "C34.b", "
 
 [[nets]]
 name = "NOISE"
-port = "input"
-on = ["R11.9", "R8.12"]
+on = ["N5.3", "R9.1", "R9.2", "R11.9", "R8.12"]
 note = """
-The shared noise register's output, into both the thrust switch and the \
-explosion's sampling flip-flop. The register and its feedback are on this \
-sheet and are transcribed in a later pass."""
+The noise register's feedback and its output at once, into the thrust switch \
+and the explosion's sampling flip-flop."""
+
+[[nets]]
+name = "noise bit 6"
+on = ["R9.12", "P5.2"]
+
+[[nets]]
+name = "noise bit 7 carry"
+on = ["R9.13", "P9.1", "P9.2"]
+
+[[nets]]
+name = "noise bit 14"
+on = ["P9.12", "P5.1"]
+
+[[nets]]
+name = "noise XOR"
+on = ["P5.3", "N5.1", "N5.2"]
+
+[[nets]]
+name = "NOISERESET"
+port = "input"
+on = ["R9.9", "P9.9"]
+note = "active low, clearing both registers, from the address decoder."
+
+[[nets]]
+name = "AUDIO strobe"
+port = "input"
+on = ["M10.14"]
+note = "the drawing's AUDIO, active low: M10's enable, from the address decoder."
+
+[[nets]]
+name = "AB0"
+port = "input"
+on = ["M10.1"]
+
+[[nets]]
+name = "AB1"
+port = "input"
+on = ["M10.2"]
+
+[[nets]]
+name = "AB2"
+port = "input"
+on = ["M10.3"]
+
+[[nets]]
+name = "LIFEEN"
+port = "output"
+on = ["M10.10"]
+note = "M10 Q5. Leaves the sheet: the gate that turns it and 3 kHz into LIFESND is not drawn in this manual."
 
 [[nets]]
 name = "SHPTHRUSTEN"
-port = "input"
-on = ["R11.6", "R80.b"]
-note = "from the M10 74LS259 latch, which is on this sheet and is transcribed in a later pass."
+on = ["M10.7", "R11.6", "R80.b"]
+note = "M10 Q3, with R80 pulling it up to R11's control level."
 
 [[nets]]
 name = "thrust gated noise"
@@ -1239,8 +1369,8 @@ note = "the drawing's THUMP, active low: N7's clock, from the address decoder."
 [[nets]]
 name = "RESET"
 port = "input"
-on = ["N7.1", "P7.1"]
-note = "active low, clearing N7 and P7 and with them the thump enable and the explosion's volume."
+on = ["N7.1", "P7.1", "M10.15"]
+note = "active low, clearing N7, P7 and M10: every voice's enable and the explosion's volume."
 
 [[nets]]
 name = "DB0"
@@ -1280,7 +1410,7 @@ on = ["P7.3"]
 [[nets]]
 name = "DB7"
 port = "input"
-on = ["P7.14"]
+on = ["P7.14", "M10.13"]
 
 [[nets]]
 name = "EXPLODE strobe"
@@ -1291,7 +1421,7 @@ note = "the drawing's EXPLODE, P7's clock, from the address decoder."
 [[nets]]
 name = "12KHZ"
 port = "input"
-on = ["P8.2", "D6.2"]
+on = ["P8.2", "D6.2", "R9.8", "P9.8"]
 note = "from the clock circuitry on another sheet."
 
 [[nets]]
@@ -1429,15 +1559,13 @@ on = ["R74.b", "C64.a", "R83.a"]
 
 [[nets]]
 name = "SAUCRSNDEN"
-port = "input"
-on = ["N9.13"]
-note = "from the M10 latch, transcribed in a later pass."
+on = ["M10.4", "N9.13"]
+note = "M10 Q0."
 
 [[nets]]
 name = "SAUCRSEL"
-port = "input"
-on = ["N9.1"]
-note = "from the M10 latch, transcribed in a later pass."
+on = ["M10.6", "N9.1"]
+note = "M10 Q2."
 
 [[nets]]
 name = "SAUCRSEL-bar"
@@ -1513,9 +1641,8 @@ on = ["L8.9", "L8.8"]
 
 [[nets]]
 name = "SAUCRFIREEN"
-port = "input"
-on = ["M8.4", "N9.11"]
-note = "from the M10 latch, transcribed in a later pass."
+on = ["M10.5", "M8.4", "N9.11"]
+note = "M10 Q1."
 
 [[nets]]
 name = "saucer fire hold control"
@@ -1563,9 +1690,8 @@ on = ["R58.b", "C39.a", "M9.8"]
 
 [[nets]]
 name = "SHPFIREEN"
-port = "input"
-on = ["L9.4", "N9.3"]
-note = "from the M10 latch, transcribed in a later pass."
+on = ["M10.9", "L9.4", "N9.3"]
+note = "M10 Q4."
 
 [[nets]]
 name = "ship fire hold control"
