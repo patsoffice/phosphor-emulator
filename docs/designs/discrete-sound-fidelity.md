@@ -942,6 +942,26 @@ moved nothing because 768000/176400 is 4.354: it was still incommensurate and wa
 measuring the same artifact at a finer step. An upper bound is only an upper
 bound on the mechanism you had in mind.
 
+The valid version of that bound compares two commensurate rates, so the only
+thing that differs between its arms is resolution. Raising both boards' floor
+from the shipped 352800 to 705600, on the tree as it stood after the output
+stages were read off the drawings:
+
+| voice | 352800 | 705600 | change | reference |
+|---|---|---|---|---|
+| Mario walk 1 | 37.6 Hz | 36.9 Hz | -1.9 % | 26.6 Hz |
+| Mario walk 2 | 49.3 Hz | 48.1 Hz | -2.4 % | 31.6 Hz |
+| Mario skid | 209.8 Hz | 212.8 Hz | +1.4 % | 156.6 Hz |
+| DK Jr. fall | 927.6 Hz | 922.3 Hz | -0.6 % | 941.8 Hz |
+| DK Jr. walk-hi | 148.6 Hz | 148.9 Hz | +0.2 % | 209.0 Hz |
+
+Level and crest factor held to within 0.05 dB and 0.15 on every voice but the
+skid's crest. The largest move is 7 % of the remaining gap on walk 2, and the
+skid and the fall move away from their references. So edge placement is
+eliminated on measurement rather than on a confounded run, and the sub-step
+model's revert stands on correct grounds. What Mario's remainder is instead is
+tracked in `phosphor-emulator-qf2x`.
+
 The cleanest control changes nothing about the simulation at all. Leaving
 `SIM_RATE` at 192000 and setting the host rate to 48000, which makes that same
 constant exactly four times the intermediate rate, moves Mario walk 1 from 113.1
