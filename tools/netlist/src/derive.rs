@@ -86,6 +86,13 @@ pub struct Scenario {
     /// A diode not named is open.
     #[serde(default)]
     pub diodes: BTreeMap<String, DiodeSetting>,
+    /// Solve each op-amp section with marked pins as ideal, as `netlist solve
+    /// --ideal-op-amps`. That is what a gain through a stage with feedback
+    /// needs: a summing amplifier's weights are its feedback resistor over each
+    /// input's, which no passive solve can see. Modes belong to the passive
+    /// network, so a scenario that sets this may ask only for gains.
+    #[serde(default)]
+    pub ideal_op_amps: bool,
 }
 
 /// A stated diode.
@@ -109,6 +116,7 @@ impl Scenario {
                 .iter()
                 .map(|(part, s)| (part.clone(), *s == DiodeSetting::On))
                 .collect(),
+            ideal_op_amps: self.ideal_op_amps,
             ..Setup::default()
         }
     }
@@ -291,6 +299,18 @@ pub fn render(spec: &Spec, spec_path: &Path, netlist: &Netlist) -> Result<String
         spec.device, spec.netlist
     )
     .unwrap();
+    // Said only where it applies, so a spec that never sets it generates the
+    // same bytes it always did.
+    if spec.scenarios.iter().any(|s| s.ideal_op_amps) {
+        writeln!(
+            out,
+            "//!
+//! A scenario whose constants say \"op-amps ideal\" is the exception: it
+//! solves its op-amps as ideal, so a gain through a stage with feedback is the
+//! feedback network's. Such a scenario gives gains only, never modes."
+        )
+        .unwrap();
+    }
 
     for scenario in &spec.scenarios {
         let excerpt;
@@ -313,17 +333,35 @@ pub fn render(spec: &Spec, spec_path: &Path, netlist: &Netlist) -> Result<String
                 continue;
             }
         };
-        let modes = match network.modes() {
-            Ok(modes) => modes,
-            Err(problem) => {
-                errors.push(problem);
+        let modes = if scenario.ideal_op_amps {
+            if !scenario.tau.is_empty() || !scenario.share.is_empty() {
+                errors.push(
+                    "a scenario with ideal op-amps may ask only for gains: modes belong to \
+                     the passive network, so take them from a scenario without"
+                        .to_string(),
+                );
                 continue;
             }
+            Vec::new()
+        } else {
+            match network.modes() {
+                Ok(modes) => modes,
+                Err(problem) => {
+                    errors.push(problem);
+                    continue;
+                }
+            }
         };
-        let context = match &scenario.group {
-            Some(group) => format!("group `{group}`, {}", held(scenario)),
-            None => format!("the whole board, {}", held(scenario)),
+        let board = match &scenario.group {
+            Some(group) => format!("group `{group}`"),
+            None => "the whole board".to_string(),
         };
+        let amps = if scenario.ideal_op_amps {
+            ", op-amps ideal"
+        } else {
+            ""
+        };
+        let context = format!("{board}{amps}, {}", held(scenario));
 
         for tau in &scenario.tau {
             match mode_of(&modes, &tau.mode_of) {
@@ -516,6 +554,7 @@ on = ["C1.b", "C2.b"]
                     .collect(),
                 gain: Vec::new(),
                 diodes: BTreeMap::new(),
+                ideal_op_amps: false,
             }],
         }
     }
@@ -578,8 +617,145 @@ on = ["C1.b", "R2.b"]
                     per: per.into(),
                 }],
                 diodes: BTreeMap::new(),
+                ideal_op_amps: false,
             }],
         }
+    }
+
+    /// An inverting summing amplifier on a single supply: two inputs into one
+    /// summing node, a feedback resistor to the output, the `+` input on a
+    /// 5 V reference. Each input's gain is minus the feedback over its own
+    /// resistor, which only an ideal op-amp solve can give.
+    const SUMMER: &str = r#"
+[board]
+name = "t"
+
+[[parts]]
+ref = "R1"
+kind = "R"
+kohms = 4.7
+
+[[parts]]
+ref = "R2"
+kind = "R"
+kohms = 47
+
+[[parts]]
+ref = "RF"
+kind = "R"
+kohms = 1
+
+[[parts]]
+ref = "C1"
+kind = "C"
+uf = 1.0
+
+[[parts]]
+ref = "U1"
+kind = "U"
+device = "LM324"
+pins = ["1", "2", "3"]
+out = ["1"]
+
+[[parts.sections]]
+name = "a"
+pins = ["1", "2", "3"]
+op_amp = { plus = "3", minus = "2", out = "1" }
+
+[[nets]]
+name = "a in"
+on = ["R1.a"]
+
+[[nets]]
+name = "b in"
+on = ["R2.a"]
+
+[[nets]]
+name = "sum"
+on = ["R1.b", "R2.b", "RF.a", "U1.2"]
+
+[[nets]]
+name = "out"
+on = ["RF.b", "U1.1", "C1.a"]
+
+[[nets]]
+name = "+5V"
+rail = true
+on = ["U1.3"]
+
+[[nets]]
+name = "GND"
+rail = true
+on = ["C1.b"]
+"#;
+
+    fn summer_spec(ideal: bool, tau: bool) -> Spec {
+        Spec {
+            netlist: "t.toml".into(),
+            out: "t.rs".into(),
+            device: "t.rs".into(),
+            scenarios: vec![Scenario {
+                group: None,
+                drives: BTreeMap::from([("a in".to_string(), 5.0), ("b in".to_string(), 5.0)]),
+                tau: if tau {
+                    vec![Tau {
+                        name: "TAU".into(),
+                        mode_of: "C1".into(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                share: Vec::new(),
+                gain: vec![
+                    Gain {
+                        name: "A".into(),
+                        node: "out".into(),
+                        per: "a in".into(),
+                    },
+                    Gain {
+                        name: "B".into(),
+                        node: "out".into(),
+                        per: "b in".into(),
+                    },
+                ],
+                diodes: BTreeMap::new(),
+                ideal_op_amps: ideal,
+            }],
+        }
+    }
+
+    /// With ideal op-amps each input's gain is minus RF over its resistor, and
+    /// the context says the op-amps were ideal.
+    #[test]
+    fn an_ideal_op_amp_scenario_gives_a_summing_amplifiers_weights() {
+        let netlist = Netlist::parse(SUMMER).unwrap();
+        let text = render(
+            &summer_spec(true, false),
+            Path::new("t.derive.toml"),
+            &netlist,
+        )
+        .unwrap();
+        assert!((constant(&text, "A") + 1.0 / 4.7).abs() < 1e-5, "{text}");
+        assert!((constant(&text, "B") + 1.0 / 47.0).abs() < 1e-5, "{text}");
+        assert!(
+            text.replace("\n/// ", " ").contains("op-amps ideal"),
+            "{text}"
+        );
+        assert!(text.contains("solves its op-amps as ideal"), "{text}");
+    }
+
+    /// Modes are a property of the passive network, so a scenario that solves
+    /// its op-amps as ideal and asks for one is refused.
+    #[test]
+    fn an_ideal_op_amp_scenario_refuses_a_mode() {
+        let netlist = Netlist::parse(SUMMER).unwrap();
+        let errors = render(
+            &summer_spec(true, true),
+            Path::new("t.derive.toml"),
+            &netlist,
+        )
+        .unwrap_err();
+        assert!(errors[0].contains("may ask only for gains"), "{errors:?}");
     }
 
     fn constant(text: &str, name: &str) -> f64 {
