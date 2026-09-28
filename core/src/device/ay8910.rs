@@ -52,8 +52,20 @@ const VOLUME_TABLE: [i32; 16] = [
 /// and drains each channel with [`Self::fill_channel_audio`] instead. The two
 /// modes are exclusive, so a chip only ever resamples what its board reads: a
 /// buffer nobody drains would fill and count overruns.
+///
+/// # Resampled a group at a time
+///
+/// The generators update every eighth chip clock, so the output holds for
+/// eight clocks at a stretch and changes between updates only when a register
+/// or a channel gain is written. [`Self::tick`] records those stretches as
+/// segments rather than feeding the resampler every clock, and flushes them
+/// through [`AudioResampler::tick_repeat`] when the next group starts. That is
+/// exactly the samples feeding every clock produced, and it only ever emits at
+/// a group boundary, so two chips ticked together still emit on the same tick:
+/// boards that pair their chips' samples tick by tick (SSIO, Konami) rely on
+/// that. The cost is up to eight clocks of latency, about 5 us.
 #[derive(Saveable)]
-#[save_version(2)]
+#[save_version(3)]
 pub struct Ay8910 {
     registers: [u8; 16],
     address_latch: u8,
@@ -91,6 +103,13 @@ pub struct Ay8910 {
     /// One resampler per channel, run instead of `resampler` once
     /// [`Self::enable_channel_outputs`] is called.
     channel_resamplers: [AudioResampler<i16>; 3],
+
+    /// The current group's output so far, as segments of constant levels:
+    /// `seg_levels[i]` held for `seg_lens[i]` clocks, the last one still
+    /// open. A group is eight clocks, so eight segments always suffice.
+    seg_levels: [[i32; 3]; 8],
+    seg_lens: [u8; 8],
+    seg_count: u8,
 
     /// Which of the two outputs this chip feeds. Configuration fixed by the
     /// board at construction, not state, so it is not saved.
@@ -135,6 +154,10 @@ impl Ay8910 {
             channel_resamplers: std::array::from_fn(|_| {
                 AudioResampler::new(chip_clock_hz, host_sample_rate() as u64)
             }),
+            // One open, empty segment at silence: every volume is zero.
+            seg_levels: [[0; 3]; 8],
+            seg_lens: [0; 8],
+            seg_count: 1,
             channel_outputs: false,
         }
     }
@@ -170,6 +193,8 @@ impl Ay8910 {
         if r == 13 {
             self.set_envelope_shape(masked);
         }
+        // The output can change from the next clock on.
+        self.open_segment();
     }
 
     /// Read from the currently latched register.
@@ -203,17 +228,45 @@ impl Ay8910 {
         self.prescaler_count += 1;
         if self.prescaler_count >= 8 {
             self.prescaler_count = 0;
+            // The last group is complete: resample it, then start this one,
+            // whose first clock already sees the generators' new state.
+            self.flush_group();
             self.clock_generators();
+            self.open_segment();
         }
+        self.seg_lens[self.seg_count as usize - 1] += 1;
+    }
 
+    /// Start a segment at the levels the chip outputs now, or re-level the
+    /// open one if it has not held for a clock yet.
+    fn open_segment(&mut self) {
         let levels = self.channel_levels();
-        if self.channel_outputs {
-            for (r, &level) in self.channel_resamplers.iter_mut().zip(&levels) {
-                r.tick(level as i16);
-            }
-        } else {
-            self.resampler.tick(levels.iter().sum::<i32>() as i16);
+        let open = self.seg_count as usize - 1;
+        if self.seg_lens[open] == 0 {
+            self.seg_levels[open] = levels;
+        } else if self.seg_levels[open] != levels {
+            debug_assert!(open + 1 < self.seg_levels.len(), "a group is eight clocks");
+            self.seg_levels[open + 1] = levels;
+            self.seg_lens[open + 1] = 0;
+            self.seg_count += 1;
         }
+    }
+
+    /// Resample the group's segments and leave one empty segment open.
+    fn flush_group(&mut self) {
+        for i in 0..self.seg_count as usize {
+            let (levels, n) = (self.seg_levels[i], self.seg_lens[i] as u64);
+            if self.channel_outputs {
+                for (r, &level) in self.channel_resamplers.iter_mut().zip(&levels) {
+                    r.tick_repeat(level as i16, n);
+                }
+            } else {
+                self.resampler
+                    .tick_repeat(levels.iter().sum::<i32>() as i16, n);
+            }
+        }
+        self.seg_count = 1;
+        self.seg_lens[0] = 0;
     }
 
     /// Set the external input value for I/O Port A.
@@ -247,8 +300,9 @@ impl Ay8910 {
     ///
     /// Used by the SSIO sound board for duty-cycle volume modulation.
     pub fn set_channel_gain(&mut self, ch: usize, gain: u8) {
-        if ch < 3 {
+        if ch < 3 && self.channel_gain[ch] != gain {
             self.channel_gain[ch] = gain;
+            self.open_segment();
         }
     }
 
@@ -291,6 +345,10 @@ impl Ay8910 {
         self.channel_resamplers
             .iter_mut()
             .for_each(AudioResampler::reset);
+        // The pending group goes with the resamplers' state; the chip is silent.
+        self.seg_levels = [[0; 3]; 8];
+        self.seg_lens = [0; 8];
+        self.seg_count = 1;
     }
 
     // -- Private methods -------------------------------------------------------
@@ -731,6 +789,71 @@ mod tests {
             );
         }
         assert!(m[..n].iter().any(|&s| s != 0));
+    }
+
+    /// Resampling a group at a time is exactly what feeding the resampler every
+    /// clock produced, with register writes and channel gains changing between
+    /// any two clocks, in both output modes. The reference is a resampler fed
+    /// the chip's own levels on every clock, which is what `tick` used to do.
+    #[test]
+    fn a_group_at_a_time_is_exactly_every_clock() {
+        for channel_outputs in [false, true] {
+            let mut ay = Ay8910::new(2_000_000);
+            if channel_outputs {
+                ay.enable_channel_outputs();
+            }
+            let rate = host_sample_rate() as u64;
+            let mut reference: [AudioResampler<i16>; 4] =
+                std::array::from_fn(|_| AudioResampler::new(2_000_000, rate));
+            let mut x: u32 = 0x9E37_79B9;
+            let mut next = || {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                x >> 8
+            };
+            for _ in 0..200_000 {
+                // Now and then, between clocks, write a register or a gain.
+                match next() % 64 {
+                    0 => {
+                        ay.address_write((next() % 14) as u8);
+                        ay.data_write(next() as u8);
+                    }
+                    1 => ay.set_channel_gain((next() % 3) as usize, next() as u8),
+                    _ => {}
+                }
+                ay.tick();
+                let levels = ay.channel_levels();
+                reference[3].tick(levels.iter().sum::<i32>() as i16);
+                for (r, &l) in reference.iter_mut().zip(&levels) {
+                    r.tick(l as i16);
+                }
+            }
+            let outputs: Vec<(Vec<i16>, Vec<i16>)> = if channel_outputs {
+                (0..3)
+                    .map(|ch| {
+                        let mut buf = vec![0i16; 20_000];
+                        let n = ay.fill_channel_audio(ch, &mut buf);
+                        buf.truncate(n);
+                        (buf, reference[ch].drain_audio())
+                    })
+                    .collect()
+            } else {
+                let mut buf = vec![0i16; 20_000];
+                let n = ay.fill_audio(&mut buf);
+                buf.truncate(n);
+                vec![(buf, reference[3].drain_audio())]
+            };
+            for (got, want) in outputs {
+                // The chip may still hold its last group: at most one sample.
+                assert!(
+                    want.len() - got.len() <= 1,
+                    "{} of {}",
+                    got.len(),
+                    want.len()
+                );
+                assert!(got.iter().any(|&s| s != 0), "the walk made some sound");
+                assert_eq!(got, want[..got.len()], "channel outputs {channel_outputs}");
+            }
+        }
     }
 
     #[test]

@@ -79,6 +79,16 @@ pub trait Sample: Copy + Default {
     /// Add a sample value to the accumulator.
     fn accum_add(accum: &mut Self::Accum, sample: Self);
 
+    /// Add the same sample `n` times. Must equal `n` calls to
+    /// [`Self::accum_add`] exactly, since [`AudioResampler::tick_repeat`]
+    /// promises the output of `n` ticks; the default is those calls.
+    #[inline]
+    fn accum_add_n(accum: &mut Self::Accum, sample: Self, n: u64) {
+        for _ in 0..n {
+            Self::accum_add(accum, sample);
+        }
+    }
+
     /// Compute the average from the accumulator and sample count.
     fn accum_avg(accum: Self::Accum, count: u32) -> Self;
 
@@ -102,6 +112,12 @@ impl Sample for i16 {
     #[inline]
     fn accum_add(accum: &mut i64, sample: i16) {
         *accum += sample as i64;
+    }
+
+    /// Integer addition, so one multiply is exactly `n` adds.
+    #[inline]
+    fn accum_add_n(accum: &mut i64, sample: i16, n: u64) {
+        *accum += sample as i64 * n as i64;
     }
 
     #[inline]
@@ -245,6 +261,39 @@ impl<T: Sample> AudioResampler<T> {
         if self.sample_phase < self.input_rate {
             return;
         }
+        self.close_window();
+    }
+
+    /// Accumulate `n` input samples that all have the value `sample`.
+    ///
+    /// Exactly what `n` calls to [`Self::tick`] with `sample` produce, output
+    /// for output, including the state left behind. It jumps to each point
+    /// where a stage-one window closes rather than stepping one input at a
+    /// time, which is what makes a source that holds its output for several
+    /// clocks (the AY-3-8910's generators update every eighth) cheaper to
+    /// resample without changing a single sample.
+    pub fn tick_repeat(&mut self, sample: T, mut n: u64) {
+        while n > 0 {
+            // The inputs this window still needs: the first `k` with
+            // `phase + k * intermediate >= input`. At least one, which also
+            // covers a phase left at or past a lowered input rate, where the
+            // single-step path closes on its very next input.
+            let short = self.input_rate.saturating_sub(self.sample_phase);
+            let k = short.div_ceil(self.intermediate_rate).clamp(1, n);
+            T::accum_add_n(&mut self.sample_accum, sample, k);
+            self.sample_count += k as u32;
+            self.sample_phase += k * self.intermediate_rate;
+            n -= k;
+            if self.sample_phase >= self.input_rate {
+                self.close_window();
+            }
+        }
+    }
+
+    /// Close the stage-one window the phase has just passed: average it, and
+    /// offer the average to the filter once per input period consumed.
+    #[inline]
+    fn close_window(&mut self) {
         let avg = T::accum_avg(self.sample_accum, self.sample_count).to_f32();
         self.sample_accum = T::Accum::default();
         self.sample_count = 0;
@@ -392,6 +441,46 @@ mod tests {
     use super::*;
 
     // -- AudioResampler<i16> tests --
+
+    /// `tick_repeat(s, n)` is `n` calls to `tick(s)`: the same outputs and the
+    /// same saved state, at a downsampling ratio, the AY's, one near 1, and an
+    /// upsampling one, over runs of every length from 1 to past a window.
+    #[test]
+    fn tick_repeat_is_exactly_that_many_ticks() {
+        for (input, output) in [
+            (2_000_000, 44_100),
+            (1_500_000, 44_100),
+            (190_000, 44_100),
+            (8_000, 44_100),
+        ] {
+            let mut stepped = AudioResampler::<i16>::new(input, output);
+            let mut batched = AudioResampler::<i16>::new(input, output);
+            // A deterministic walk of values and run lengths.
+            let mut x: u32 = 0x1234_5678;
+            for _ in 0..4000 {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let value = (x >> 16) as i16;
+                let run = 1 + (x >> 8) as u64 % 40;
+                for _ in 0..run {
+                    stepped.tick(value);
+                }
+                batched.tick_repeat(value, run);
+            }
+            assert_eq!(
+                stepped.drain_audio(),
+                batched.drain_audio(),
+                "{input} -> {output}"
+            );
+            let (mut a, mut b) = (StateWriter::new(), StateWriter::new());
+            stepped.save_state(&mut a);
+            batched.save_state(&mut b);
+            assert_eq!(
+                a.into_vec(),
+                b.into_vec(),
+                "{input} -> {output}: saved state"
+            );
+        }
+    }
 
     #[test]
     fn resampler_produces_correct_sample_count() {
