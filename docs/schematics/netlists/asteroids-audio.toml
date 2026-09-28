@@ -12,9 +12,15 @@
 # the mix from this file is what retires the last fitted constants there.
 #
 # AN EXCERPT, NOT YET THE WHOLE AUDIO. So far this holds the mixer, the AUDIO 2
-# inverter, and the thrust, thump and both fire voices complete. Life, saucer
-# and explosion arrive as ports at their summing resistors and are transcribed
-# in later passes.
+# inverter, and the thrust, thump, explosion and both fire voices complete.
+# The saucer arrives as a port at its summing resistor and is transcribed in a
+# later pass.
+#
+# LIFE IS NOT ON THIS SHEET. LIFEEN leaves the M10 latch here and LIFESND
+# arrives at R78 here, and nothing between them is drawn. The caption calls it
+# "merely 3 KHz from the clock circuitry", and OCR of the manual's other six
+# pages (Asteroids-sp.pdf pages 1 to 6) finds no LIFESND anywhere. It stays a
+# port; being a logic-level square, it has no analog parts to lose.
 #
 # HOW TO READ THE SCAN. The PDF's page images are 5100 x 6600 at 1 bit on a
 # 17 x 22 inch sheet, a genuine 300 dpi. Earlier notes on this board, in
@@ -39,7 +45,7 @@ assembly = "034986-XX F"
 source = "arcade-museum.com/manuals-videogames/A/Asteroids-sp.pdf, DP-143-02 3rd printing, sheet 2 side B, PDF pages 7 and 8. Each page image is 5100 x 6600 at 1 bit per pixel on a 17 x 22 inch sheet, a true 300 dpi"
 sheets = "2B"
 dpi = 300
-excerpt = "the AUDIO OUTPUT mixer and inverter, and the thrust, thump, saucer fire and ship fire voices. Life, saucer and explosion are ports at their summing resistors, and the latches, noise register and decode that drive the voices are ports too"
+excerpt = "the AUDIO OUTPUT mixer and inverter, and the thrust, thump, explosion, saucer fire and ship fire voices. Life and saucer are ports at their summing resistors, and the M10 latch, the noise register and the decode that drive the voices are ports too"
 
 # ---------------------------------------------------------------------------
 # P11. One LM324, all four sections used: two for thrust, one mixer, one
@@ -829,6 +835,150 @@ group = "fires"
 note = "drawn `10, TANT`. The ship fire's amplitude capacitor. On page 8."
 
 # ---------------------------------------------------------------------------
+# EXPLOSION. A six-bit latch, a 74LS161 divider that sets how often R8
+# samples the shared noise, and four AND gates weighting the sampled noise by
+# the volume bits onto C24.
+#
+# THE DIVIDER IS THE DEVICE'S TABLE. P8 counts the 12 kHz clock and reloads on
+# every carry, so it carries once per 16 - load clocks. The load is
+# A = EXPITCH1, B = EXPITCH0, C = NOT EXPITCH0, D = EXPITCH1 OR EXPITCH0,
+# which gives loads 4, 10, 13 and 11 and divisors 12, 6, 3 and 5 for pitch
+# codes 0 to 3: exactly `explosion_divider` in the device.
+#
+# THE SOURCE IS NOT THE DEVICE'S. R8 samples the shared noise register at the
+# divided rate; the device clocks a private register at it instead.
+# ---------------------------------------------------------------------------
+
+[[parts]]
+ref = "P7"
+kind = "U"
+device = "74LS174"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["2", "5", "7", "10", "12", "15"]
+group = "explosion"
+note = """
+Hex D flip-flop, clocked by EXPLODE. DB5 to DB2 become EXPAUD0 to EXPAUD3 and \
+DB7 and DB6 become EXPITCH1 and EXPITCH0. The symbol labels pin 5 `1Q` where \
+a 74LS174's pin 5 is 2Q; the pin numbers are consistent with the part and are \
+what this reading follows."""
+
+[[parts]]
+ref = "N6"
+kind = "U"
+device = "74LS32"
+pins = ["11", "12", "13"]
+out = ["11"]
+group = "explosion"
+note = "one OR section: EXPITCH1 OR EXPITCH0 onto P8's D load input."
+
+[[parts]]
+ref = "L5"
+kind = "U"
+device = "74LS04"
+pins = ["1", "2", "10", "11"]
+out = ["2", "10"]
+group = "explosion"
+note = """
+Two inverter sections: 11/10 makes NOT EXPITCH0 for P8's C load input, and \
+1/2 inverts P8's carry onto its own load input."""
+
+[[parts]]
+ref = "P8"
+kind = "U"
+device = "74LS161"
+pins = ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15"]
+out = ["11", "12", "13", "14", "15"]
+group = "explosion"
+nc = [
+  { pin = "11", why = "QD is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "12", why = "QC is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "13", why = "QB is drawn with its pin number and a stub and reaches nothing" },
+  { pin = "14", why = "QA is drawn with its pin number and a stub and reaches nothing" },
+]
+note = "the pitch divider. Clocked at 12 kHz, enabled and cleared from the `P, R27` pull-up, loaded on every carry."
+
+[[parts]]
+ref = "D6"
+kind = "U"
+device = "74LS02"
+pins = ["1", "2", "3"]
+out = ["1"]
+group = "explosion"
+note = """
+One NOR section, drawn in De Morgan form as an AND with bubbled inputs. Its \
+inputs are 12 kHz and P8's inverted carry, so it pulses once per divided \
+period and clocks R8."""
+
+[[parts]]
+ref = "R8"
+kind = "U"
+device = "74LS74"
+pins = ["8", "9", "10", "11", "12", "13"]
+out = ["8", "9"]
+group = "explosion"
+nc = [
+  { pin = "8", why = "Q-bar is drawn with its pin number and a stub and reaches nothing" },
+]
+note = """
+One D flip-flop section. It samples NOISE, the shared register's output, on \
+each divided clock and holds it, so the explosion is the thrust's noise \
+decimated rather than a register of its own."""
+
+[[parts]]
+ref = "R7"
+kind = "U"
+device = "74LS08"
+pins = ["1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13"]
+out = ["3", "6", "8", "11"]
+group = "explosion"
+note = """
+All four AND sections, each gating the sampled noise with one volume bit. \
+Supply pins 7 and 14 are not drawn. A gate's output swing, not a logic level \
+from the drawing, sets how much each leg contributes; LS outputs are roughly \
+0.1 V low and 3.4 V high."""
+
+[[parts]]
+ref = "R40"
+kind = "R"
+kohms = 5.6
+group = "explosion"
+note = "the EXPAUD0 leg, the heaviest."
+
+[[parts]]
+ref = "R43"
+kind = "R"
+kohms = 12
+group = "explosion"
+note = "the EXPAUD1 leg."
+
+[[parts]]
+ref = "R41"
+kind = "R"
+kohms = 22
+group = "explosion"
+note = "the EXPAUD2 leg."
+
+[[parts]]
+ref = "R42"
+kind = "R"
+kohms = 47
+group = "explosion"
+note = """
+The EXPAUD3 leg, the lightest. The four in parallel are 3043 ohms, which is \
+the device's `EXPLODE_LP` resistance; the weights run about 8.4 : 3.9 : 2.1 : 1 \
+rather than a binary 8 : 4 : 2 : 1."""
+
+[[parts]]
+ref = "C24"
+kind = "C"
+uf = 1.0
+group = "explosion"
+note = """
+Drawn `1, TANT`, from EXPLOSND to ground. R82 into the mixer also loads this \
+node, so its time constant is set by the four legs in parallel with R82, not \
+by the legs alone."""
+
+# ---------------------------------------------------------------------------
 # NETS
 # ---------------------------------------------------------------------------
 
@@ -853,13 +1003,16 @@ note = "the fires' current sources and the ship's hold-control pull-up."
 [[nets]]
 name = "GND"
 rail = true
-on = ["P11.11", "C65.b", "C54.b", "C27.b", "R44.b", "C33.b", "C32.b", "C34.b", "C64.b", "N8.1", "R53.b", "L8.5", "L8.10", "L8.11", "C37.b", "C38.b", "C35.b", "C36.b", "M8.1", "C39.b", "C47.b", "C50.b", "C40.b", "C51.b", "L9.1", "C48.b"]
+on = ["P11.11", "C65.b", "C54.b", "C27.b", "R44.b", "C33.b", "C32.b", "C34.b", "C64.b", "N8.1", "R53.b", "L8.5", "L8.10", "L8.11", "C37.b", "C38.b", "C35.b", "C36.b", "M8.1", "C39.b", "C47.b", "C50.b", "C40.b", "C51.b", "L9.1", "C48.b", "C24.b"]
 
 [[nets]]
 name = "NOISE"
 port = "input"
-on = ["R11.9"]
-note = "the shared noise register's output. The register and its feedback are on this sheet and are transcribed in a later pass."
+on = ["R11.9", "R8.12"]
+note = """
+The shared noise register's output, into both the thrust switch and the \
+explosion's sampling flip-flop. The register and its feedback are on this \
+sheet and are transcribed in a later pass."""
 
 [[nets]]
 name = "SHPTHRUSTEN"
@@ -905,8 +1058,8 @@ note = "the drawing's THUMP, active low: N7's clock, from the address decoder."
 [[nets]]
 name = "RESET"
 port = "input"
-on = ["N7.1"]
-note = "active low, clearing N7 and with it the thump enable."
+on = ["N7.1", "P7.1"]
+note = "active low, clearing N7 and P7 and with them the thump enable and the explosion's volume."
 
 [[nets]]
 name = "DB0"
@@ -921,17 +1074,119 @@ on = ["N7.11"]
 [[nets]]
 name = "DB2"
 port = "input"
-on = ["N7.4"]
+on = ["N7.4", "P7.6"]
 
 [[nets]]
 name = "DB3"
 port = "input"
-on = ["N7.13"]
+on = ["N7.13", "P7.11"]
 
 [[nets]]
 name = "DB4"
 port = "input"
-on = ["N7.3"]
+on = ["N7.3", "P7.4"]
+
+[[nets]]
+name = "DB5"
+port = "input"
+on = ["P7.13"]
+
+[[nets]]
+name = "DB6"
+port = "input"
+on = ["P7.3"]
+
+[[nets]]
+name = "DB7"
+port = "input"
+on = ["P7.14"]
+
+[[nets]]
+name = "EXPLODE strobe"
+port = "input"
+on = ["P7.9"]
+note = "the drawing's EXPLODE, P7's clock, from the address decoder."
+
+[[nets]]
+name = "12KHZ"
+port = "input"
+on = ["P8.2", "D6.2"]
+note = "from the clock circuitry on another sheet."
+
+[[nets]]
+name = "P/R27"
+port = "input"
+on = ["P8.1", "P8.7", "P8.10", "R8.10", "R8.13"]
+note = """
+Labeled `P, R27` at each pin: a pull-up to be read elsewhere on the sheet, \
+holding P8 enabled and uncleared and R8 neither preset nor cleared. Named for \
+the label, as in the Lunar Lander file."""
+
+[[nets]]
+name = "EXPAUD0"
+on = ["P7.12", "R7.1"]
+
+[[nets]]
+name = "EXPAUD1"
+on = ["P7.5", "R7.12"]
+
+[[nets]]
+name = "EXPAUD2"
+on = ["P7.10", "R7.4"]
+
+[[nets]]
+name = "EXPAUD3"
+on = ["P7.7", "R7.9"]
+
+[[nets]]
+name = "EXPITCH1"
+on = ["P7.15", "N6.13", "P8.3"]
+
+[[nets]]
+name = "EXPITCH0"
+on = ["P7.2", "N6.12", "L5.11", "P8.4"]
+
+[[nets]]
+name = "NOT EXPITCH0"
+on = ["L5.10", "P8.5"]
+
+[[nets]]
+name = "EXPITCH1 OR EXPITCH0"
+on = ["N6.11", "P8.6"]
+
+[[nets]]
+name = "P8 carry"
+on = ["P8.15", "L5.1"]
+
+[[nets]]
+name = "P8 load"
+on = ["L5.2", "P8.9", "D6.3"]
+note = "the inverted carry: P8's active-low load, and the NOR's second input."
+
+[[nets]]
+name = "explosion sample clock"
+on = ["D6.1", "R8.11"]
+
+[[nets]]
+name = "explosion noise"
+on = ["R8.9", "R7.2", "R7.13", "R7.5", "R7.10"]
+note = "the sampled noise, into all four volume gates."
+
+[[nets]]
+name = "explosion leg 0"
+on = ["R7.3", "R40.a"]
+
+[[nets]]
+name = "explosion leg 1"
+on = ["R7.11", "R43.a"]
+
+[[nets]]
+name = "explosion leg 2"
+on = ["R7.6", "R41.a"]
+
+[[nets]]
+name = "explosion leg 3"
+on = ["R7.8", "R42.a"]
 
 [[nets]]
 name = "N7 section 6 hold"
@@ -1120,8 +1375,7 @@ on = ["R66.b", "C48.a", "M9.2"]
 
 [[nets]]
 name = "EXPLOSND"
-port = "input"
-on = ["R82.a"]
+on = ["R40.b", "R43.b", "R41.b", "R42.b", "C24.a", "R82.a"]
 
 [[nets]]
 name = "P11c summing node"
