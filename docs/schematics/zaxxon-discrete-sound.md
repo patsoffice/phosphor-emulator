@@ -1048,6 +1048,29 @@ not touch. This is the file's own rule about incomplete changes pointing the
 other way for once: the piece it needs has not been found, so it is recorded
 rather than landed.
 
+**The datasheet's floor is past the sweep, and it does not move the head
+either** (`phosphor-emulator-kfby.4`, 2026-09-28). TI's LM324 datasheet
+(SLOS066AE, Figure 6-35, Output Sinking Characteristics) puts the output at
+about **0.75 V** sinking 2.3 mA, with 0.69 V at 1 mA and 1.04 V at 10 mA, and
+the three supply curves agree there. That is self-consistent with the load:
+pin 5 held at 0.75 V asks for about 2.2 mA. Applied to `U19`(1,2,3)'s clamp
+alone, bracketed either side, against `23.wav`:
+
+| floor | head 3-8 kHz | head distance | voice distance |
+|---|---|---|---|
+| 0.1 V (today) | 47.6 % | 1.152 | **1.333** |
+| 0.60 V | 47.3 % | 1.147 | 1.489 |
+| 0.75 V (datasheet) | 47.7 % | 1.148 | 1.527 |
+| 0.90 V | 47.5 % | 1.150 | 1.552 |
+| the board | 7.5 % | | |
+
+The head moves under half a percent at every floor, and the voice as a whole
+gets worse as the floor rises. So the op-amp's real sink into `U18`'s control
+pin is not where the head lives, which was the last part-property candidate
+this file had: the 555's loaded output high is ruled out by arithmetic above,
+and its duty against `C91` by the same sweep. What is left is the `MB4391`
+and anything outside the transcription.
+
 **And the head is not the ceiling.** Sweeping `U19`(1,2,3)'s ceiling alone, with
 the head measured over 50 to 300 ms of the voice against the board's
 `0.1 / 3.5 / 22.8 / 64.5 / 7.5 / 1.6`:
