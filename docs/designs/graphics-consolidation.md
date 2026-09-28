@@ -201,6 +201,23 @@ Added in rev 2:
 9. **"Scrolled" is a first-class tilemap property**, not a per-machine quirk —
    ratified after the fact by the Xevious outcome.
 
+Added with `phosphor-emulator-nx2p`:
+
+10. **There is no shared `Framebuffer` component, and none is planned.** One was
+    proposed with a declared format (`Indexed8`, `Indexed16`, `Rgb24`), a single
+    `present()` and a uniform refresh hook. By the time it was picked up, about
+    fifteen raster boards resolved color into RGB24 as each scanline was drawn,
+    and about ten of those read a palette that the game can rewrite mid-frame
+    (williams, atari_system1, toobin, btime, ccastles among them), so a deferred
+    `present()` would lose the split the hardware shows. The `u16` users hold
+    one row on the stack and resolve it at once, against a RAM-decoded palette
+    or a 320-entry one, so `Indexed16` would have no adopter (and Decision 7
+    stands). The five boards that do keep a whole-frame index buffer (galaga,
+    digdug, xevious, gottlieb, mcr2) all resolve it through
+    `resolve_indexed_rows`, which is the shared part that was worth having.
+    Differing buffer names, and the three Namco systems owning their buffer
+    rather than the board, are left as they are: renaming them changes nothing.
+
 ## Relationship to other work
 
 * **Rotation — shipped, no longer relevant here.** Rev 1 listed rotation
