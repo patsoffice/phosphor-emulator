@@ -1164,6 +1164,7 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Difficulty",
@@ -1187,6 +1188,7 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -1210,6 +1212,7 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Sound",
@@ -1225,6 +1228,7 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x40,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -1240,6 +1244,7 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1251,12 +1256,14 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
                 mask: 0x0f,
                 apply: DipApplyTiming::Immediate,
                 choices: &COIN_B_CHOICES,
+                conditional: &[],
             },
             DipOption {
                 name: "Coin A",
                 mask: 0xf0,
                 apply: DipApplyTiming::Immediate,
                 choices: &COIN_A_CHOICES,
+                conditional: &[],
             },
         ],
     },

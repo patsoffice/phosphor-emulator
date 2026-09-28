@@ -1574,6 +1574,7 @@ const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x06,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Coin A",
@@ -1589,6 +1590,7 @@ const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x08,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Coin B",
@@ -1612,6 +1614,7 @@ const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x30,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Coinage",
@@ -1635,6 +1638,7 @@ const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0xC0,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

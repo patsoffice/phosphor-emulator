@@ -2060,6 +2060,7 @@ const DIFFICULTY_OPTION: DipOption = DipOption {
         choice("Hard", 0x01),
         choice("Hardest", 0x00),
     ],
+    conditional: &[],
 };
 
 const EXTRA_OPTION: DipOption = DipOption {
@@ -2067,6 +2068,7 @@ const EXTRA_OPTION: DipOption = DipOption {
     mask: 0x10,
     apply: DipApplyTiming::Immediate,
     choices: &[choice("Easy", 0x10), choice("Difficult", 0x00)],
+    conditional: &[],
 };
 
 const CABINET_OPTION: DipOption = DipOption {
@@ -2074,6 +2076,7 @@ const CABINET_OPTION: DipOption = DipOption {
     mask: 0x20,
     apply: DipApplyTiming::Immediate,
     choices: &[choice("Upright", 0x00), choice("Cocktail", 0x20)],
+    conditional: &[],
 };
 
 const RACK_TEST_OPTION: DipOption = DipOption {
@@ -2081,6 +2084,7 @@ const RACK_TEST_OPTION: DipOption = DipOption {
     mask: 0x04,
     apply: DipApplyTiming::Immediate,
     choices: &[choice("Off", 0x04), choice("On", 0x00)],
+    conditional: &[],
 };
 
 const FLIP_SCREEN_OPTION: DipOption = DipOption {
@@ -2088,6 +2092,7 @@ const FLIP_SCREEN_OPTION: DipOption = DipOption {
     mask: 0x08,
     apply: DipApplyTiming::Immediate,
     choices: &[choice("Off", 0x08), choice("On", 0x00)],
+    conditional: &[],
 };
 
 const SPECIAL_OPTION: DipOption = DipOption {
@@ -2095,6 +2100,7 @@ const SPECIAL_OPTION: DipOption = DipOption {
     mask: 0x40,
     apply: DipApplyTiming::Immediate,
     choices: &[choice("Given", 0x40), choice("Not Given", 0x00)],
+    conditional: &[],
 };
 
 const LIVES_3_5_OPTION: DipOption = DipOption {
@@ -2102,6 +2108,7 @@ const LIVES_3_5_OPTION: DipOption = DipOption {
     mask: 0x80,
     apply: DipApplyTiming::Immediate,
     choices: &[choice("3", 0x80), choice("5", 0x00)],
+    conditional: &[],
 };
 
 const COINAGE_BANK: DipSwitchBank = DipSwitchBank {
@@ -2112,12 +2119,14 @@ const COINAGE_BANK: DipSwitchBank = DipSwitchBank {
             mask: 0x0f,
             apply: DipApplyTiming::Immediate,
             choices: &COIN_B_CHOICES,
+            conditional: &[],
         },
         DipOption {
             name: "Coin A",
             mask: 0xf0,
             apply: DipApplyTiming::Immediate,
             choices: &COIN_A_CHOICES,
+            conditional: &[],
         },
     ],
 };
@@ -2133,6 +2142,7 @@ const DOCASTLE_DIP_BANKS: &[DipSwitchBank] = &[
                 mask: 0x08,
                 apply: DipApplyTiming::Immediate,
                 choices: &[choice("Yes", 0x08), choice("No", 0x00)],
+                conditional: &[],
             },
             EXTRA_OPTION,
             CABINET_OPTION,
@@ -2146,6 +2156,7 @@ const DOCASTLE_DIP_BANKS: &[DipSwitchBank] = &[
                     choice("4", 0x80),
                     choice("5", 0x40),
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -2162,6 +2173,7 @@ const DORUNRUN_DIP_BANKS: &[DipSwitchBank] = &[
                 mask: 0x04,
                 apply: DipApplyTiming::Immediate,
                 choices: &[choice("On", 0x04), choice("Off", 0x00)],
+                conditional: &[],
             },
             FLIP_SCREEN_OPTION,
             EXTRA_OPTION,

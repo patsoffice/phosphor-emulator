@@ -784,12 +784,38 @@ pub fn assert_dip_banks_valid(
                     opt.name
                 );
             }
+            // A conditional table relabels the same switches, so it reads bits
+            // outside the option, and offers exactly the option's own values.
+            let mut values: Vec<u8> = opt.choices.iter().map(|c| c.value).collect();
+            values.sort_unstable();
+            for cond in opt.conditional {
+                assert_ne!(cond.mask, 0, "{}: a condition reads no bits", opt.name);
+                assert_eq!(
+                    cond.mask & opt.mask,
+                    0,
+                    "{}: a condition reads the option's own bits",
+                    opt.name
+                );
+                assert_eq!(
+                    cond.equals & !cond.mask,
+                    0,
+                    "{}: a condition's value escapes its mask",
+                    opt.name
+                );
+                let mut cond_values: Vec<u8> = cond.choices.iter().map(|c| c.value).collect();
+                cond_values.sort_unstable();
+                assert_eq!(
+                    cond_values, values,
+                    "{}: a conditional table must offer the option's own values",
+                    opt.name
+                );
+            }
         }
         let default = defaults[bank_idx];
         for opt in bank.options {
             let selected = default & opt.mask;
             assert!(
-                opt.choices.iter().any(|c| c.value == selected),
+                opt.choices_for(default).iter().any(|c| c.value == selected),
                 "{} default 0x{default:02X} has no choice for {} (slice 0x{selected:02X})",
                 bank.name,
                 opt.name
@@ -963,5 +989,106 @@ pub(crate) fn assert_no_coin_binding_collision(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dip_validator_tests {
+    use super::assert_dip_banks_valid;
+    use phosphor_core::core::machine::{
+        DipApplyTiming, DipChoice, DipCondition, DipOption, DipSwitchBank,
+    };
+
+    const LIVES: &[DipChoice] = &[
+        DipChoice {
+            label: "3",
+            value: 0x00,
+        },
+        DipChoice {
+            label: "5",
+            value: 0x80,
+        },
+    ];
+    const BONUS: &[DipChoice] = &[
+        DipChoice {
+            label: "10K",
+            value: 0x00,
+        },
+        DipChoice {
+            label: "20K",
+            value: 0x01,
+        },
+    ];
+    const BONUS_WITH_5: &[DipChoice] = &[
+        DipChoice {
+            label: "30K",
+            value: 0x00,
+        },
+        DipChoice {
+            label: "40K",
+            value: 0x01,
+        },
+    ];
+    const BONUS_SHORT: &[DipChoice] = &[DipChoice {
+        label: "30K",
+        value: 0x00,
+    }];
+
+    fn bank(condition: DipCondition) -> [DipSwitchBank; 1] {
+        // Leaked so the test can build a table at run time with the
+        // `&'static` slices the metadata types require.
+        let conditional: &'static [DipCondition] = Box::leak(Box::new([condition]));
+        let options: &'static [DipOption] = Box::leak(Box::new([
+            DipOption {
+                name: "Bonus",
+                mask: 0x01,
+                choices: BONUS,
+                apply: DipApplyTiming::Immediate,
+                conditional,
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0x80,
+                choices: LIVES,
+                apply: DipApplyTiming::Immediate,
+                conditional: &[],
+            },
+        ]));
+        [DipSwitchBank {
+            name: "DSW",
+            options,
+        }]
+    }
+
+    #[test]
+    fn a_conditional_relabeling_of_the_same_values_is_valid() {
+        let banks = bank(DipCondition {
+            mask: 0x80,
+            equals: 0x80,
+            choices: BONUS_WITH_5,
+        });
+        assert_dip_banks_valid(&banks, &[0x81]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must offer the option's own values")]
+    fn a_conditional_table_with_other_values_is_refused() {
+        let banks = bank(DipCondition {
+            mask: 0x80,
+            equals: 0x80,
+            choices: BONUS_SHORT,
+        });
+        assert_dip_banks_valid(&banks, &[0x00]);
+    }
+
+    #[test]
+    #[should_panic(expected = "reads the option's own bits")]
+    fn a_condition_on_the_options_own_bits_is_refused() {
+        let banks = bank(DipCondition {
+            mask: 0x81,
+            equals: 0x80,
+            choices: BONUS_WITH_5,
+        });
+        assert_dip_banks_valid(&banks, &[0x00]);
     }
 }

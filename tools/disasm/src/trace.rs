@@ -1188,13 +1188,12 @@ fn apply_dip_specs(harness: &mut Harness, specs: &[DipSpec]) -> Result<(), Strin
                         format!("--dip '{name}': no such option; try {}", names.join(", "))
                     });
                 };
-                let Some(value) = option
-                    .choices
-                    .iter()
-                    .find(|c| c.label == choice)
-                    .map(|c| c.value)
+                // Resolve against the labels in force for the bank as it stands,
+                // so an earlier `--dip` that sets Lives relabels Bonus Life.
+                let choices = option.choices_for(harness.machine().dip_bank_value(bi));
+                let Some(value) = choices.iter().find(|c| c.label == choice).map(|c| c.value)
                 else {
-                    let labels: Vec<&str> = option.choices.iter().map(|c| c.label).collect();
+                    let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
                     return Err(format!(
                         "--dip '{name}={choice}': no such choice; try {}",
                         labels.join(", ")

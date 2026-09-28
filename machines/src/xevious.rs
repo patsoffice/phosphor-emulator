@@ -48,7 +48,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::debug_trace::DebugEventKind;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
+    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipCondition, DipOption, DipSwitchBank,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MachineDebug,
     Renderable, SaveState,
 };
@@ -1520,6 +1520,12 @@ impl phosphor_core::core::machine::Profilable for XeviousSystem {}
 /// default to 0xFF at the factory settings. DSWB bits 0 and 4 are not DIP
 /// switches — they carry the player 1/2 blaster (button 2) inputs — so no
 /// option covers them.
+///
+/// Checked against Table 1-2 of Atari's Xevious operator's manual
+/// (`arcarc.xmission.com/PDF_Arcade_Atari_Kee/Xevious/Xevious_TM-230_1st_Printing.pdf`,
+/// PDF p14), which covers the switch at 10D, 7D on the Namco board. A switch
+/// reads 1 when off and switch `n` is bit `n - 1`; read that way, every Coin A,
+/// Lives and 1-to-3-lives Bonus Life row lands on the value this table gives it.
 const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {
         name: "DSWA",
@@ -1546,12 +1552,11 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
-            // Bonus-life schedule. On hardware these three bits are interpreted
-            // differently when Lives is set to 5 (the 0x60 slice is 0); we model
-            // the common table used for the 1/2/3-life settings (which includes
-            // the factory default of 3 lives). The DIP bits still reach the game
-            // when 5 lives are selected, only the labels here would differ.
+            // Bonus-life schedule, labeled for 1, 2 or 3 lives. With Lives at 5
+            // (the 0x60 slice is 0) the game reads these bits against a second
+            // schedule, XEVIOUS_BONUS_WITH_5_LIVES.
             DipOption {
                 name: "Bonus Life",
                 mask: 0x1C,
@@ -1590,6 +1595,11 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[DipCondition {
+                    mask: 0x60,
+                    equals: 0x00,
+                    choices: XEVIOUS_BONUS_WITH_5_LIVES,
+                }],
             },
             DipOption {
                 name: "Lives",
@@ -1613,6 +1623,7 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x60,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -1628,6 +1639,7 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1648,6 +1660,7 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x02,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Coin B",
@@ -1671,6 +1684,7 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0C,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Difficulty",
@@ -1694,6 +1708,7 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x60,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Freeze",
@@ -1709,8 +1724,47 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
+    },
+];
+
+/// Bonus Life while Lives is 5, from the manual's "Switches 6 and 7 set for 5
+/// lives" half of Table 1-2, against the same switch positions as the main
+/// table.
+const XEVIOUS_BONUS_WITH_5_LIVES: &[DipChoice] = &[
+    DipChoice {
+        label: "10K, 50K, Every 50K",
+        value: 0x18,
+    },
+    DipChoice {
+        label: "20K, 50K, Every 50K",
+        value: 0x14,
+    },
+    DipChoice {
+        label: "20K, 60K, Every 60K",
+        value: 0x10,
+    },
+    DipChoice {
+        label: "20K, 70K, Every 70K",
+        value: 0x1C,
+    },
+    DipChoice {
+        label: "20K, 80K, Every 80K",
+        value: 0x0C,
+    },
+    DipChoice {
+        label: "30K, 100K, Every 100K",
+        value: 0x08,
+    },
+    DipChoice {
+        label: "20K and 80K Only",
+        value: 0x04,
+    },
+    DipChoice {
+        label: "None",
+        value: 0x00,
     },
 ];
 
@@ -1746,6 +1800,25 @@ mod dip_tests {
         sys.set_dip_option(0, 2, 0x40);
         assert_eq!(sys.dip_bank_value(0), 0xDF); // 0xFF with bit 5 cleared
         assert_eq!(sys.dip_bank_value(1), 0xFF); // other bank untouched
+    }
+
+    /// The factory Bonus Life switches (0x1C) read as Table 1-2's 1-to-3-lives
+    /// schedule until Lives is 5, which on this board is both switches on.
+    #[test]
+    fn bonus_life_labels_follow_lives() {
+        let mut sys = xevious_at_defaults();
+        let bonus = &sys.dip_banks()[0].options[1];
+        let label = |bank: u8| {
+            bonus
+                .choices_for(bank)
+                .iter()
+                .find(|c| c.value == bank & bonus.mask)
+                .unwrap()
+                .label
+        };
+        assert_eq!(label(sys.dip_bank_value(0)), "20K, 60K, Every 60K");
+        sys.set_dip_option(0, 2, 0x00);
+        assert_eq!(label(sys.dip_bank_value(0)), "20K, 70K, Every 70K");
     }
 
     #[test]

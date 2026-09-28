@@ -644,6 +644,7 @@ const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Language",
@@ -667,6 +668,7 @@ const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0C,
                     },
                 ],
+                conditional: &[],
             },
             // Toggle 6.
             DipOption {
@@ -683,6 +685,7 @@ const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x20,
                     },
                 ],
+                conditional: &[],
             },
             // Toggles 5, 7 and 8, which is why the mask is not contiguous: the
             // fuel amount is three toggles with the free-play toggle sitting in
@@ -727,6 +730,7 @@ const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xD0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -759,6 +763,7 @@ const LLANDER_SERVICE_BANK: DipSwitchBank = DipSwitchBank {
                 value: 0x00,
             },
         ],
+        conditional: &[],
     }],
 };
 

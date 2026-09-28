@@ -49,8 +49,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::debug_trace::DebugEventKind;
 use phosphor_core::core::machine::{
-    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, MachineCore, MachineDebug,
-    Renderable, SaveState,
+    AudioSource, DipApplyTiming, DipChoice, DipCondition, DipOption, DipSwitchBank, MachineCore,
+    MachineDebug, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::gfx::GfxCache;
@@ -1419,9 +1419,9 @@ impl phosphor_core::core::machine::Profilable for GalagaSystem {}
 /// DIP switch metadata for Galaga's two banks (DSWA at board byte `dswa`, DSWB
 /// at `dswb`). Choice bits and labels follow MAME's `galaga` layout; the option
 /// defaults OR to the historical 0xF7 (DSWA) and 0x97 (DSWB). The two unused
-/// DSWA bits (0x04, 0x40) are not modelled and keep their power-on value. The
-/// Bonus Life thresholds shown are those MAME displays for the default (non-5)
-/// Lives setting.
+/// DSWA bits (0x04, 0x40) are not modeled and keep their power-on value. Bonus
+/// Life is labeled from Figure 3's "BEGAN WITH 2, 3 OR 4 FIGHTERS" column, and
+/// from [`GALAGA_BONUS_WITH_5_FIGHTERS`] while Lives is set to 5.
 const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {
         name: "DSWA",
@@ -1448,6 +1448,7 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Demo Sounds",
@@ -1463,6 +1464,7 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Freeze",
@@ -1478,6 +1480,7 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Rack Test",
@@ -1493,6 +1496,7 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x20,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -1508,6 +1512,7 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1552,6 +1557,7 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x07,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Life",
@@ -1591,6 +1597,11 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x38,
                     },
                 ],
+                conditional: &[DipCondition {
+                    mask: 0xC0,
+                    equals: 0xC0,
+                    choices: GALAGA_BONUS_WITH_5_FIGHTERS,
+                }],
             },
             DipOption {
                 name: "Lives",
@@ -1614,8 +1625,47 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xC0,
                     },
                 ],
+                conditional: &[],
             },
         ],
+    },
+];
+
+/// Bonus Life while Lives is 5, from Figure 3's "BEGAN WITH 5 FIGHTERS" column
+/// against the same switch positions as the main table. Every row that awards
+/// anything starts at 30K, and the two at 0x08 and 0x28 lose their repeat.
+const GALAGA_BONUS_WITH_5_FIGHTERS: &[DipChoice] = &[
+    DipChoice {
+        label: "None",
+        value: 0x00,
+    },
+    DipChoice {
+        label: "30K and 100K Only",
+        value: 0x08,
+    },
+    DipChoice {
+        label: "30K, 120K, Every 120K",
+        value: 0x10,
+    },
+    DipChoice {
+        label: "30K and 150K Only",
+        value: 0x18,
+    },
+    DipChoice {
+        label: "30K, 100K, Every 100K",
+        value: 0x20,
+    },
+    DipChoice {
+        label: "30K and 120K Only",
+        value: 0x28,
+    },
+    DipChoice {
+        label: "30K, 150K, Every 150K",
+        value: 0x30,
+    },
+    DipChoice {
+        label: "30K Only",
+        value: 0x38,
     },
 ];
 
@@ -1652,6 +1702,25 @@ mod dip_tests {
         sys.set_dip_option(1, 2, 0xC0);
         assert_eq!(sys.dip_bank_value(1), 0xD7); // 0x97 with bits 6-7 set
         assert_eq!(sys.dip_bank_value(0), 0xF7); // other bank untouched
+    }
+
+    /// The same Bonus Life switches (0x10 at the default) read as Figure 3's
+    /// 2-to-4-fighter schedule until Lives is 5, then as its 5-fighter one.
+    #[test]
+    fn bonus_life_labels_follow_lives() {
+        let mut sys = galaga_at_defaults();
+        let bonus = &sys.dip_banks()[1].options[1];
+        let label = |bank: u8| {
+            bonus
+                .choices_for(bank)
+                .iter()
+                .find(|c| c.value == bank & bonus.mask)
+                .unwrap()
+                .label
+        };
+        assert_eq!(label(sys.dip_bank_value(1)), "20K, 70K, Every 70K");
+        sys.set_dip_option(1, 2, 0xC0);
+        assert_eq!(label(sys.dip_bank_value(1)), "30K, 120K, Every 120K");
     }
 
     #[test]

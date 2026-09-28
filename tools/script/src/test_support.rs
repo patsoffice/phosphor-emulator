@@ -192,6 +192,7 @@ const STUB_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x01,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Bonus",
@@ -207,6 +208,7 @@ const STUB_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x04,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

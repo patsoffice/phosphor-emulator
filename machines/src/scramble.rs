@@ -880,6 +880,7 @@ pub(crate) const SCRAMBLE_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0x03,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -907,6 +908,7 @@ pub(crate) const SCRAMBLE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x06,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -922,6 +924,7 @@ pub(crate) const SCRAMBLE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1283,6 +1286,7 @@ pub(crate) const SCOBRA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x01,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -1298,6 +1302,7 @@ pub(crate) const SCOBRA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x02,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1326,6 +1331,7 @@ pub(crate) const SCOBRA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x06,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -1341,6 +1347,7 @@ pub(crate) const SCOBRA_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

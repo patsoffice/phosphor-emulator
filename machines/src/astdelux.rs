@@ -821,6 +821,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -844,6 +845,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0C,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Minimum Plays",
@@ -859,6 +861,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             // TOGGLE 6, WHICH THE MANUAL CALLS `Not Used` AND THE ROM READS
             // ANYWAY. Figure 7 prints `Not Used` in its column and Figure 6's
@@ -900,6 +903,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x20,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Life",
@@ -923,6 +927,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xC0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -951,6 +956,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Right Coin Mech",
@@ -974,6 +980,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0C,
                     },
                 ],
+                conditional: &[],
             },
             // Figure 6: "Both these settings affect the left mech in a 2-mech door."
             DipOption {
@@ -990,6 +997,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             // A "coin" is 25c in the U.S. and 1 DM in Germany, so these read as
             // counts rather than as cash. Figure 6 spells the field out as
@@ -1034,6 +1042,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xE0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1059,6 +1068,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0x80,
                 },
             ],
+            conditional: &[],
         }],
     },
 ];

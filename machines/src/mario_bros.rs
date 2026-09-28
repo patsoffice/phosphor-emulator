@@ -1523,6 +1523,7 @@ const MARIO_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x03,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Coinage",
@@ -1546,6 +1547,7 @@ const MARIO_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x0C,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Bonus Life",
@@ -1569,6 +1571,7 @@ const MARIO_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x30,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Difficulty",
@@ -1592,6 +1595,7 @@ const MARIO_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0xC0,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

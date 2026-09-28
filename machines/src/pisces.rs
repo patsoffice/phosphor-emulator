@@ -237,6 +237,7 @@ const PISCES_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x40,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -252,6 +253,7 @@ const PISCES_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -272,6 +274,7 @@ const PISCES_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x01,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Coinage",
@@ -287,6 +290,7 @@ const PISCES_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x02,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Difficulty",
@@ -302,6 +306,7 @@ const PISCES_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x04,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -326,6 +331,7 @@ const UNIWARS_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0x20,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -352,6 +358,7 @@ const UNIWARS_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0xc0,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -379,6 +386,7 @@ const UNIWARS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -394,6 +402,7 @@ const UNIWARS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x04,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

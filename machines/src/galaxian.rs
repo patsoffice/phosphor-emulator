@@ -779,6 +779,7 @@ pub(crate) const GALAXIAN_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0x20,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -805,6 +806,7 @@ pub(crate) const GALAXIAN_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0xc0,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -832,6 +834,7 @@ pub(crate) const GALAXIAN_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -847,6 +850,7 @@ pub(crate) const GALAXIAN_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x04,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

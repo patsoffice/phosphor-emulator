@@ -592,6 +592,7 @@ const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x01,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Kicker",
@@ -607,6 +608,7 @@ const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x02,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Cabinet",
@@ -622,6 +624,7 @@ const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x04,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Demo Mode (Cheat)",
@@ -637,6 +640,7 @@ const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x08,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Free Play",
@@ -652,6 +656,7 @@ const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x10,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

@@ -1188,6 +1188,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Right Coin",
@@ -1211,6 +1212,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0C,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Center Coin",
@@ -1226,6 +1228,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Language",
@@ -1249,6 +1252,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x60,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Unknown",
@@ -1264,6 +1268,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1292,6 +1297,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Credit",
@@ -1307,6 +1313,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x04,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Trak-Ball Size",
@@ -1322,6 +1329,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus City",
@@ -1361,6 +1369,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x70,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Toggle 8 (unused)",
@@ -1376,6 +1385,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

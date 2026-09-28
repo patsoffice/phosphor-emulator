@@ -588,6 +588,7 @@ const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -603,6 +604,7 @@ const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x04,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Center Mech",
@@ -618,6 +620,7 @@ const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Right Mech",
@@ -641,6 +644,7 @@ const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x30,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Coinage",
@@ -664,6 +668,7 @@ const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xC0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -696,6 +701,7 @@ const SELF_TEST_BANK: DipSwitchBank = DipSwitchBank {
                 value: 0x80,
             },
         ],
+        conditional: &[],
     }],
 };
 

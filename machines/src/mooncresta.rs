@@ -190,6 +190,7 @@ pub(crate) const MOONCRST_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0x20,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -209,6 +210,7 @@ pub(crate) const MOONCRST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x40,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Language",
@@ -224,6 +226,7 @@ pub(crate) const MOONCRST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -252,6 +255,7 @@ pub(crate) const MOONCRST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Coin B",
@@ -275,6 +279,7 @@ pub(crate) const MOONCRST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0c,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

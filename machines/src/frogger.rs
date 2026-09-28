@@ -187,6 +187,7 @@ pub(crate) const FROGGER_DIP_BANKS: &[DipSwitchBank] = &[
                     value: 0x03,
                 },
             ],
+            conditional: &[],
         }],
     },
     DipSwitchBank {
@@ -214,6 +215,7 @@ pub(crate) const FROGGER_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x06,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -229,6 +231,7 @@ pub(crate) const FROGGER_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

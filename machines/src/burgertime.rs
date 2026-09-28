@@ -493,6 +493,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Coin B",
@@ -516,6 +517,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 // Hardware has no test mode; this must stay Off or boot locks up.
@@ -532,6 +534,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -547,6 +550,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x40,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -567,6 +571,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Life",
@@ -590,6 +595,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Enemies",
@@ -605,6 +611,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "End of Level Pepper",
@@ -620,6 +627,7 @@ const BURGERTIME_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

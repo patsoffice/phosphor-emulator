@@ -1427,6 +1427,7 @@ const CCASTLES_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                 value: 0x20,
             },
         ],
+        conditional: &[],
     }],
 }];
 

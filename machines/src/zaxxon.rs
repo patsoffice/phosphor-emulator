@@ -970,6 +970,7 @@ const ZAXXON_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             // SW1:3 and SW1:4 are marked unused on this set. Super Zaxxon
             // reuses SW1:3 as a difficulty switch, which is one of the places
@@ -996,6 +997,7 @@ const ZAXXON_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Sound",
@@ -1011,6 +1013,7 @@ const ZAXXON_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x40,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -1026,6 +1029,7 @@ const ZAXXON_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x80,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1037,12 +1041,14 @@ const ZAXXON_DIP_BANKS: &[DipSwitchBank] = &[
                 mask: 0x0f,
                 apply: DipApplyTiming::Immediate,
                 choices: &COIN_B_CHOICES,
+                conditional: &[],
             },
             DipOption {
                 name: "Coin A",
                 mask: 0xf0,
                 apply: DipApplyTiming::Immediate,
                 choices: &COIN_A_CHOICES,
+                conditional: &[],
             },
         ],
     },

@@ -811,6 +811,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Right Coin",
@@ -834,6 +835,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0C,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Left Coin",
@@ -849,6 +851,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Coins",
@@ -888,6 +891,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xE0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -908,6 +912,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x01,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Language",
@@ -931,6 +936,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x06,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Life",
@@ -970,6 +976,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x38,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -993,6 +1000,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xC0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

@@ -1047,6 +1047,7 @@ const QUANTUM_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x06,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Left Coin",
@@ -1062,6 +1063,7 @@ const QUANTUM_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x08,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Right Coin",
@@ -1085,6 +1087,7 @@ const QUANTUM_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x30,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Coinage",
@@ -1108,6 +1111,7 @@ const QUANTUM_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x40,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

@@ -1567,6 +1567,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Right Coin",
@@ -1590,6 +1591,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x0c,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Left Coin",
@@ -1605,6 +1607,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Adder",
@@ -1640,6 +1643,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xe0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1660,6 +1664,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x01,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Minimum Game Time",
@@ -1675,6 +1680,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x02,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Life",
@@ -1698,6 +1704,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x04,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Lives",
@@ -1721,6 +1728,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x10,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Difficulty",
@@ -1736,6 +1744,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x40,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Demo Mode",
@@ -1751,6 +1760,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },

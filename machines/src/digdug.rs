@@ -4,8 +4,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::debug_trace::DebugEventKind;
 use phosphor_core::core::machine::{
-    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, MachineCore, MachineDebug,
-    Nvram, Profilable, Renderable, SaveState,
+    AudioSource, DipApplyTiming, DipChoice, DipCondition, DipOption, DipSwitchBank, MachineCore,
+    MachineDebug, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::device::Er2055;
@@ -1468,8 +1468,14 @@ impl Profilable for DigDugSystem {}
 /// `dswa`, DSWB at `dswb`). Choice bit patterns and labels follow MAME's
 /// `digdug` layout; each option's factory default OR's together to the
 /// historical `0x99` (DSWA) and `0x24` (DSWB) that [`DigDugSystem::reset`]
-/// initializes. The Bonus Life thresholds shown are those MAME displays for
-/// the default (non-5) Lives setting.
+/// initializes. Bonus Life is labeled for 1, 2 or 3 lives, and from
+/// [`DIGDUG_BONUS_WITH_5_LIVES`] while Lives is set to 5.
+///
+/// Checked against Table 1-1 of Atari's Dig Dug manual
+/// (`arcade-museum.com/manuals-videogames/D/DigDug.pdf`, PDF p17). A switch
+/// reads 1 when off, and switch `n` of the 8-toggle at 2C/D is bit `n - 1`;
+/// read that way, every Lives, Coin B and 1-to-3-lives Bonus Life row lands on
+/// the value this table already gives it.
 const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {
         name: "DSWA",
@@ -1512,6 +1518,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x07,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Bonus Life",
@@ -1551,6 +1558,11 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x38,
                     },
                 ],
+                conditional: &[DipCondition {
+                    mask: 0xC0,
+                    equals: 0xC0,
+                    choices: DIGDUG_BONUS_WITH_5_LIVES,
+                }],
             },
             DipOption {
                 name: "Lives",
@@ -1574,6 +1586,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xC0,
                     },
                 ],
+                conditional: &[],
             },
         ],
     },
@@ -1602,6 +1615,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0xC0,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Freeze",
@@ -1617,6 +1631,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Demo Sounds",
@@ -1632,6 +1647,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Allow Continue",
@@ -1647,6 +1663,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x08,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Cabinet",
@@ -1662,6 +1679,7 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x00,
                     },
                 ],
+                conditional: &[],
             },
             DipOption {
                 name: "Difficulty",
@@ -1685,8 +1703,46 @@ const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
                         value: 0x03,
                     },
                 ],
+                conditional: &[],
             },
         ],
+    },
+];
+
+/// Bonus Life while Lives is 5, from the "With 5 Dig Dug lives" column of the
+/// manual's Table 1-1, against the same switch positions as the main table.
+const DIGDUG_BONUS_WITH_5_LIVES: &[DipChoice] = &[
+    DipChoice {
+        label: "None",
+        value: 0x00,
+    },
+    DipChoice {
+        label: "20K and 60K Only",
+        value: 0x08,
+    },
+    DipChoice {
+        label: "30K, 80K, Every 80K",
+        value: 0x10,
+    },
+    DipChoice {
+        label: "20K Only",
+        value: 0x18,
+    },
+    DipChoice {
+        label: "20K, 60K, Every 60K",
+        value: 0x20,
+    },
+    DipChoice {
+        label: "30K and 70K Only",
+        value: 0x28,
+    },
+    DipChoice {
+        label: "20K and 50K Only",
+        value: 0x30,
+    },
+    DipChoice {
+        label: "30K Only",
+        value: 0x38,
     },
 ];
 
@@ -1736,6 +1792,25 @@ mod tests {
         sys.set_dip_option(0, 2, 0xFF);
         assert_eq!(sys.dip_bank_value(0) & 0xC0, 0xC0);
         assert_eq!(sys.dip_bank_value(0) & !0xC0, 0x19);
+    }
+
+    /// The power-on Bonus Life switches (0x18) read as Table 1-1's 1-to-3-lives
+    /// schedule until Lives is 5, then as its 5-lives one.
+    #[test]
+    fn bonus_life_labels_follow_lives() {
+        let mut sys = DigDugSystem::new();
+        let bonus = &sys.dip_banks()[0].options[1];
+        let label = |bank: u8| {
+            bonus
+                .choices_for(bank)
+                .iter()
+                .find(|c| c.value == bank & bonus.mask)
+                .unwrap()
+                .label
+        };
+        assert_eq!(label(sys.dip_bank_value(0)), "20K and 60K Only");
+        sys.set_dip_option(0, 2, 0xC0);
+        assert_eq!(label(sys.dip_bank_value(0)), "20K Only");
     }
 
     // Drive the ER2055 EAROM the way the game ROM does: latch address+data at

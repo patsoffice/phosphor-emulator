@@ -811,6 +811,7 @@ const DKONG_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x03,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Bonus Life",
@@ -834,6 +835,7 @@ const DKONG_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x0C,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Coinage",
@@ -873,6 +875,7 @@ const DKONG_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x70,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Cabinet",
@@ -888,6 +891,7 @@ const DKONG_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x80,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

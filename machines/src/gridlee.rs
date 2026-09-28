@@ -1176,6 +1176,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x03,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Lives",
@@ -1199,6 +1200,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x0C,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Free Play",
@@ -1214,6 +1216,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x10,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Cabinet",
@@ -1229,6 +1232,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x20,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Reset Hall of Fame",
@@ -1244,6 +1248,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x40,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Reset Game Data",
@@ -1259,6 +1264,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x80,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

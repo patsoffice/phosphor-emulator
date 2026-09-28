@@ -279,6 +279,7 @@ pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x03,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Lives",
@@ -302,6 +303,7 @@ pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x0C,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Bonus Life",
@@ -325,6 +327,7 @@ pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x30,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Difficulty",
@@ -340,6 +343,7 @@ pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x40,
                 },
             ],
+            conditional: &[],
         },
         DipOption {
             name: "Ghost Names",
@@ -355,6 +359,7 @@ pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
                     value: 0x80,
                 },
             ],
+            conditional: &[],
         },
     ],
 }];

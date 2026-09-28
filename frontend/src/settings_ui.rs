@@ -374,8 +374,10 @@ pub fn draw_dip_panel(
                                         ui.label(name);
 
                                         let current = bank_value & opt.mask;
-                                        let selected_label = opt
-                                            .choices
+                                        // Labeled for the bank as it stands, so
+                                        // changing Lives relabels Bonus Life.
+                                        let choices = opt.choices_for(bank_value);
+                                        let selected_label = choices
                                             .iter()
                                             .find(|c| c.value == current)
                                             .map(|c| c.label)
@@ -384,7 +386,7 @@ pub fn draw_dip_panel(
                                         egui::ComboBox::from_id_salt(("dip", bank_idx, opt_idx))
                                             .selected_text(selected_label)
                                             .show_ui(ui, |ui| {
-                                                for choice in opt.choices {
+                                                for choice in choices {
                                                     if ui
                                                         .selectable_label(
                                                             choice.value == current,

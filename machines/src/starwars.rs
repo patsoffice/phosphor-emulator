@@ -2327,6 +2327,7 @@ const DSW0_FREEZE: DipOption = DipOption {
             value: 0x00,
         },
     ],
+    conditional: &[],
 };
 
 /// Star Wars DSW0 (10D): shields, difficulty, bonus shields, demo sounds.
@@ -2353,6 +2354,7 @@ const SW_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x03,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Difficulty",
@@ -2376,6 +2378,7 @@ const SW_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x0C,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Bonus Shields",
@@ -2399,6 +2402,7 @@ const SW_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x30,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Demo Sounds",
@@ -2414,6 +2418,7 @@ const SW_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x40,
             },
         ],
+        conditional: &[],
     },
     DSW0_FREEZE,
 ];
@@ -2444,6 +2449,7 @@ const ESB_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x03,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Difficulty",
@@ -2467,6 +2473,7 @@ const ESB_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x0C,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Jedi-Letter Mode",
@@ -2490,6 +2497,7 @@ const ESB_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x30,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Demo Sounds",
@@ -2507,6 +2515,7 @@ const ESB_DSW0_OPTIONS: &[DipOption] = &[
                 value: 0x40,
             },
         ],
+        conditional: &[],
     },
     DSW0_FREEZE,
 ];
@@ -2540,6 +2549,7 @@ const DSW1_OPTIONS: &[DipOption] = &[
                 value: 0x03,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Right Coin Mechanism",
@@ -2563,6 +2573,7 @@ const DSW1_OPTIONS: &[DipOption] = &[
                 value: 0x0C,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Left Coin Mechanism",
@@ -2578,6 +2589,7 @@ const DSW1_OPTIONS: &[DipOption] = &[
                 value: 0x10,
             },
         ],
+        conditional: &[],
     },
     DipOption {
         name: "Bonus Coin Adder",
@@ -2609,6 +2621,7 @@ const DSW1_OPTIONS: &[DipOption] = &[
                 value: 0xA0,
             },
         ],
+        conditional: &[],
     },
 ];
 

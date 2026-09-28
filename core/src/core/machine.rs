@@ -613,6 +613,25 @@ pub struct DipChoice {
     pub value: u8,
 }
 
+/// An alternate labeling of a [`DipOption`]'s choices, in force while other bits
+/// of the same bank hold a given value.
+///
+/// The hardware bits are the same either way; what changes is what the game
+/// makes of them. Galaga's bonus-life switches, for one, award a different
+/// schedule when the player begins with five fighters, and its manual prints
+/// the two schedules as two columns against one set of switch positions.
+#[derive(Clone, Copy, Debug)]
+pub struct DipCondition {
+    /// The bits of the bank byte this condition reads, normally another
+    /// option's `mask`.
+    pub mask: u8,
+    /// The value those bits must hold for `choices` to apply.
+    pub equals: u8,
+    /// The choices in force under this condition. They cover the same bit
+    /// patterns as the option's own `choices`, with different labels.
+    pub choices: &'static [DipChoice],
+}
+
 /// A single logical DIP setting within a bank (e.g. "Lives", "Difficulty").
 #[derive(Clone, Copy, Debug)]
 pub struct DipOption {
@@ -620,10 +639,26 @@ pub struct DipOption {
     pub name: &'static str,
     /// Which bits of the bank byte this option occupies.
     pub mask: u8,
-    /// The selectable values for this option.
+    /// The selectable values for this option, as labeled when no entry of
+    /// `conditional` applies.
     pub choices: &'static [DipChoice],
     /// When edits to this option take effect.
     pub apply: DipApplyTiming,
+    /// Alternate labelings that depend on other bits of the bank. Empty for
+    /// almost every option; the first entry whose condition holds wins.
+    pub conditional: &'static [DipCondition],
+}
+
+impl DipOption {
+    /// The choices in force for a live bank byte: those of the first
+    /// [`conditional`](Self::conditional) entry whose bits match, or the
+    /// option's own [`choices`](Self::choices) when none does.
+    pub fn choices_for(&self, bank_value: u8) -> &'static [DipChoice] {
+        self.conditional
+            .iter()
+            .find(|c| bank_value & c.mask == c.equals)
+            .map_or(self.choices, |c| c.choices)
+    }
 }
 
 /// Static metadata describing one physical DIP switch bank (a single byte).
@@ -859,6 +894,37 @@ impl<T> FrontendMachine for T where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An option relabels while its condition's bits hold, and falls back to
+    /// its own choices otherwise. Bits outside the condition's mask, including
+    /// the option's own, do not enter the match.
+    #[test]
+    fn choices_for_follows_the_condition() {
+        const PLAIN: &[DipChoice] = &[DipChoice {
+            label: "plain",
+            value: 0x01,
+        }];
+        const FIVE: &[DipChoice] = &[DipChoice {
+            label: "five",
+            value: 0x01,
+        }];
+        let opt = DipOption {
+            name: "Bonus",
+            mask: 0x01,
+            choices: PLAIN,
+            apply: DipApplyTiming::Immediate,
+            conditional: &[DipCondition {
+                mask: 0xC0,
+                equals: 0xC0,
+                choices: FIVE,
+            }],
+        };
+        assert_eq!(opt.choices_for(0x00)[0].label, "plain");
+        assert_eq!(opt.choices_for(0x80)[0].label, "plain");
+        assert_eq!(opt.choices_for(0xC0)[0].label, "five");
+        assert_eq!(opt.choices_for(0xC1)[0].label, "five");
+        assert_eq!(opt.choices_for(0x3F)[0].label, "plain");
+    }
 
     /// Smoke test: a type implementing `MachineCore` + all capability traits
     /// gets `FrontendMachine` via the blanket impl and coerces to the
