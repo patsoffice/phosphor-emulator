@@ -1221,14 +1221,12 @@ impl Renderable for DigDugSystem {
     fn render_frame(&self, buffer: &mut [u8]) {
         // Native RGB24 in row-major order; the ROT90 the cabinet needs is applied
         // centrally by the frontend (see `orientation`), not baked here.
-        let palette = &self.board.palette_rgb;
-        let mask = palette.len() - 1;
-        for (i, &idx) in self.native_buffer.iter().enumerate() {
-            let (r, g, b) = palette[idx as usize & mask];
-            buffer[i * 3] = r;
-            buffer[i * 3 + 1] = g;
-            buffer[i * 3 + 2] = b;
-        }
+        gfx::resolve_indexed_rows(
+            &self.native_buffer,
+            288,
+            |_| &self.board.palette_rgb[..],
+            buffer,
+        );
     }
 
     fn orientation(&self) -> phosphor_core::core::machine::Orientation {

@@ -14,7 +14,9 @@
 /// down the screen affects only the rows below it.
 ///
 /// The index is masked with `palette.len() - 1`, so a palette whose length is
-/// not a power of two will alias. Every caller so far has 16 or 64 entries.
+/// not a power of two will alias. Every caller so far has 16, 32, 64, 128 or
+/// 256 entries. A board with one palette for the whole frame passes `|_|` and
+/// the same slice for every row.
 pub fn resolve_indexed_rows<'p, F>(
     indices: &[u8],
     width: usize,
