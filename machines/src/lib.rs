@@ -658,6 +658,7 @@ pub mod asteroids_sound;
 pub mod atari_avg;
 pub mod atari_dvg;
 pub mod atari_jsa;
+pub mod atari_regulator_audio;
 pub mod atari_system1;
 pub mod atari_system1_sound;
 pub mod btime;

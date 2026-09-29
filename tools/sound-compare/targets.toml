@@ -1295,10 +1295,16 @@ sheet. phosphor-emulator-2u1j."""
 [[target]]
 id = "missile-output"
 machines = ["missile"]
-status = "missing"
+status = "partial"
 notes = """
-EXAMINED. Off `unexamined` as `missing`: the model applies a shared `DcBlocker`
-and a scale, and the board's whole analog path is absent.
+MODELED under phosphor-emulator-hd8n: POKEY's open-drain output against R38 10k
+and C70 0.1 uF (device conductances from the POKEY data sheet, so the corner
+moves with level), then the Regulator/Audio II amplifier's three stages in
+`atari_regulator_audio.rs`. The follower and the two inverters are a scale. Not
+modeled: the second speaker channel (the pair is antiphase, and how the cabinet
+wires the speakers is phosphor-emulator-fuqb.2) and the TDA2002A's clipping.
+
+What follows is the reading that row was built from.
 
 POKEY pin 37 sits on R38 10k to +5V and C70 0.1 uF to ground, a low-pass. Then
 N10 LM324 section a as a unity follower (pin 6 tied to pin 7; C75 is across the
@@ -1312,9 +1318,8 @@ where each channel is a 1k-against-11k divider (-20.8 dB), a C6 0.22 uF coupling
 a TDA2002A at 1 + 220/10 = 23, a Boucherot cell, and a 1000 uF output coupling
 into its own speaker: 19.9 Hz for a nominal 8 ohms. TWO SPEAKERS.
 
-The `DcBlocker` here does correspond to a real part, C6 and C15, but they are on
-the Regulator/Audio II board; the comment in `missile_command.rs` reads as though
-the capacitor were on the game PCB, and it is not.
+C6 and C15, the input couplings, are on the Regulator/Audio II board, not the
+game PCB, and are now modeled there with the rest of the amplifier.
 
 Transcribed with Tempest at docs/schematics/atari-pokey-audio-output.md. Tracked
 as phosphor-emulator-hd8n. The schematics are a Drawing Package Supplement
@@ -1457,10 +1462,16 @@ manual and are not a stable way to name one. phosphor-emulator-cg2f."""
 [[target]]
 id = "tempest-output"
 machines = ["tempest"]
-status = "missing"
+status = "partial"
 notes = """
-EXAMINED. Off `unexamined` as `missing`: `(pokey1 + pokey2) * 0.5` and nothing
-else, no filter and no DC removal.
+MODELED under phosphor-emulator-hd8n: each POKEY's open-drain output against
+10k and 0.015 uF, the 1:1 sum, and the Regulator/Audio II amplifier (rev E, C9
+3300 uF) in `atari_regulator_audio.rs`, whose input coupling is what removes
+AUD+'s DC. Not modeled: the AUD- leg with its C27 coupling and the second
+speaker (how the cabinet wires them is phosphor-emulator-fuqb.2) and the
+TDA2002A's clipping.
+
+What follows is the reading that row was built from.
 
 Both POKEYs are on the auxiliary PCB, at B/C2 and C/D2. Each pin 37 sits on 10k
 to +5V and 0.015 uF mylar to ground. MISSILE COMMAND'S SAME NETWORK USES 0.1 uF,
@@ -1471,8 +1482,7 @@ second time this sweep has found that.
 The two are summed passively through equal R32/R33 330k into R34 22k, then K6
 LM324 section a amplifies by 1 + 100k/10k = 11, giving AUD+; section b inverts it
 through C27 0.1 uF and R35 100k, giving AUD-. Antiphase pair, two speakers, and
-the model is mono. THE MODEL HAS NO DC REMOVAL where the board has C27 and the
-0.22 uF at each amplifier input.
+the model is mono.
 
 CONFIRMED RATHER THAN REFUTED: the equal 330k legs mean the two POKEYs are
 weighted 1:1, which is what `* 0.5` encodes. The board's factor is 0.647 per

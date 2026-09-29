@@ -18,7 +18,8 @@
 //! output pair and the two TDA2002A channels driving two speakers. See
 //! `phosphor-emulator-hd8n`.
 
-use phosphor_core::audio::{DcBlocker, SampleRing};
+use crate::atari_regulator_audio::{C9_REV_B, RegulatorAudioII};
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -325,6 +326,8 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
 #[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
+// 15 was the generic DC blocker that `amp` (16) replaced.
+#[save_retired(15)]
 pub struct MissileCommandBoard {
     #[debug_device("POKEY")]
     #[save(id = 1)]
@@ -424,16 +427,15 @@ pub struct MissileCommandBoard {
     /// next frame refills.
     #[save_skip(default = SampleRing::with_capacity(1024))]
     audio_buffer: SampleRing<i16>,
-    /// The output coupling capacitor. POKEY's output is unipolar and sits at
-    /// zero when idle, so it needs the DC removed rather than a fixed midpoint
-    /// subtracted — see [`DcBlocker`].
-    ///
-    /// The capacitor this stands for is C6 and C15 on the Regulator/Audio II
-    /// PCB, not anything on the game PCB: the path from POKEY pin 37 to the
+    /// The Regulator/Audio II PCB's amplifier, rev B. POKEY's output is
+    /// unipolar and sits at zero when idle, and the path from pin 37 to the
     /// AUDIO1 and AUDIO2 connector pins is DC-coupled throughout, on op-amps
-    /// running split supplies with their non-inverting inputs at ground.
-    #[save(id = 15)]
-    dc_blocker: DcBlocker,
+    /// running split supplies with their non-inverting inputs at ground. So the
+    /// DC comes out here, at C6, along with the gain network's low shelf and
+    /// C9's coupling into the speaker. This replaced a generic DC blocker
+    /// saved under id 15.
+    #[save(id = 16)]
+    amp: RegulatorAudioII,
 }
 
 /// Atari Missile Command (1980): a 6502 beside the board it drives.
@@ -544,7 +546,7 @@ impl MissileCommandBoard {
             scanline_buffer: vec![0u8; 256 * 231 * 3],
             scanline_buffer_valid: false,
             audio_buffer: SampleRing::with_capacity(1024),
-            dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            amp: RegulatorAudioII::new(C9_REV_B, phosphor_core::audio::host_sample_rate()),
         };
         board.pokey.set_output_network(MISSILE_POKEY_LOAD);
         board.refresh_dip_pots();
@@ -1123,19 +1125,20 @@ impl MachineCore for MissileCommandSystem {
         // Drain POKEY's resampled f32 buffer and convert to i16 PCM.
         //
         // POKEY's output is how far pin 37 sits below +5 V, unipolar and zero
-        // when idle, so the board's coupling capacitor is what centers it.
+        // when idle, so the amplifier board's coupling is what centers it.
         // Subtracting a fixed 0.5 instead (as this once did) mapped silence to
         // -32767 and pinned the output at the rail for the whole attract mode.
-        // Dividing by the full drop makes every device on read 1.0, and the
-        // coupling's output of a signal in [0, 1] stays inside [-1, 1], so
-        // nothing after it can clip. This used to double the level to make up
-        // for the linear mix, where one channel at full volume was a quarter of
-        // full scale; through the real open-drain devices it is most of it.
+        // Dividing by the full drop makes every device on read 1.0, with the
+        // amplifier at unity in the band. This used to double the level to
+        // make up for the linear mix, where one channel at full volume was a
+        // quarter of full scale; through the real open-drain devices it is
+        // most of it. Cascaded couplings can overshoot their input, so the
+        // clamp stays as a guard.
         let samples = self.board.pokey.drain_audio();
         let full = MISSILE_POKEY_LOAD.full_drop_v() as f32;
-        let blocker = &mut self.board.dc_blocker;
+        let amp = &mut self.board.amp;
         self.board.audio_buffer.extend(samples.iter().map(|&s| {
-            (blocker.process(s / full) * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            (amp.process(s / full) * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));
     }
 
@@ -1148,7 +1151,7 @@ impl MachineCore for MissileCommandSystem {
         self.board.scanline_buffer.fill(0);
         self.board.scanline_buffer_valid = false;
         self.board.audio_buffer.clear();
-        self.board.dc_blocker.reset();
+        self.board.amp.reset();
         // The pots are wiring, not state: a reset must leave the DIP switches
         // still driving them, exactly as the cabinet's do.
         self.board.refresh_dip_pots();

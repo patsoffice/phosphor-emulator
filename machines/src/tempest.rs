@@ -20,7 +20,8 @@
 //! with a coupling capacitor in one leg, and two TDA2002A channels driving two
 //! speakers. See `phosphor-emulator-hd8n`.
 
-use phosphor_core::audio::{DcBlocker, SampleRing};
+use crate::atari_regulator_audio::{C9_REV_E, RegulatorAudioII};
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -293,6 +294,8 @@ pub struct TempestIo {
 // Bumped to 3 by the move to field TLV.
 #[save_version(3)]
 #[save_tlv]
+// 4 was a generic DC blocker that `amp` (5) replaced.
+#[save_retired(4)]
 pub struct TempestSystem {
     #[debug_cpu("M6502")]
     #[save(id = 1)]
@@ -309,13 +312,12 @@ pub struct TempestSystem {
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
 
-    /// The amplifier board's input coupling, C6 and C15 on the Regulator/Audio
-    /// II PCB, the same part Missile Command's blocker stands for. The game
-    /// board has none on `AUD+`: with both pins resting at +5 V the passive sum
-    /// and the gain of 11 idle it near 6.5 V, and without this the model
-    /// carried that offset to the speaker.
-    #[save(id = 4)]
-    dc_blocker: DcBlocker,
+    /// The Regulator/Audio II PCB's amplifier, rev E, the same board Missile
+    /// Command drives. The game board has no coupling on `AUD+`: with both pins
+    /// resting at +5 V the passive sum and the gain of 11 idle it near 6.5 V,
+    /// and the amplifier's input coupling C6 is what removes it.
+    #[save(id = 5)]
+    amp: RegulatorAudioII,
 }
 
 /// Each POKEY's pin 37 load: 10k to +5 V and 0.015 uF mylar to ground, R4/C10
@@ -415,7 +417,7 @@ impl TempestSystem {
                 spinner: new_spinner(),
             },
             audio_buffer: SampleRing::with_capacity(2048),
-            dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            amp: RegulatorAudioII::new(C9_REV_E, phosphor_core::audio::host_sample_rate()),
         }
     }
 
@@ -761,14 +763,14 @@ impl MachineCore for TempestSystem {
         // then a gain of 11, which is 0.647 per POKEY at `AUD+`. That factor is
         // a scale and cancels here: dividing by both chips' full drop makes
         // every device on both read 1.0, the same full scale as Missile
-        // Command's. The coupling's output of a signal in [0, 1] stays inside
-        // [-1, 1], so nothing after it can clip.
+        // Command's, with the amplifier at unity in the band. Cascaded
+        // couplings can overshoot their input, so the clamp stays as a guard.
         let samples1 = self.io.pokey1.drain_audio();
         let samples2 = self.io.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
         let full = 2.0 * TEMPEST_POKEY_LOAD.full_drop_v() as f32;
         for i in 0..len {
-            let mixed = self.dc_blocker.process((samples1[i] + samples2[i]) / full);
+            let mixed = self.amp.process((samples1[i] + samples2[i]) / full);
             self.audio_buffer
                 .push((mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
@@ -785,7 +787,7 @@ impl MachineCore for TempestSystem {
         self.io.mathbox.reset();
         self.io.pokey1.reset();
         self.io.pokey2.reset();
-        self.dc_blocker.reset();
+        self.amp.reset();
         self.io.earom.reset();
         self.io.player_select = false;
         self.io.outlatch = 0;
