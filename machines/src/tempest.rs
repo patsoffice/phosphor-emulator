@@ -14,13 +14,13 @@
 //! The audio path is transcribed with Missile Command's, which shares the
 //! amplifier board, in
 //! [`docs/schematics/atari-pokey-audio-output.md`](../../docs/schematics/atari-pokey-audio-output.md).
-//! The `* 0.5` below is the board's 1:1 weighting, confirmed: the two POKEYs
-//! reach one node through equal 330k legs. What is NOT modelled is everything
-//! else: a 10k/0.015 uF load network per POKEY, a gain of 11, an antiphase
-//! output pair with a coupling capacitor in one leg, and two TDA2002A channels
-//! driving two speakers. See `phosphor-emulator-hd8n`.
+//! Modeled: each POKEY's open-drain output against its 10k/0.015 uF load, the
+//! board's 1:1 sum (the two POKEYs reach one node through equal 330k legs), and
+//! the amplifier board's input coupling. Not yet: the antiphase output pair
+//! with a coupling capacitor in one leg, and two TDA2002A channels driving two
+//! speakers. See `phosphor-emulator-hd8n`.
 
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -34,7 +34,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::Er2055;
 use phosphor_core::device::Mathbox;
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyOutputNetwork};
 use phosphor_macros::{BusDebug, Saveable};
 
 use crate::atari_avg::{self, AtariAvgBoard, Region};
@@ -308,7 +308,25 @@ pub struct TempestSystem {
     // Audio buffer from dual POKEYs
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
+
+    /// The amplifier board's input coupling, C6 and C15 on the Regulator/Audio
+    /// II PCB, the same part Missile Command's blocker stands for. The game
+    /// board has none on `AUD+`: with both pins resting at +5 V the passive sum
+    /// and the gain of 11 idle it near 6.5 V, and without this the model
+    /// carried that offset to the speaker.
+    #[save(id = 4)]
+    dc_blocker: DcBlocker,
 }
+
+/// Each POKEY's pin 37 load: 10k to +5 V and 0.015 uF mylar to ground, R4/C10
+/// for `POKAU1` and R3/C9 for `POKAU2`. A capacitor 6.7 times smaller than
+/// Missile Command's, so the corner runs from 1061 Hz with the chip silent to
+/// about 20 kHz with every device on.
+const TEMPEST_POKEY_LOAD: PokeyOutputNetwork = PokeyOutputNetwork {
+    pullup_ohms: 10_000.0,
+    supply_v: 5.0,
+    load_farads: 0.015e-6,
+};
 
 /// The bus the 6502 sees: the shared AVG board plus Tempest's own I/O, borrowed
 /// disjointly from the machine so the CPU can execute against a concrete type.
@@ -374,13 +392,18 @@ impl TempestSystem {
     }
 
     pub fn new() -> Self {
+        let pokey = || {
+            let mut p = Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate());
+            p.set_output_network(TEMPEST_POKEY_LOAD);
+            p
+        };
         Self {
             cpu: M6502::new(),
             board: AtariAvgBoard::new(Self::build_map(), 580, 570),
             io: TempestIo {
                 mathbox: Mathbox::new(),
-                pokey1: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
-                pokey2: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
+                pokey1: pokey(),
+                pokey2: pokey(),
                 earom: Er2055::new(),
                 in0: 0xFF,  // coins/tilt/test all active-LOW, default released = all 1s
                 in1: 0xF0,  // spinner bits 0-3 = 0, bit 4 = cabinet upright, bits 5-7 unused (1)
@@ -392,6 +415,7 @@ impl TempestSystem {
                 spinner: new_spinner(),
             },
             audio_buffer: SampleRing::with_capacity(2048),
+            dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
         }
     }
 
@@ -732,17 +756,21 @@ impl MachineCore for TempestSystem {
 
         // Mix dual POKEY audio.
         //
-        // The 1:1 weighting is the board's: R32 and R33 are both 330k into R34
-        // 22k. Its absolute factor is 0.647 per POKEY rather than 0.5, but
-        // nothing here calibrates an output level. Everything else the board
-        // does between these two chips and the speakers is missing; see the
-        // module header.
+        // Each POKEY's output is how far its pin 37 sits below +5 V. The 1:1
+        // weighting is the board's: R32 and R33 are both 330k into R34 22k,
+        // then a gain of 11, which is 0.647 per POKEY at `AUD+`. That factor is
+        // a scale and cancels here: dividing by both chips' full drop makes
+        // every device on both read 1.0, the same full scale as Missile
+        // Command's. The coupling's output of a signal in [0, 1] stays inside
+        // [-1, 1], so nothing after it can clip.
         let samples1 = self.io.pokey1.drain_audio();
         let samples2 = self.io.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
+        let full = 2.0 * TEMPEST_POKEY_LOAD.full_drop_v() as f32;
         for i in 0..len {
-            let mixed = (samples1[i] + samples2[i]) * 0.5;
-            self.audio_buffer.push((mixed * 32767.0) as i16);
+            let mixed = self.dc_blocker.process((samples1[i] + samples2[i]) / full);
+            self.audio_buffer
+                .push((mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
 
         // Watchdog
@@ -757,6 +785,7 @@ impl MachineCore for TempestSystem {
         self.io.mathbox.reset();
         self.io.pokey1.reset();
         self.io.pokey2.reset();
+        self.dc_blocker.reset();
         self.io.earom.reset();
         self.io.player_select = false;
         self.io.outlatch = 0;

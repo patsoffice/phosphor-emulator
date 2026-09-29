@@ -13,8 +13,9 @@
 //! The audio path is transcribed with Tempest's, which shares the amplifier
 //! board, in
 //! [`docs/schematics/atari-pokey-audio-output.md`](../../docs/schematics/atari-pokey-audio-output.md).
-//! None of it is modelled: a 10k/0.1 uF load network at the POKEY, a follower,
-//! an antiphase output pair, and two TDA2002A channels driving two speakers. See
+//! Modeled: the POKEY's open-drain output against R38 10k to +5 V and C70
+//! 0.1 uF, and the amplifier board's input coupling. Not yet: the antiphase
+//! output pair and the two TDA2002A channels driving two speakers. See
 //! `phosphor-emulator-hd8n`.
 
 use phosphor_core::audio::{DcBlocker, SampleRing};
@@ -31,7 +32,7 @@ use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::cpu::state::M6502State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyOutputNetwork};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::rom_loader::{RomEntry, RomRegion};
@@ -505,6 +506,16 @@ impl MissileCommandSystem {
     }
 }
 
+/// POKEY pin 37's load: R38 10k to +5 V and C70 0.1 uF to ground. The
+/// capacitor sees the pull-up and whatever the volume bits have switched on in
+/// parallel, so its corner runs from 159 Hz with the chip silent to about
+/// 3 kHz with every device on; see `Pokey::set_output_network`.
+const MISSILE_POKEY_LOAD: PokeyOutputNetwork = PokeyOutputNetwork {
+    pullup_ohms: 10_000.0,
+    supply_v: 5.0,
+    load_farads: 0.1e-6,
+};
+
 impl MissileCommandBoard {
     pub fn new() -> Self {
         let mut board = Self {
@@ -535,6 +546,7 @@ impl MissileCommandBoard {
             audio_buffer: SampleRing::with_capacity(1024),
             dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
         };
+        board.pokey.set_output_network(MISSILE_POKEY_LOAD);
         board.refresh_dip_pots();
         board
     }
@@ -1110,15 +1122,20 @@ impl MachineCore for MissileCommandSystem {
 
         // Drain POKEY's resampled f32 buffer and convert to i16 PCM.
         //
-        // POKEY's output is unipolar [0.0, 1.0] and sits at *zero* when idle,
-        // not at half scale, so the board's coupling capacitor is what centres
-        // it. Subtracting a fixed 0.5 instead — as this did — mapped silence to
+        // POKEY's output is how far pin 37 sits below +5 V, unipolar and zero
+        // when idle, so the board's coupling capacitor is what centers it.
+        // Subtracting a fixed 0.5 instead (as this once did) mapped silence to
         // -32767 and pinned the output at the rail for the whole attract mode.
-        // The ×2 restores the level that centring on 0.5 was reaching for.
+        // Dividing by the full drop makes every device on read 1.0, and the
+        // coupling's output of a signal in [0, 1] stays inside [-1, 1], so
+        // nothing after it can clip. This used to double the level to make up
+        // for the linear mix, where one channel at full volume was a quarter of
+        // full scale; through the real open-drain devices it is most of it.
         let samples = self.board.pokey.drain_audio();
+        let full = MISSILE_POKEY_LOAD.full_drop_v() as f32;
         let blocker = &mut self.board.dc_blocker;
         self.board.audio_buffer.extend(samples.iter().map(|&s| {
-            (blocker.process(s) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            (blocker.process(s / full) * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));
     }
 

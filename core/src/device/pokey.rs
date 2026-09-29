@@ -806,6 +806,18 @@ pub struct PokeyOutputNetwork {
     pub load_farads: f64,
 }
 
+impl PokeyOutputNetwork {
+    /// How far pin 37 sits below its supply with every device on, all four
+    /// channels at volume 15: the output's largest possible value. A board
+    /// that scales the output into its own units divides by this, so that
+    /// full scale means the same thing the linear mix's 1.0 did.
+    pub fn full_drop_v(&self) -> f64 {
+        let g_up = 1.0 / self.pullup_ohms;
+        let g_all = 4.0 * AUD_VOLUME_CONDUCTANCE[15];
+        self.supply_v - self.supply_v * g_up / (g_up + g_all)
+    }
+}
+
 /// Pin 37's four open-drain devices, from the data sheet: POKEY C012294 rev B,
 /// sheet 27, "D.C. and Operating Characteristics", AUDIO OUTPUT (MULTIPLE OPEN
 /// DRAIN OUTPUT). Each volume bit's device, on alone with a 10k pull-up to
