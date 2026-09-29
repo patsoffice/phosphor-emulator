@@ -120,7 +120,8 @@ channel 1 designators and Tempest's in the same positions:
 | out | J8, `SPKR 1` with its own `SPKR 1 RTN` |
 
 Channel 2 is the same with R13, R28, C15, C16, Q7, R21, R20, C12, R22, C14, C11,
-R19, C10, `SPKR 2`. **Both games drive two speakers**, and both models are mono.
+R19, C10, `SPKR 2`. Two amplifier channels, and both models are mono; the next
+section is why that is right.
 
 Two arithmetic consequences worth having:
 
@@ -138,6 +139,126 @@ of ten." The feedback network as drawn gives 23, and R11 is confirmed as 10 ohm
 by Tempest's parts list as well as by both schematics. The discrepancy is
 recorded, not resolved.
 
+## How the cabinet wires the speaker
+
+Read for `phosphor-emulator-fuqb.2`, 2026-09-29.
+
+| | |
+|---|---|
+| Drawing | `Tempest Upright Wiring Diagram`, 037774-01 rev A, sheet 1 side B of Tempest's package: `gauck.com` file above, PDF p2 |
+| Drawing | `Game Wiring Diagram`, 036294-01 rev A (cabaret) and 036455-01 rev A (sit-down), Missile Command's supplement, PDF p60 |
+| Parts | Volume control 19-9032, `50-Ohm, 12½-Watt, Wirewound Rheostat`: cocktail Missile Command's Figure 15 parts list, PDF p56. The same part number is the volume control in cabaret Missile Command's list (PDF p46) and Tempest's (manual PDF p37) |
+
+**All three cabinets bridge one speaker across the amplifier's two outputs.**
+The harness takes only J8 pins 3 (`SPKR 2`) and 4 (`SPKR 1`); pins 1 and 2, the
+two returns, are not wired. Traced on each drawing:
+
+- `SPKR 1` goes to one end of the volume rheostat R1. Wire color OR on Tempest,
+  BN/W on Missile Command.
+- `SPKR 2` goes to the rheostat's other end **and** to the speaker's W terminal.
+  Wire color W on both.
+- The rheostat's wiper goes to the speaker's BN terminal.
+
+So the speaker sits across the two outputs, shunted by the part of R1 between
+the wiper and `SPKR 2`, in series with the rest. At full volume it is across
+the pair directly, with the 50 ohm rheostat in parallel. On Tempest the path runs
+through P32/J32 and P31/J31 pins 4 and 5 to `LS SPEAKER`. On Missile Command's
+cabaret it runs straight to `SPEAKER LS1`. On the sit-down, the wiper and `SPKR 2`
+leave through J34 pins 11 and 12, and the scan is cropped at the right edge
+before the speaker, but the rheostat's wiring is the same.
+
+Which input feeds which channel does not matter to the result, but for the
+record: Tempest's harness takes the auxiliary board's `AUDIO +` (W) to J7 pin 8,
+`AUDIO 2 IN`, and `AUDIO -` (BN) to J7 pin 9, `AUDIO 1 IN`.
+
+What it means for the model:
+
+- **The antiphase pair is heard in phase.** The speaker sees the difference of
+  the two channels, and the two carry the signal inverted, so the difference is
+  twice either one. A mono model is right up to a scale; this is a bridge, not a
+  cancellation.
+- **Missile Command's two legs are identical** (two DC-coupled unity
+  inverters), so for it the bridge is exactly a scale.
+- **Tempest's are not.** Only `AUD-` passes through C27 0.1 uF into R35 100k, so
+  the speaker hears `AUD+` plus `AUD+` high-passed at 15.9 Hz. The model now sums
+  those two before the amplifier, which is exact because the channels are
+  identical and linear.
+- **The output coupling is not what the C9 stage models.** In a bridge the
+  speaker current runs out of one channel through its C9, through the rheostat
+  and speaker, and back through the other channel's C10, so the two capacitors
+  are in series. The load is the speaker with the rheostat's shunt section
+  across it. At full volume that gives about 26 Hz on Tempest (1650 uF into its
+  4 ohm speaker in parallel with 50 ohm) and about 46 Hz on Missile Command's
+  cabaret (500 uF into 8 ohm in parallel with 50 ohm), against the 6.0 Hz and
+  19.9 Hz modeled. The corner also falls as the volume is turned down, since the
+  series section of R1 adds to the loop. Not changed: see the measurements
+  below.
+
+The speakers themselves, from the parts lists: Tempest's upright has one 6 x 9
+inch 4 ohm 15 W oval (manual PDF p50). Missile Command's cabaret lists a 5 inch
+8 ohm 5 W speaker (PDF p46), and the cocktail a 4 inch 16 ohm 4 W one (PDF p56).
+**Missile Command's upright has two**, in the attraction panel (`Figure 17
+Signal Distribution`, PDF p24; `Figure 19`, PDF p28, 5 inch 8 ohm 5 W), behind
+the same single volume control, and its wiring diagram is not in this package.
+Whether its two speakers are in series or in parallel across the bridge is
+therefore not established; it moves the C9 corner (roughly 26 Hz in series,
+86 Hz in parallel, at full volume) but not the phase.
+
+Measured over the recorded movies (`disasm audiodiff`), against the tree before
+this change:
+
+| change | game | 0-150 Hz share | RMS | peak | clipped |
+|---|---|---|---|---|---|
+| C27 in the `AUD-` leg (landed) | Tempest | 23.6 to 22.3 % | -0.06 dB | -3.45 dBFS | 0 |
+| bridged C9 loop at full volume (experiment, reverted) | Tempest | 22.3 to 19.7 % | -0.14 dB | -3.73 dBFS | 0 |
+| bridged C9 loop, cabaret figures (experiment, reverted) | Missile Command | 30.5 to 24.3 % | -0.50 dB | -3.20 dBFS | 0 |
+
+"Clipped 0" in that table is the emulator's i16 output, not the amplifier. The
+next section is the amplifier.
+
+## How far the amplifier can swing
+
+From Fairchild's `TDA2002 / TDA2002A` data sheet, pages 4-262 to 4-264 (a
+9-page copy from alldatasheet). Figures, not specified limits:
+
+- **Fig. 1, quiescent output against supply**: about 5.1 V at 10.3 V, so the
+  output idles at mid-rail and clips about symmetrically.
+- **Fig. 4, output power against load at 10 % THD**, the 11 V curve: about
+  1.8 W at 8 ohm, 1.2 W at 12 ohm and 0.9 W at 16 ohm. All three are the same
+  5.4 V equivalent sine peak, so at those loads the limit is voltage, not
+  current.
+- A sine clipped hard enough to reach 10 % THD has a fundamental 1.13 times its
+  clip level, so that is a **clip level of about 4.75 V peak on 11 V into 8 ohm
+  or more**: 0.75 V short of half the supply.
+- Heavier loads lose more, from the 14.4 V table rows the same way: about 1.5 V
+  short at 4 ohm (5.2 W) and 2.2 V at 2 ohm (8 W).
+
+Carried to 10.3 V by keeping those losses against the 5.1 V quiescent, which is
+an assumption: about 4.4 V peak at light load, 3.6 V at 4 ohm, 2.9 V at 2 ohm.
+In the bridge each amplifier drives half the loop's load, so at full volume
+Tempest's amplifiers each see about 1.85 ohm and Missile Command's cabaret's
+about 3.45 ohm.
+
+What the game boards can ask of it: every POKEY device on pulls pin 37 down by
+about 4.75 V, the model's full scale. Through the board's 23/11, one model unit
+is **9.9 V at a Missile Command amplifier output and 12.9 V at a Tempest one**
+(Tempest's sum gives each POKEY 0.647 and a unit spans both). Against the
+recorded movies, whose output is the model's units scaled to i16:
+
+| game | movie peak | clip case | clip level | samples over |
+|---|---|---|---|---|
+| Missile Command | 7.2 V | light load | 4.4 V | 0.25 % |
+| Missile Command | | cabaret, full volume | 3.6 V | 0.65 % |
+| Missile Command | | upright if its speakers are paralleled | 2.9 V | 1.4 % |
+| Tempest | 8.6 V | light load | 4.4 V | 0.59 % |
+| Tempest | | full volume | 2.9 V | 5.0 % |
+
+So **both amplifiers clip on the movies' loud passages**, and Tempest's does so
+often at full volume. The clip level depends on the volume setting, through the
+rheostat's share of the load, not on the gain. The POKEY conductances are the
+data sheet's weakest-part limits, so a real chip asks for more swing, not less.
+Not modeled yet.
+
 ## What it establishes
 
 - Both games' analog paths are entirely unmodelled. These are `missing` rows, not
@@ -146,8 +267,9 @@ recorded, not resolved.
   0.015 uF on the same 10 k. Whatever corner that sets, Missile Command's is far
   lower than Tempest's, and both are modelled as no filter at all. Same family,
   different law, which is the second time this sweep has found that.
-- Both boards emit an antiphase pair into two independent TDA2002A channels and
-  two speakers.
+- Both boards emit an antiphase pair into two independent TDA2002A channels,
+  and every cabinet wiring diagram read bridges one speaker across the two
+  outputs, so the pair is heard in phase.
 - Tempest's model has **no DC removal of any kind**, where the board has C27
   0.1 uF in the inverting leg and C6 or C15 0.22 uF at each amplifier input.
 - Missile Command's `DcBlocker` does correspond to a real part, C6 and C15, but
@@ -169,9 +291,12 @@ recorded, not resolved.
 - **The corner of C6, the amplifier's input coupling.** It works against the
   divider's 909 ohms in series with the TDA2002A's input impedance, and the
   latter is not on the sheet.
-- **Whether the two speakers are wired in phase in the cabinet.** The two channels
-  carry the same signal inverted; how the cabinet connects them was not traced,
-  and it decides whether the antiphase is heard as a bridge or as cancellation.
+- **How Missile Command's upright wires its two speakers.** The cabaret,
+  sit-down and Tempest upright diagrams all bridge one speaker (see above); the
+  upright's diagram is not in the package read.
+- **The TDA2002A's exact clip level on +10.3 V.** The Fairchild data sheet
+  gives it only as power at 10 % THD on 8, 11, 14.4 and 16 V curves; the figures
+  in the next section are read off those, not specified.
 - **What Tempest's rev E changes besides the output capacitor.** Only the audio
   half of each revision was compared, and only for values, not for topology
   outside the table above.

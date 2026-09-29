@@ -1300,9 +1300,17 @@ notes = """
 MODELED under phosphor-emulator-hd8n: POKEY's open-drain output against R38 10k
 and C70 0.1 uF (device conductances from the POKEY data sheet, so the corner
 moves with level), then the Regulator/Audio II amplifier's three stages in
-`atari_regulator_audio.rs`. The follower and the two inverters are a scale. Not
-modeled: the second speaker channel (the pair is antiphase, and how the cabinet
-wires the speakers is phosphor-emulator-fuqb.2) and the TDA2002A's clipping.
+`atari_regulator_audio.rs`. The follower and the two inverters are a scale.
+
+MONO IS RIGHT (phosphor-emulator-fuqb.2): the cabaret and sit-down wiring
+diagrams (PDF p60) bridge one speaker across J8's SPKR 1 and SPKR 2 through the
+50 ohm volume rheostat, returns unconnected, so the antiphase pair is heard in
+phase, and its two legs are identical, so the bridge is a scale. The upright's
+two speakers are behind the same single volume control, but its wiring diagram
+is not in the package. Not modeled: the bridged output coupling (the two
+1000 uF capacitors in series into the speaker and rheostat, about 46 Hz at full
+volume on the cabaret's 8 ohm against the 19.9 Hz modeled) and the TDA2002A's
+clipping.
 
 What follows is the reading that row was built from.
 
@@ -1467,9 +1475,15 @@ notes = """
 MODELED under phosphor-emulator-hd8n: each POKEY's open-drain output against
 10k and 0.015 uF, the 1:1 sum, and the Regulator/Audio II amplifier (rev E, C9
 3300 uF) in `atari_regulator_audio.rs`, whose input coupling is what removes
-AUD+'s DC. Not modeled: the AUD- leg with its C27 coupling and the second
-speaker (how the cabinet wires them is phosphor-emulator-fuqb.2) and the
-TDA2002A's clipping.
+AUD+'s DC.
+
+MONO IS RIGHT (phosphor-emulator-fuqb.2): the upright wiring diagram 037774-01
+(PDF p2) bridges its one 4 ohm speaker across J8's SPKR 1 and SPKR 2 through the
+50 ohm volume rheostat, returns unconnected, so AUD+ and AUD- are heard in
+phase. AUD- alone carries C27 0.1 uF into R35 100k, now modeled as a 15.9 Hz
+high-pass on that leg of the sum. Not modeled: the bridged output coupling (the
+two 3300 uF capacitors in series into the speaker and rheostat, about 26 Hz at
+full volume against the 6.0 Hz modeled) and the TDA2002A's clipping.
 
 What follows is the reading that row was built from.
 

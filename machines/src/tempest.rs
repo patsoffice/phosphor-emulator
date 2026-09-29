@@ -16,12 +16,13 @@
 //! [`docs/schematics/atari-pokey-audio-output.md`](../../docs/schematics/atari-pokey-audio-output.md).
 //! Modeled: each POKEY's open-drain output against its 10k/0.015 uF load, the
 //! board's 1:1 sum (the two POKEYs reach one node through equal 330k legs), and
-//! the amplifier board's input coupling. Not yet: the antiphase output pair
-//! with a coupling capacitor in one leg, and two TDA2002A channels driving two
-//! speakers. See `phosphor-emulator-hd8n`.
+//! the amplifier board, and the antiphase output pair with C27 in the `AUD-`
+//! leg. The upright cabinet (wiring diagram 037774-01, PDF p2) bridges its one
+//! speaker across the amplifier's two outputs through the volume rheostat, so
+//! the pair is heard in phase and one mono channel is the right model.
 
 use crate::atari_regulator_audio::{C9_REV_E, RegulatorAudioII};
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -318,7 +319,18 @@ pub struct TempestSystem {
     /// and the amplifier's input coupling C6 is what removes it.
     #[save(id = 5)]
     amp: RegulatorAudioII,
+
+    /// C27 0.1 uF into R35 100k at the `AUD-` inverter's virtual ground, a
+    /// high-pass at 15.9 Hz on that leg alone. The cabinet bridges one speaker
+    /// across the amplifier's two outputs, so the speaker hears `AUD+` and the
+    /// inverted `AUD-` in phase, and this coupling reaches it.
+    #[save(id = 6)]
+    aud_minus_coupling: DcBlocker,
 }
+
+/// C27 and R35, the coupling into the `AUD-` inverter.
+const C27: f64 = 0.1e-6;
+const R35: f64 = 100_000.0;
 
 /// Each POKEY's pin 37 load: 10k to +5 V and 0.015 uF mylar to ground, R4/C10
 /// for `POKAU1` and R3/C9 for `POKAU2`. A capacitor 6.7 times smaller than
@@ -418,6 +430,10 @@ impl TempestSystem {
             },
             audio_buffer: SampleRing::with_capacity(2048),
             amp: RegulatorAudioII::new(C9_REV_E, phosphor_core::audio::host_sample_rate()),
+            aud_minus_coupling: DcBlocker::with_cutoff(
+                (1.0 / (std::f64::consts::TAU * R35 * C27)) as f32,
+                phosphor_core::audio::host_sample_rate(),
+            ),
         }
     }
 
@@ -765,12 +781,20 @@ impl MachineCore for TempestSystem {
         // every device on both read 1.0, the same full scale as Missile
         // Command's, with the amplifier at unity in the band. Cascaded
         // couplings can overshoot their input, so the clamp stays as a guard.
+        //
+        // The speaker is bridged across the amplifier's two channels, `AUD+`
+        // into one and `AUD-` into the other, so it hears their difference:
+        // `AUD+` plus `AUD+` through C27. The channels are identical and linear,
+        // so the difference is taken before one amplifier model rather than
+        // after two. Halved, so the band stays at unity.
         let samples1 = self.io.pokey1.drain_audio();
         let samples2 = self.io.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
         let full = 2.0 * TEMPEST_POKEY_LOAD.full_drop_v() as f32;
         for i in 0..len {
-            let mixed = self.amp.process((samples1[i] + samples2[i]) / full);
+            let aud_plus = (samples1[i] + samples2[i]) / full;
+            let bridged = 0.5 * (aud_plus + self.aud_minus_coupling.process(aud_plus));
+            let mixed = self.amp.process(bridged);
             self.audio_buffer
                 .push((mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
@@ -788,6 +812,7 @@ impl MachineCore for TempestSystem {
         self.io.pokey1.reset();
         self.io.pokey2.reset();
         self.amp.reset();
+        self.aud_minus_coupling.reset();
         self.io.earom.reset();
         self.io.player_select = false;
         self.io.outlatch = 0;

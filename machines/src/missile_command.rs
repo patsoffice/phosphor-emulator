@@ -14,9 +14,11 @@
 //! board, in
 //! [`docs/schematics/atari-pokey-audio-output.md`](../../docs/schematics/atari-pokey-audio-output.md).
 //! Modeled: the POKEY's open-drain output against R38 10k to +5 V and C70
-//! 0.1 uF, and the amplifier board's input coupling. Not yet: the antiphase
-//! output pair and the two TDA2002A channels driving two speakers. See
-//! `phosphor-emulator-hd8n`.
+//! 0.1 uF, and the amplifier board. The game board's antiphase output pair is
+//! heard in phase: the cabaret and sit-down wiring diagrams (PDF p60) bridge the
+//! speaker across the amplifier's two outputs through the volume rheostat, and
+//! the two legs are identical, so the bridge is a scale and one mono channel is
+//! the right model. The upright's wiring diagram is not in this package.
 
 use crate::atari_regulator_audio::{C9_REV_B, RegulatorAudioII};
 use phosphor_core::audio::SampleRing;

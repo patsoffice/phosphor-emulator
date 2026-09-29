@@ -18,11 +18,19 @@
 //!
 //! What is not: the divider and the gain of 23 are a scale, which the game
 //! boards' normalization absorbs. C7 at pin 1, R12 with C5 in the feedback and
-//! the R10/C3 Boucherot cell all act above 150 kHz. The amplifier's output
-//! swing on its +10.3 V supply is not on the data sheet pages read, so clipping
-//! is not modeled. And the board has two channels driving two speakers from an
-//! antiphase pair, where every game model here is mono; how the cabinet wires
-//! the speakers has not been traced.
+//! the R10/C3 Boucherot cell all act above 150 kHz. Clipping is not modeled:
+//! read off the Fairchild data sheet's curves, the output clips near 4.4 V peak
+//! at light load and nearer 3 V at the bridge's heaviest, and the transcription
+//! doc shows the recorded movies exceed that on their loud passages.
+//!
+//! The board has two channels, fed an antiphase pair. Every cabinet wiring
+//! diagram read (Missile Command's cabaret and sit-down, Tempest's upright)
+//! bridges one speaker across SPKR 1 and SPKR 2 and leaves both returns
+//! unconnected, so the speaker hears the difference of the two channels: the
+//! pair in phase, and one channel of this model up to a scale. In that bridge
+//! the speaker current flows through both output capacitors in series, into the
+//! speaker in parallel with the volume rheostat, which the C9 stage above (one
+//! capacitor into 8 ohm) does not yet describe.
 
 use phosphor_core::audio::DcBlocker;
 use phosphor_macros::Saveable;
