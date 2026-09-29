@@ -1,4 +1,4 @@
-use phosphor_core::device::Pokey;
+use phosphor_core::device::{Pokey, PokeyOutputNetwork};
 
 #[test]
 fn test_register_routing() {
@@ -439,4 +439,44 @@ fn skctl_fast_pot_scan_steps_every_clock_instead_of_every_114() {
         0x01,
         "without it the same pot needs ~114x longer and is still scanning"
     );
+}
+
+/// With a board's load on pin 37, one channel held at full volume settles at
+/// the divider the pull-up and that channel's four devices make, and the
+/// output is how far the pin sits below its supply. Without a network the same
+/// channel still reads a quarter of full scale, the linear mix.
+#[test]
+fn test_output_network_settles_at_the_devices_divider() {
+    let mut pokey = Pokey::with_clock(1_250_000, 44_100);
+    pokey.set_output_network(PokeyOutputNetwork {
+        pullup_ohms: 10_000.0,
+        supply_v: 5.0,
+        load_farads: 0.1e-6,
+    });
+    pokey.write(0x01, 0x1F); // AUDC1: volume only, 15
+    for _ in 0..125_000 {
+        pokey.tick(); // 100 ms, a hundred time constants at rest
+    }
+    let samples = pokey.drain_audio();
+    let settled = *samples.last().unwrap() as f64;
+    // Bits 0-3 of the data sheet's devices, from their rows against 10k to
+    // 4.75 V: g = (4.75 - V) / (10k * V).
+    let g15: f64 = [4.2, 3.4, 2.1, 1.2]
+        .iter()
+        .map(|v| (4.75 - v) / (10_000.0 * v))
+        .sum();
+    let pin = 5.0 * (1.0 / 10_000.0) / (1.0 / 10_000.0 + g15);
+    assert!(
+        (settled - (5.0 - pin)).abs() < 1e-3,
+        "{settled} V below the supply, expected {}",
+        5.0 - pin
+    );
+
+    let mut linear = Pokey::with_clock(1_250_000, 44_100);
+    linear.write(0x01, 0x1F);
+    for _ in 0..125_000 {
+        linear.tick();
+    }
+    let last = *linear.drain_audio().last().unwrap();
+    assert!((last - 0.25).abs() < 1e-6, "{last}");
 }

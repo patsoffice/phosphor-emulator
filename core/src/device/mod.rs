@@ -118,7 +118,7 @@ pub use namco51_lle::Namco51Lle;
 pub use namco53::Namco53;
 pub use output_latch::OutputLatch;
 pub use pia6820::Pia6820;
-pub use pokey::Pokey;
+pub use pokey::{Pokey, PokeyOutputNetwork};
 pub use riot6532::Riot6532;
 pub use slapstic::Slapstic;
 pub use sn76489::Sn76489a;

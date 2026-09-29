@@ -90,6 +90,12 @@
 #[save_version(1)]
 pub struct Pokey {
     resampler: crate::audio::AudioResampler<f32>,
+    /// Pin 37's load, when the board models it. `None` keeps the linear
+    /// mix of volume levels. Board configuration rather than state, so a save
+    /// leaves it alone; the capacitor's voltage inside it is not saved either,
+    /// and a load starts it at rest, which settles within one time constant.
+    #[save_skip]
+    output_stage: Option<AudOutputStage>,
     // Audio channel registers (CPU-written)
     audf: [u8; 4], // AUDF1-4: frequency divider reload values
     audc: [u8; 4], // AUDC1-4: volume (bits 3:0), distortion (bits 7:5), tone gate (bit 4)
@@ -193,6 +199,7 @@ impl Pokey {
                 master_clock_hz as u64,
                 output_sample_rate as u64,
             ),
+            output_stage: None,
             audf: [0; 4],
             audc: [0; 4],
             audctl: 0,
@@ -520,6 +527,8 @@ impl Pokey {
         // only apply the high-pass filter and mix the held levels. This matches
         // MAME's per-channel mix: `(m_output ^ m_filter_sample) || VOLUME_ONLY`.
         let mut mixed_sample = 0.0;
+        // Pin 37's total pull-down conductance, for a modeled output stage.
+        let mut conductance = 0.0;
 
         for i in 0..4 {
             let audc = self.audc[i];
@@ -547,14 +556,19 @@ impl Pokey {
 
             if signal || volume_only {
                 mixed_sample += vol as f32;
+                conductance += AUD_VOLUME_CONDUCTANCE[vol as usize];
             }
         }
 
-        // Normalize (max vol 15 * 4 = 60)
-        mixed_sample /= 60.0;
+        // Normalize (max vol 15 * 4 = 60), or, with the board's load modeled,
+        // how far pin 37 is pulled below its supply, in volts.
+        let sample = match &mut self.output_stage {
+            Some(stage) => stage.step(conductance) as f32,
+            None => mixed_sample / 60.0,
+        };
 
         // 5. Resample
-        self.resampler.tick(mixed_sample);
+        self.resampler.tick(sample);
 
         // 6. Pot scanning. One step per 15 kHz tick normally, but every clock
         // when SKCTL's fast-scan bit is set, which is 114 times faster and is
@@ -766,6 +780,131 @@ impl Pokey {
         self.irqen = 0;
         self.irqst = 0xFF;
         self.resampler.reset();
+        if let Some(stage) = &mut self.output_stage {
+            stage.rest();
+        }
+    }
+
+    /// Model the board's load on pin 37: a pull-up to a supply and a
+    /// capacitor to ground. The output then becomes how far pin 37 is pulled
+    /// below its supply, in volts, through the open-drain devices the volume
+    /// bits switch, rather than a linear sum of volume levels. See
+    /// [`AUD_VOLUME_CONDUCTANCE`] for where the devices come from.
+    pub fn set_output_network(&mut self, network: PokeyOutputNetwork) {
+        self.output_stage = Some(AudOutputStage::new(network, self.master_clock_hz));
+    }
+}
+
+/// What a board hangs on POKEY's pin 37.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PokeyOutputNetwork {
+    /// Pull-up from pin 37 to the supply, in ohms.
+    pub pullup_ohms: f64,
+    /// The supply the pull-up returns to, in volts.
+    pub supply_v: f64,
+    /// Capacitor from pin 37 to ground, in farads; 0 for none.
+    pub load_farads: f64,
+}
+
+/// Pin 37's four open-drain devices, from the data sheet: POKEY C012294 rev B,
+/// sheet 27, "D.C. and Operating Characteristics", AUDIO OUTPUT (MULTIPLE OPEN
+/// DRAIN OUTPUT). Each volume bit's device, on alone with a 10k pull-up to
+/// 4.75 V, holds pin 37 no higher than these, bit 0 to bit 3 being the 10/10,
+/// 20/10, 40/10 and 80/10 micron devices.
+///
+/// The limits are maxima, so the conductances below are the weakest a part may
+/// have. They are not binary: bits 0 to 3 weigh about 1 : 3.0 : 9.6 : 22.6, so
+/// even one channel's volume steps are not even.
+const AUD_TEST_PULLUP_OHMS: f64 = 10_000.0;
+const AUD_TEST_SUPPLY_V: f64 = 4.75;
+const AUD_DEVICE_VOL_MAX: [f64; 4] = [4.2, 3.4, 2.1, 1.2];
+
+/// One device's conductance, from its row: the current the pull-up delivers
+/// at that voltage, over the voltage.
+const fn aud_device_conductance(bit: usize) -> f64 {
+    let v = AUD_DEVICE_VOL_MAX[bit];
+    (AUD_TEST_SUPPLY_V - v) / (AUD_TEST_PULLUP_OHMS * v)
+}
+
+/// A channel's pull-down conductance at each volume level: the devices its
+/// four volume bits switch on, in parallel.
+///
+/// The sheet gives the high level with "all four devices off" as at least
+/// 4.2 V, a bound any leakage above 76k satisfies, so off is modeled as open.
+/// It describes one set of four devices; every channel is taken to have its
+/// own set, all sixteen sharing pin 37.
+const AUD_VOLUME_CONDUCTANCE: [f64; 16] = {
+    let mut table = [0.0; 16];
+    let mut vol = 0;
+    while vol < 16 {
+        let mut bit = 0;
+        while bit < 4 {
+            if vol & (1 << bit) != 0 {
+                table[vol] += aud_device_conductance(bit);
+            }
+            bit += 1;
+        }
+        vol += 1;
+    }
+    table
+};
+
+/// The capacitor on pin 37 against the pull-up and whatever the devices are
+/// sinking. Stepped exactly once per chip clock: the node relaxes toward the
+/// divider's voltage with the time constant of the capacitor against the
+/// pull-up and devices in parallel, and both change only when the devices do.
+#[derive(Clone, Debug)]
+struct AudOutputStage {
+    network: PokeyOutputNetwork,
+    dt: f64,
+    /// Pin 37's voltage.
+    v: f64,
+    /// The conductance the two cached figures below were computed for.
+    g_cached: f64,
+    /// Where the node is headed, and the fraction of the way it gets per step.
+    v_target: f64,
+    alpha: f64,
+}
+
+impl AudOutputStage {
+    fn new(network: PokeyOutputNetwork, clock_hz: u32) -> Self {
+        let mut stage = Self {
+            network,
+            dt: 1.0 / clock_hz as f64,
+            v: network.supply_v,
+            g_cached: f64::NAN,
+            v_target: network.supply_v,
+            alpha: 1.0,
+        };
+        stage.retune(0.0);
+        stage
+    }
+
+    /// Back to rest: every device off, the node at the supply.
+    fn rest(&mut self) {
+        self.v = self.network.supply_v;
+    }
+
+    fn retune(&mut self, g: f64) {
+        let g_up = 1.0 / self.network.pullup_ohms;
+        let g_total = g_up + g;
+        self.v_target = self.network.supply_v * g_up / g_total;
+        self.alpha = if self.network.load_farads > 0.0 {
+            1.0 - (-self.dt * g_total / self.network.load_farads).exp()
+        } else {
+            1.0
+        };
+        self.g_cached = g;
+    }
+
+    /// Advance one chip clock with the devices at conductance `g`, and return
+    /// how far pin 37 sits below its supply.
+    fn step(&mut self, g: f64) -> f64 {
+        if g != self.g_cached {
+            self.retune(g);
+        }
+        self.v += (self.v_target - self.v) * self.alpha;
+        self.network.supply_v - self.v
     }
 }
 
@@ -858,3 +997,95 @@ impl Default for Pokey {
 }
 
 // Save state support: derived via #[derive(Saveable)] on the struct.
+
+#[cfg(test)]
+mod output_stage_tests {
+    use super::*;
+
+    /// The data sheet's own test: 10k to 4.75 V and no capacitor.
+    fn datasheet_load() -> AudOutputStage {
+        AudOutputStage::new(
+            PokeyOutputNetwork {
+                pullup_ohms: AUD_TEST_PULLUP_OHMS,
+                supply_v: AUD_TEST_SUPPLY_V,
+                load_farads: 0.0,
+            },
+            1_789_773,
+        )
+    }
+
+    /// Each device alone, on the sheet's own test load, lands exactly on the
+    /// row it was derived from, and with every device off the pin rests at the
+    /// supply, above the sheet's 4.2 V minimum.
+    #[test]
+    fn each_device_alone_reproduces_its_datasheet_row() {
+        let mut stage = datasheet_load();
+        for (bit, &row) in AUD_DEVICE_VOL_MAX.iter().enumerate() {
+            let drop = stage.step(AUD_VOLUME_CONDUCTANCE[1 << bit]);
+            let pin = AUD_TEST_SUPPLY_V - drop;
+            assert!((pin - row).abs() < 1e-9, "bit {bit}: {pin} V, row {row} V");
+        }
+        let drop = stage.step(0.0);
+        assert_eq!(drop, 0.0);
+        assert!(AUD_TEST_SUPPLY_V - drop >= 4.2);
+    }
+
+    /// The volume law is the devices', compressive and uneven: fifteen is not
+    /// fifteen times one, and one channel's step from 7 to 8 is larger than
+    /// from 0 to 1 by more than the binary eightfold.
+    #[test]
+    fn the_volume_law_is_not_linear() {
+        let g = |vol: usize| AUD_VOLUME_CONDUCTANCE[vol];
+        assert!(g(8) / g(1) > 20.0, "bit 3 against bit 0: {}", g(8) / g(1));
+        let mut stage = datasheet_load();
+        let one = stage.step(g(1));
+        let fifteen = stage.step(g(15));
+        assert!(fifteen / one < 15.0, "{fifteen} against {one}");
+    }
+
+    /// The capacitor sees the pull-up and the devices in parallel, so the
+    /// corner rises with the level: 1 ms with every device off on Missile
+    /// Command's 10k and 0.1 uF, and about twenty times faster with all
+    /// sixteen on.
+    #[test]
+    fn the_corner_follows_the_level() {
+        let net = PokeyOutputNetwork {
+            pullup_ohms: 10_000.0,
+            supply_v: 5.0,
+            load_farads: 0.1e-6,
+        };
+        let clock = 1_250_000;
+        let tau_of = |g: f64| {
+            let mut stage = AudOutputStage::new(net, clock);
+            stage.retune(g);
+            -stage.dt / (1.0 - stage.alpha).ln()
+        };
+        let quiet = tau_of(0.0);
+        let loud = tau_of(4.0 * AUD_VOLUME_CONDUCTANCE[15]);
+        assert!((quiet - 1e-3).abs() / 1e-3 < 1e-9, "{quiet}");
+        let expected = 0.1e-6 / (1.0 / 10_000.0 + 4.0 * AUD_VOLUME_CONDUCTANCE[15]);
+        assert!(
+            (loud - expected).abs() / expected < 1e-9,
+            "{loud} against {expected}"
+        );
+        assert!(quiet / loud > 19.0, "{quiet} against {loud}");
+    }
+
+    /// Reset leaves the capacitor at rest, the pin at its supply.
+    #[test]
+    fn reset_puts_the_pin_back_at_its_supply() {
+        let mut pokey = Pokey::with_clock(1_250_000, 44_100);
+        pokey.set_output_network(PokeyOutputNetwork {
+            pullup_ohms: 10_000.0,
+            supply_v: 5.0,
+            load_farads: 0.1e-6,
+        });
+        pokey.write(0x01, 0x1F); // AUDC1: volume only, 15
+        for _ in 0..10_000 {
+            pokey.tick();
+        }
+        pokey.reset();
+        let stage = pokey.output_stage.as_ref().unwrap();
+        assert_eq!(stage.v, 5.0);
+    }
+}
