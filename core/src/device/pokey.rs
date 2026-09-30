@@ -95,7 +95,7 @@ pub struct Pokey {
     /// leaves it alone; the capacitor's voltage inside it is not saved either,
     /// and a load starts it at rest, which settles within one time constant.
     #[save_skip]
-    output_stage: Option<AudOutputStage>,
+    output_stage: Option<OutputStage>,
     // Audio channel registers (CPU-written)
     audf: [u8; 4], // AUDF1-4: frequency divider reload values
     audc: [u8; 4], // AUDC1-4: volume (bits 3:0), distortion (bits 7:5), tone gate (bit 4)
@@ -561,9 +561,13 @@ impl Pokey {
         }
 
         // Normalize (max vol 15 * 4 = 60), or, with the board's load modeled,
-        // how far pin 37 is pulled below its supply, in volts.
+        // what that load reads: see [`PokeyLoad`] for the units of each.
         let sample = match &mut self.output_stage {
-            Some(stage) => stage.step(conductance) as f32,
+            Some(OutputStage::PullUp(stage)) => stage.step(conductance) as f32,
+            Some(OutputStage::VirtualGround {
+                series_ohms,
+                reference_v,
+            }) => virtual_ground_current(*series_ohms, *reference_v, conductance) as f32,
             None => mixed_sample / 60.0,
         };
 
@@ -780,19 +784,89 @@ impl Pokey {
         self.irqen = 0;
         self.irqst = 0xFF;
         self.resampler.reset();
-        if let Some(stage) = &mut self.output_stage {
+        if let Some(OutputStage::PullUp(stage)) = &mut self.output_stage {
             stage.rest();
         }
     }
 
-    /// Model the board's load on pin 37: a pull-up to a supply and a
-    /// capacitor to ground. The output then becomes how far pin 37 is pulled
-    /// below its supply, in volts, through the open-drain devices the volume
-    /// bits switch, rather than a linear sum of volume levels. See
-    /// [`AUD_VOLUME_CONDUCTANCE`] for where the devices come from.
-    pub fn set_output_network(&mut self, network: PokeyOutputNetwork) {
-        self.output_stage = Some(AudOutputStage::new(network, self.master_clock_hz));
+    /// Model the board's load on pin 37. The output then comes from the
+    /// open-drain devices the volume bits switch, against that load, rather
+    /// than from a linear sum of volume levels. See [`AUD_VOLUME_CONDUCTANCE`]
+    /// for where the devices come from, and [`PokeyLoad`] for what each kind
+    /// of load reads out.
+    pub fn set_output_load(&mut self, load: PokeyLoad) {
+        self.output_stage = Some(match load {
+            PokeyLoad::PullUp(network) => {
+                OutputStage::PullUp(AudOutputStage::new(network, self.master_clock_hz))
+            }
+            PokeyLoad::VirtualGround {
+                series_ohms,
+                reference_v,
+            } => OutputStage::VirtualGround {
+                series_ohms,
+                reference_v,
+            },
+        });
     }
+
+    /// A pull-up to a supply and a capacitor to ground on pin 37:
+    /// [`PokeyLoad::PullUp`].
+    pub fn set_output_network(&mut self, network: PokeyOutputNetwork) {
+        self.set_output_load(PokeyLoad::PullUp(network));
+    }
+}
+
+/// What a board hangs on POKEY's pin 37, and so what the chip's output means.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PokeyLoad {
+    /// A pull-up to a supply and a capacitor to ground. The output is how far
+    /// pin 37 is pulled below the supply, in volts.
+    PullUp(PokeyOutputNetwork),
+    /// Pin 37 through `series_ohms` into an op-amp's inverting input, whose
+    /// non-inverting input holds the node at `reference_v`: a transimpedance
+    /// stage. The output is the current the devices sink, in amps, which the
+    /// op-amp's feedback resistor turns into its output voltage.
+    ///
+    /// With no series resistance the pin is held at the reference whatever the
+    /// devices do, so the current is linear in their total conductance. A
+    /// series resistance compresses a loud mix, as it does on a pull-up of the
+    /// same value: the two are the same circuit, and differ only in reading the
+    /// current rather than the voltage it drops.
+    ///
+    /// No capacitor: one from pin 37 to ground works against at most the
+    /// series resistance, which puts its corner far above the audio band on
+    /// every board that uses this form.
+    VirtualGround { series_ohms: f64, reference_v: f64 },
+}
+
+impl PokeyLoad {
+    /// The output with every device on, all four channels at volume 15: its
+    /// largest possible value, in the load's own units. A board that scales
+    /// the output into its own units divides by this, so that full scale means
+    /// the same thing the linear mix's 1.0 did.
+    pub fn full_scale(&self) -> f64 {
+        let g_all = 4.0 * AUD_VOLUME_CONDUCTANCE[15];
+        match *self {
+            PokeyLoad::PullUp(network) => network.full_drop_v(),
+            PokeyLoad::VirtualGround {
+                series_ohms,
+                reference_v,
+            } => virtual_ground_current(series_ohms, reference_v, g_all),
+        }
+    }
+}
+
+/// The current devices of total conductance `g` sink from a node held at
+/// `reference_v` through `series_ohms`.
+fn virtual_ground_current(series_ohms: f64, reference_v: f64, g: f64) -> f64 {
+    reference_v * g / (1.0 + g * series_ohms)
+}
+
+/// The modeled load, as the chip steps it.
+#[derive(Clone, Debug)]
+enum OutputStage {
+    PullUp(AudOutputStage),
+    VirtualGround { series_ohms: f64, reference_v: f64 },
 }
 
 /// What a board hangs on POKEY's pin 37.
@@ -1097,7 +1171,70 @@ mod output_stage_tests {
             pokey.tick();
         }
         pokey.reset();
-        let stage = pokey.output_stage.as_ref().unwrap();
+        let Some(OutputStage::PullUp(stage)) = pokey.output_stage.as_ref() else {
+            panic!("pull-up stage missing");
+        };
         assert_eq!(stage.v, 5.0);
+    }
+
+    /// Settled output of a POKEY on `load` with the first `channels` channels
+    /// all volume-only at `vol`.
+    fn settled(load: PokeyLoad, channels: usize, vol: u8) -> f32 {
+        let mut pokey = Pokey::with_clock(1_250_000, 44_100);
+        pokey.set_output_load(load);
+        pokey.write(0x0F, 0x03); // SKCTL: out of reset
+        for ch in 0..channels {
+            pokey.write((ch * 2 + 1) as u16, 0x10 | vol); // AUDCn: volume only
+        }
+        for _ in 0..20_000 {
+            pokey.tick();
+        }
+        *pokey.drain_audio().last().unwrap()
+    }
+
+    /// Straight into a virtual ground the pin never moves, so four channels
+    /// sink exactly four times what one does, where the same devices against a
+    /// 10k pull-up compress; and every channel on at 15 is full scale.
+    #[test]
+    fn a_virtual_ground_is_linear_in_the_devices() {
+        let vg = PokeyLoad::VirtualGround {
+            series_ohms: 0.0,
+            reference_v: 5.0,
+        };
+        let one = settled(vg, 1, 15);
+        let four = settled(vg, 4, 15);
+        assert!((four / one - 4.0).abs() < 1e-4, "{four} against {one}");
+        assert!((four as f64 / vg.full_scale() - 1.0).abs() < 1e-4, "{four}");
+
+        let pull_up = PokeyLoad::PullUp(PokeyOutputNetwork {
+            pullup_ohms: 10_000.0,
+            supply_v: 5.0,
+            load_farads: 0.0,
+        });
+        let ratio = settled(pull_up, 4, 15) / settled(pull_up, 1, 15);
+        assert!(ratio < 3.0, "pull-up: {ratio}");
+    }
+
+    /// A series resistance into a virtual ground is the same circuit as a
+    /// pull-up of that value: the current times the resistance is the drop.
+    #[test]
+    fn a_series_resistor_into_a_virtual_ground_matches_the_pull_up() {
+        let vg = PokeyLoad::VirtualGround {
+            series_ohms: 220.0,
+            reference_v: 5.0,
+        };
+        let pull_up = PokeyLoad::PullUp(PokeyOutputNetwork {
+            pullup_ohms: 220.0,
+            supply_v: 5.0,
+            load_farads: 0.0,
+        });
+        for (channels, vol) in [(1, 1), (1, 8), (2, 15), (4, 15)] {
+            let current = settled(vg, channels, vol) as f64;
+            let drop = settled(pull_up, channels, vol) as f64;
+            assert!(
+                (current * 220.0 - drop).abs() / drop < 1e-4,
+                "{channels} x {vol}: {current} A against {drop} V"
+            );
+        }
     }
 }
