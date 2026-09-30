@@ -369,6 +369,22 @@ impl Pokey {
     /// distortion gating, volume mixing, resampling, and pot scanning.
     /// Call this once per CPU clock cycle.
     pub fn tick(&mut self) {
+        let (mixed, conductance) = self.clock();
+        // Normalize (max vol 15 * 4 = 60), or, with the board's load modeled,
+        // what that load reads: see [`PokeyLoad`] for the units of each.
+        let sample = match &mut self.output_stage {
+            Some(stage) => stage.step(conductance) as f32,
+            None => mixed / 60.0,
+        };
+        self.resampler.tick(sample);
+    }
+
+    /// One master clock of everything but the output: returns the linear sum
+    /// of the volume levels that are on, 0 to 60, and pin 37's total pull-down
+    /// conductance, in siemens. [`Self::tick`] turns those into a sample; a
+    /// [`QuadPokey`](super::quad_pokey::QuadPokey) sums four chips' before
+    /// turning them into one.
+    pub(crate) fn clock(&mut self) -> (f32, f64) {
         // 1. Advance polynomial counters (only when SKCTL is out of reset)
         // MAME: step_one_clock() gates on `m_SKCTL & SK_RESET`
         if self.skctl & 0x03 != 0 {
@@ -560,21 +576,7 @@ impl Pokey {
             }
         }
 
-        // Normalize (max vol 15 * 4 = 60), or, with the board's load modeled,
-        // what that load reads: see [`PokeyLoad`] for the units of each.
-        let sample = match &mut self.output_stage {
-            Some(OutputStage::PullUp(stage)) => stage.step(conductance) as f32,
-            Some(OutputStage::VirtualGround {
-                series_ohms,
-                reference_v,
-            }) => virtual_ground_current(*series_ohms, *reference_v, conductance) as f32,
-            None => mixed_sample / 60.0,
-        };
-
-        // 5. Resample
-        self.resampler.tick(sample);
-
-        // 6. Pot scanning. One step per 15 kHz tick normally, but every clock
+        // 5. Pot scanning. One step per 15 kHz tick normally, but every clock
         // when SKCTL's fast-scan bit is set, which is 114 times faster and is
         // the mode every board in this tree actually uses.
         //
@@ -604,6 +606,8 @@ impl Pokey {
                 self.pot_scanning = false;
             }
         }
+
+        (mixed_sample, conductance)
     }
 
     /// Advance all four polynomial counters (LFSRs) by one step.
@@ -784,7 +788,7 @@ impl Pokey {
         self.irqen = 0;
         self.irqst = 0xFF;
         self.resampler.reset();
-        if let Some(OutputStage::PullUp(stage)) = &mut self.output_stage {
+        if let Some(stage) = &mut self.output_stage {
             stage.rest();
         }
     }
@@ -795,18 +799,12 @@ impl Pokey {
     /// for where the devices come from, and [`PokeyLoad`] for what each kind
     /// of load reads out.
     pub fn set_output_load(&mut self, load: PokeyLoad) {
-        self.output_stage = Some(match load {
-            PokeyLoad::PullUp(network) => {
-                OutputStage::PullUp(AudOutputStage::new(network, self.master_clock_hz))
-            }
-            PokeyLoad::VirtualGround {
-                series_ohms,
-                reference_v,
-            } => OutputStage::VirtualGround {
-                series_ohms,
-                reference_v,
-            },
-        });
+        self.output_stage = Some(OutputStage::new(load, self.master_clock_hz));
+    }
+
+    /// The master clock this chip was built for, in Hz.
+    pub(crate) fn master_clock_hz(&self) -> u32 {
+        self.master_clock_hz
     }
 
     /// A pull-up to a supply and a capacitor to ground on pin 37:
@@ -845,13 +843,26 @@ impl PokeyLoad {
     /// the output into its own units divides by this, so that full scale means
     /// the same thing the linear mix's 1.0 did.
     pub fn full_scale(&self) -> f64 {
-        let g_all = 4.0 * AUD_VOLUME_CONDUCTANCE[15];
+        self.full_scale_of_chips(1)
+    }
+
+    /// [`Self::full_scale`] for `chips` POKEYs whose outputs share this one
+    /// load, as a [`QuadPokey`](super::quad_pokey::QuadPokey)'s do.
+    pub fn full_scale_of_chips(&self, chips: usize) -> f64 {
+        self.settled(chips as f64 * 4.0 * AUD_VOLUME_CONDUCTANCE[15])
+    }
+
+    /// The output once settled with devices of total conductance `g` on.
+    fn settled(&self, g: f64) -> f64 {
         match *self {
-            PokeyLoad::PullUp(network) => network.full_drop_v(),
+            PokeyLoad::PullUp(n) => {
+                let g_up = 1.0 / n.pullup_ohms;
+                n.supply_v * g / (g_up + g)
+            }
             PokeyLoad::VirtualGround {
                 series_ohms,
                 reference_v,
-            } => virtual_ground_current(series_ohms, reference_v, g_all),
+            } => virtual_ground_current(series_ohms, reference_v, g),
         }
     }
 }
@@ -862,11 +873,48 @@ fn virtual_ground_current(series_ohms: f64, reference_v: f64, g: f64) -> f64 {
     reference_v * g / (1.0 + g * series_ohms)
 }
 
-/// The modeled load, as the chip steps it.
+/// The modeled load, as a chip (or a [`QuadPokey`](super::quad_pokey::QuadPokey)
+/// for its shared node) steps it.
 #[derive(Clone, Debug)]
-enum OutputStage {
+pub(crate) enum OutputStage {
     PullUp(AudOutputStage),
     VirtualGround { series_ohms: f64, reference_v: f64 },
+}
+
+impl OutputStage {
+    pub(crate) fn new(load: PokeyLoad, clock_hz: u32) -> Self {
+        match load {
+            PokeyLoad::PullUp(network) => {
+                OutputStage::PullUp(AudOutputStage::new(network, clock_hz))
+            }
+            PokeyLoad::VirtualGround {
+                series_ohms,
+                reference_v,
+            } => OutputStage::VirtualGround {
+                series_ohms,
+                reference_v,
+            },
+        }
+    }
+
+    /// Advance one chip clock with the devices at total conductance `g`, and
+    /// return what the load reads.
+    pub(crate) fn step(&mut self, g: f64) -> f64 {
+        match self {
+            OutputStage::PullUp(stage) => stage.step(g),
+            OutputStage::VirtualGround {
+                series_ohms,
+                reference_v,
+            } => virtual_ground_current(*series_ohms, *reference_v, g),
+        }
+    }
+
+    /// Back to rest: every device off.
+    pub(crate) fn rest(&mut self) {
+        if let OutputStage::PullUp(stage) = self {
+            stage.rest();
+        }
+    }
 }
 
 /// What a board hangs on POKEY's pin 37.
@@ -940,7 +988,7 @@ const AUD_VOLUME_CONDUCTANCE: [f64; 16] = {
 /// divider's voltage with the time constant of the capacitor against the
 /// pull-up and devices in parallel, and both change only when the devices do.
 #[derive(Clone, Debug)]
-struct AudOutputStage {
+pub(crate) struct AudOutputStage {
     network: PokeyOutputNetwork,
     dt: f64,
     /// Pin 37's voltage.

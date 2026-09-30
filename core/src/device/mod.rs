@@ -75,6 +75,7 @@ pub mod namco_wsg;
 pub mod output_latch;
 pub mod pia6820;
 pub mod pokey;
+pub mod quad_pokey;
 pub mod riot6532;
 pub mod slapstic;
 pub mod sn76489;
