@@ -17,11 +17,16 @@
 //! The two POKEYs are summed 1:1 through equal 100k legs, so the plain sum below
 //! is the board's ratio, confirmed; and the coupling capacitor this file's comment
 //! reasons about is real, one per chip ahead of the sum, which by superposition is
-//! the same filter as one behind it. Only its corner differs: 7.23 Hz on the board
-//! against the 10 Hz default. What is NOT modelled is a voltage gain of about 4.55
-//! per chip, an antiphase output pair, and two TDA2002A channels driving two
-//! speakers. See `phosphor-emulator-fd0d`.
+//! the same filter as one behind it.
+//!
+//! Modeled under `phosphor-emulator-fd0d`: each POKEY's pin 37 against R108 220
+//! ohm into an LM324's virtual ground at `AREF`, which is a 220 ohm pull-up to
+//! +5 V as the open-drain devices see it (see [`CCASTLES_POKEY_LOAD`]); the
+//! couplings at their 7.23 Hz; and the Regulator/Audio II amplifier, 035435-01
+//! rev F. The front end's gain of `R109/R108` and the summer's 0.62 are a scale.
+//! The antiphase pair is one signal up to sign, so mono is one channel of it.
 
+use crate::atari_regulator_audio::{C9_01_REV_F, RegulatorAudioII};
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
@@ -38,7 +43,7 @@ use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::cpu::state::M6502State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::output_latch::OutputLatch;
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyOutputNetwork};
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
@@ -532,7 +537,7 @@ pub struct CrystalCastlesBoard {
     /// it. `SampleRing` has no `Default`, hence the explicit capacity.
     #[save_skip(default = SampleRing::with_capacity(2048))]
     audio_buffer: SampleRing<i16>,
-    /// The POKEYs' coupling into the amplifier.
+    /// The POKEYs' coupling into the summer, C31 and C37 into 100k.
     ///
     /// Both chips are unipolar, so their sum carries an offset that varies with
     /// how much they are playing. Removing it needs the running mean, not a
@@ -540,7 +545,36 @@ pub struct CrystalCastlesBoard {
     /// output at the rail.
     #[save(id = 17)]
     pokey_coupling: DcBlocker,
+    /// The Regulator/Audio II PCB's amplifier, 035435-01 rev F.
+    #[save(id = 18)]
+    amp: RegulatorAudioII,
 }
+
+/// Each POKEY's pin 37 as the chip sees it: R108 (R119 for the other chip)
+/// 220 ohm into the inverting input of an LM324 section at 5B, whose
+/// non-inverting input sits on `AREF`, +5 V through R134 100k with C40 to
+/// ground. The virtual ground holds the far end of the 220 ohm at +5 V, so it is
+/// a pull-up to that supply, and the current the devices sink through it is what
+/// R109 1k turns into the amplifier's output. How far pin 37 falls below +5 V
+/// is therefore the front end's output up to the gain `R109/R108`.
+///
+/// No load capacitor. C30 and C35, 0.01 uF at each pin, work against at most
+/// 220 ohm and so sit at 72.3 kHz or above: nothing in the audio band.
+///
+/// Stated rather than hidden: against a pull-up this stiff the pin never falls
+/// much below 3.5 V, and the device conductances come from data sheet rows taken
+/// at 4.2 V down to 1.2 V against 10k. The model's devices are resistors, so
+/// the law here is those rows extrapolated to a lighter pull-down. The 220 ohm
+/// in series is what makes a loud mix compress: every device on reads about 70 %
+/// of the linear sum of the same devices.
+const CCASTLES_POKEY_LOAD: PokeyOutputNetwork = PokeyOutputNetwork {
+    pullup_ohms: 220.0,
+    supply_v: 5.0,
+    load_farads: 0.0,
+};
+
+/// C31 and C37 into R121 and R122, the couplings ahead of the summer: 7.23 Hz.
+const POKEY_COUPLING_HZ: f64 = 1.0 / (std::f64::consts::TAU * 100_000.0 * 0.22e-6);
 
 /// Atari Crystal Castles (1983): a 6502 beside the board it drives.
 #[derive(BusDebug, Saveable)]
@@ -628,9 +662,14 @@ impl CrystalCastlesBoard {
     }
 
     pub fn new() -> Self {
+        let pokey = || {
+            let mut p = Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate());
+            p.set_output_network(CCASTLES_POKEY_LOAD);
+            p
+        };
         Self {
-            pokey1: Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate()),
-            pokey2: Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate()),
+            pokey1: pokey(),
+            pokey2: pokey(),
 
             map: Self::build_map(),
             gfx_rom: [0; 0x4000],
@@ -667,7 +706,11 @@ impl CrystalCastlesBoard {
             scanline_buffer_valid: false,
 
             audio_buffer: SampleRing::with_capacity(2048),
-            pokey_coupling: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            pokey_coupling: DcBlocker::with_cutoff(
+                POKEY_COUPLING_HZ as f32,
+                phosphor_core::audio::host_sample_rate(),
+            ),
+            amp: RegulatorAudioII::new(C9_01_REV_F, phosphor_core::audio::host_sample_rate()),
         }
     }
 
@@ -1328,9 +1371,9 @@ impl MachineCore for CrystalCastlesSystem {
         let samples1 = self.board.pokey1.drain_audio();
         let samples2 = self.board.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
-        // Each POKEY emits 0..1: a channel contributes its volume while its
-        // output is high and nothing while it is low, so the pin swings from
-        // ground up rather than either side of it.
+        // Each POKEY's output is how far its pin 37 sits below +5 V against
+        // R108's 220 ohm: zero with every device off, so the pair swings from
+        // zero up rather than either side of it.
         //
         // This used to centre the pair by subtracting 1.0, which assumes their
         // mean is exactly 1.0, i.e. that both chips sit at half scale. They do
@@ -1348,13 +1391,25 @@ impl MachineCore for CrystalCastlesSystem {
         // 0.22 uF, ONE PER CHIP and ahead of the summing resistors rather than
         // one behind the sum. Both work into 100k, so both corners are 7.23 Hz,
         // and by superposition one high-pass on `a + b` is the same filter as one
-        // on each. Only the corner differs from the 10 Hz default here.
+        // on each, at the board's 7.23 Hz.
         //
         // The plain sum is the board's ratio too: R121 and R122 are both 100k
-        // into R123 62k, so the two chips are mixed 1:1.
+        // into R123 62k, so the two chips are mixed 1:1. The front ends' gain of
+        // 4.55 and the summer's 0.62 are a scale and cancel here: dividing by
+        // both chips' full drop makes every device on both read 1.0, the same
+        // full scale as Missile Command and Tempest, with the amplifier at unity
+        // in the band. Cascaded couplings can overshoot their input, so the clamp
+        // stays as a guard.
+        //
+        // `AUDIO 2` is `AUDIO 1` through a unity inverter with no coupling (R131
+        // and R132 both 100k), so the two amplifier channels carry one signal up
+        // to sign. However the cabinet wires them, one channel is the mono mix.
+        let full = 2.0 * CCASTLES_POKEY_LOAD.full_drop_v() as f32;
         let coupling = &mut self.board.pokey_coupling;
+        let amp = &mut self.board.amp;
         self.board.audio_buffer.extend((0..len).map(|i| {
-            let mixed = coupling.process(samples1[i] + samples2[i]);
+            let summed = coupling.process((samples1[i] + samples2[i]) / full);
+            let mixed = amp.process(summed);
             (mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));
     }
@@ -1800,6 +1855,29 @@ mod tests {
     /// and palette index 5 coloured red. Where no sprite covers a pixel the
     /// sprite layer reads 0x0F, whose PROM entry is left at 0 so the (all-zero)
     /// bitmap wins and the pixel stays black.
+    /// Pin 37's settled drop below +5 V with channel 1 alone, volume-only, at
+    /// `vol`.
+    fn pokey1_drop_at(vol: u8) -> f32 {
+        let mut board = CrystalCastlesBoard::new();
+        board.pokey1.write(0x0F, 0x03); // SKCTL: out of reset
+        board.pokey1.write(0x01, 0x10 | vol); // AUDC1: volume only
+        for _ in 0..20_000 {
+            board.pokey1.tick();
+        }
+        *board.pokey1.drain_audio().last().unwrap()
+    }
+
+    /// The board loads each POKEY with 220 ohm into a virtual ground at +5 V,
+    /// so bit 3's device alone pulls about 21.3 times what bit 0's does: the
+    /// data sheet's 22.6 to 1, compressed a little by the 220 ohm. The linear
+    /// mix would give 8, and a 10k pull-up (Missile Command's, Tempest's) about
+    /// 6.5, so this fails for either.
+    #[test]
+    fn each_pokey_works_into_the_220_ohm_front_end() {
+        let ratio = pokey1_drop_at(8) / pokey1_drop_at(1);
+        assert!((20.5..22.0).contains(&ratio), "vol 8 / vol 1 = {ratio}");
+    }
+
     fn board_with_one_red_sprite() -> CrystalCastlesSystem {
         let mut sys = CrystalCastlesSystem::new();
         sys.board.sync_prom[..24].fill(0x01);

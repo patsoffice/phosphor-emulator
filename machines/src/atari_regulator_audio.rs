@@ -7,6 +7,11 @@
 //! C4 470 uF set its gain, and C9 couples the output into the speaker. The two
 //! revisions differ in C9 alone: 1000 uF on rev B, 3300 uF on rev E.
 //!
+//! Crystal Castles drives 035435-01 rev F (SP-241 sheet 2A), transcribed in
+//! [`docs/schematics/ccastles-audio-output.md`](../../docs/schematics/ccastles-audio-output.md):
+//! the same parts in the same places, read against the table above, with C9 at
+//! 3300 uF.
+//!
 //! What is modeled is the three frequency-shaping stages, each first order:
 //!
 //! - C6 against the divider's 909 ohm and the TDA2002A's input resistance, a
@@ -55,6 +60,8 @@ const SPEAKER_OHMS: f64 = 8.0;
 pub const C9_REV_B: f64 = 1000e-6;
 /// C9 on revision E of the board, Tempest's.
 pub const C9_REV_E: f64 = 3300e-6;
+/// C9 on 035435-01 revision F, Crystal Castles'.
+pub const C9_01_REV_F: f64 = 3300e-6;
 
 fn corner_hz(ohms: f64, farads: f64) -> f32 {
     (1.0 / (std::f64::consts::TAU * ohms * farads)) as f32

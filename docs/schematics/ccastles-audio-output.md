@@ -8,8 +8,9 @@ This one confirms more than it refutes. The two POKEYs are mixed **1:1**, which
 is `samples1 + samples2`; the coupling capacitor the model's comment reasons
 about is **real and in the place the comment says**, by superposition; and the
 one filter at the chip pins turns out to sit so far above the band that it does
-nothing. What is not modelled is the rest: a voltage gain of about 4.5 per chip
-before the mixer, an antiphase output pair, and two speakers.
+nothing. The rest, a voltage gain of about 4.5 per chip before the mixer, an
+antiphase output pair, and two speakers, was not modeled when this was read; see
+the next section for what is now.
 
 ## Provenance
 
@@ -31,10 +32,45 @@ Two notes for the next reader of this file.
 
 ## What the model does today
 
-`CcastlesSystem::run_frame` drains both `Pokey`s, adds them, runs one
-`DcBlocker` at the 10 Hz default over the sum, and scales to `i16`. Its comment
-already says the coupling capacitor is what centres the mix and that the board
-has one between the chips and the amplifier.
+Modeled under `phosphor-emulator-fd0d`. Each `Pokey` runs its open-drain
+output into a `PokeyOutputNetwork` of 220 ohm to +5 V: that is R108 as the chip
+sees it, because the far end sits on the op-amp's virtual ground at `AREF`, and
+the current the devices sink through it is what R109 turns into the front end's
+output. `run_frame` sums the two pin drops 1:1, divides by both chips' full drop,
+runs one `DcBlocker` at C31's 7.23 Hz, and then the Regulator/Audio II model in
+`atari_regulator_audio.rs` with C9 at 3300 uF. The front end's 4.55 and the
+summer's 0.62 are a scale.
+
+What the 220 ohm does, which a gain of 4.55 alone would not: it sits in series
+with the devices, so a loud mix compresses. Every device on both chips reads
+about 70 % of the linear sum of the same devices, and pin 37 never falls below
+about 3.53 V. The device conductances come from data sheet rows taken between
+4.2 V and 1.2 V against 10k, so at this load they are extrapolated, and a device
+nearer a current source than a resistor would compress less. That is not
+established either way.
+
+Measured over the committed movie (`ccastles-1787707168.phmi`, 33 s), against
+the previous plain sum at 10 Hz:
+
+| | before | pin law, 7.23 Hz | + amplifier |
+|---|---|---|---|
+| 0-150 Hz share | 48.5 % | 53.4 % | 27.3 % |
+| 150-400 Hz share | 25.1 % | 22.0 % | 34.0 % |
+| centroid | 509 Hz | 480 Hz | 744 Hz |
+| decay T20 | 2.12 s | 2.13 s | 0.52 s |
+| AC RMS | -24.9 dBFS | -28.6 dBFS | -29.4 dBFS |
+| peak | -8.7 dBFS | -13.2 dBFS | -13.9 dBFS |
+
+Most of the change is the amplifier's low end, as it was for Missile Command and
+Tempest. The level falls because full scale is now every device on both chips,
+the convention those two use; nothing clips.
+
+**The front ends do not clip on this movie.** An LM324 on +12 V swings to about
+V+ - 1.5 V, so each front end, resting at `AREF` and rising 4.55 times the pin's
+drop, saturates when the drop passes (12 - 1.5 - 5) / 4.55 = 1.21 V. The largest
+drop over the movie was 0.47 V on one chip and 0.52 V on the other, so this is
+not modeled. The TDA2002A's own clipping is not modeled either, for the reasons
+given in `atari_regulator_audio.rs`.
 
 ## The chain
 
@@ -138,10 +174,16 @@ different POKEY interfaces are collected.
 - **What `AUDIO 1` and `AUDIO 2` are wired to in the cabinet.** The two amplifier
   channels are identical and the two signals are antiphase; how the cabinet
   connects the two speakers decides whether that is heard as a bridge or as
-  cancellation, and the main wiring diagram on sheet 1B was not read.
+  cancellation, and the main wiring diagram on sheet 1B was not read. The model
+  does not depend on it for its mix: `AUDIO 2` is `AUDIO 1` through a unity
+  inverter with no coupling, so each channel carries the same signal up to sign
+  and mono is one of them. What does depend on it is the low end: bridged, as
+  Missile Command's and Tempest's cabinets are, the speaker current runs through
+  both C9s in series, a higher corner than the one C9 modeled.
 - **Whether the speakers are 8 ohms.** Not on either sheet, and the 6.0 Hz scales
   with it.
-- **Any measurement.** Nothing here has been compared against a capture.
+- **Any measurement against hardware.** The table above compares the model with
+  its own previous version, not with a capture of a board.
 
 ## Confidence
 

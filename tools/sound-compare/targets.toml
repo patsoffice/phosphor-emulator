@@ -808,8 +808,26 @@ pages 68-70, with the audio on page 69."""
 [[target]]
 id = "ccastles-output"
 machines = ["ccastles"]
-status = "missing"
+status = "partial"
 notes = """
+MODELED under phosphor-emulator-fd0d: each POKEY's open-drain output against
+R108 220 ohm into the front end's virtual ground at AREF, a 220 ohm pull-up to
++5 V as the devices see it, so a loud mix compresses to about 70 % of the linear
+sum; the 1:1 sum; the couplings at C31's 7.23 Hz; and the Regulator/Audio II
+amplifier (035435-01 rev F, C9 3300 uF) in `atari_regulator_audio.rs`. The
+front end's gain of 4.55 and the summer's 0.62 are a scale. Over the committed
+movie the 0-150 Hz share falls from 48.5 to 27.3 %, most of it the amplifier;
+nothing clips, and the LM324 front ends stay under half their swing.
+
+MONO IS ONE CHANNEL whatever the cabinet does: AUDIO 2 is AUDIO 1 through a
+unity inverter with no coupling. Not modeled: the cabinet wiring (sheet 1B not
+read), which decides whether the two C9s sit in series in a bridge as on Missile
+Command and Tempest; the TDA2002A's clipping; and anything checked against
+hardware. The device law at a 220 ohm load is the data sheet's rows
+extrapolated.
+
+What follows is the reading that row was built from.
+
 EXAMINED. Atari SP-241 sheet 8B, block `Audio Output`, and sheet 2A for the
 amplifier board, transcribed at docs/schematics/ccastles-audio-output.md. The
 row's own guess was right: there IS a summing amplifier after the POKEYs, and it
