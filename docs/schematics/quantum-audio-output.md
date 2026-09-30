@@ -30,8 +30,48 @@ the audio is the lower right of the three boxes on it.
 
 ## What the model does today
 
-`QuantumSystem::run_frame` drains two `Pokey`s, takes `(s0 + s1) * 0.5`, runs one
-shared `DcBlocker` at the 10 Hz default, and scales by 2.
+Modeled under `phosphor-emulator-1fvt`, in `QuantumBoard::mix_audio`.
+
+- **Each `Pokey` works into a virtual ground**, `PokeyLoad::VirtualGround` with no
+  series resistance at +5 V, so its output is the current its devices sink,
+  linear in their conductance. The 1k feedback is a scale.
+- **`pokey[0]` is 2/3D and `pokey[1]` is 2/3B**; see the next section.
+- 2/3B passes one 7.23 Hz coupling. 2/3D passes a 7.23 Hz coupling, the 32.88 Hz
+  low-pass, a second 7.23 Hz coupling, and a sign inversion. The two are summed
+  1:1 and halved, so every device on both chips is full scale, the convention
+  Missile Command and Tempest use.
+- Then the Regulator/Audio II model in `atari_regulator_audio.rs`, C9 3300 uF.
+- `AUD 2` is `AUD1` through a DC-coupled unity inverter, so one channel is the
+  mono mix. How the cabinet wires the speakers (sheet 1B) was not read; for this
+  mix it does not matter.
+
+Measured over the committed movie (`quantum-1787708617.phmi`, 27 s), against the
+previous `(s0 + s1) * 0.5` at 10 Hz:
+
+| | before | board, no amplifier | + amplifier |
+|---|---|---|---|
+| 0-150 Hz share | 31.9 % | 34.2 % | 17.4 % |
+| 1000-3000 Hz share | 22.4 % | 22.5 % | 28.4 % |
+| centroid | 1517 Hz | 1514 Hz | 1905 Hz |
+| AC RMS | -24.4 dBFS | -30.3 dBFS | -31.1 dBFS |
+| peak | -3.7 dBFS | -9.6 dBFS | -9.7 dBFS |
+
+**The board's asymmetry barely shows in this movie, and that is the movie, not
+the model.** The level falls 5.92 dB, the halving's 6.02 almost exactly, and no
+band moves more than 2.3 points. The movie hardly uses 2/3D: its current peaked
+at 1.8 mA against 2/3B's 9.4 mA and passed 1 mA in 48 of 2029 frames. Heard
+alone, 2/3D's path sits at -50.1 dBFS, 20 dB under the mix, with 92 % of its
+energy below 150 Hz and a centroid of 61 Hz. The spectral change is the
+amplifier's, as it was for Missile Command, Tempest and Crystal Castles. A
+capture that exercises 2/3D is what would test the low-pass stage.
+
+**2/3B's front end probably saturates on the loudest passage, and this is not
+modeled.** Every device on is 9.5 mA, or 9.5 V above `AREF` through the 1k. 2/3B
+reached 9.42 mA around frames 1397 to 1437, putting its LM324 near 14.4 V, above
+the roughly 13.5 V an LM324 reaches on a +15 V rail. Two things keep it
+unmodeled: the rail is not established (the drawing's +5 V could not work at
+all, since even 2/3D's 1.8 mA needs 6.8 V), and with the pin held at 5 V the
+devices run beyond the data sheet rows their conductances come from.
 
 ## The chain
 
@@ -142,12 +182,13 @@ different POKEY interfaces are collected.
 
 ## What it does NOT establish
 
-- **Which of the model's `pokey[0]` and `pokey[1]` is 2/3D.** `pokey[0]` is at
-  0x840000 and `pokey[1]` at 0x840020, and the chip selects were not traced back
-  from 2/3B and 2/3D. **Here it matters**, because it decides which chip loses its
-  top four octaves, unlike Food Fight and Crystal Castles where the two paths are
-  identical. It is the first thing anyone implementing this has to settle, and it
-  is the same question BurgerTime and Star Wars left open.
+- **Which of the model's `pokey[0]` and `pokey[1]` is 2/3D: now settled.** On
+  this same sheet, at full scale, both chips take the shared `CS` on pin 31
+  (sheet 4A: `I/OS` gated with `VMA` at 4J). AB5 goes straight to 2/3D's
+  active-low `CS0` on pin 30, and through an LS04 section at 4F/H (pin 9 in,
+  pin 8 out) to 2/3B's. So 2/3D answers with A5 clear, 0x840000, `pokey[0]`,
+  and 2/3B with it set, 0x840020, `pokey[1]`. Consistent with the pot pins: 2/3D
+  reads SW2 at 4C and 2/3B reads SW1 at 4B.
 - **The design intent of the low-pass.** Nothing on the sheet says why one chip is
   band-limited, and no attempt was made to infer it from what the game plays.
 - **`AREF`, and a supply label that does not add up.** `AREF` computes to +5 V
@@ -163,7 +204,8 @@ different POKEY interfaces are collected.
   reason.
 - **Whether the speakers are 8 ohms.** Not on either sheet, and the 6.0 Hz scales
   with it.
-- **Any measurement.** Nothing here has been compared against a capture.
+- **Any measurement against hardware.** The table above compares the model with
+  its own previous version, over a movie that barely exercises 2/3D.
 
 ## Confidence
 

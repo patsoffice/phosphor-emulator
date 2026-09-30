@@ -60,6 +60,8 @@ const SPEAKER_OHMS: f64 = 8.0;
 pub const C9_REV_B: f64 = 1000e-6;
 /// C9 on revision E of the board, Tempest's.
 pub const C9_REV_E: f64 = 3300e-6;
+/// C9 on revision F of the board, Quantum's (SP-221 sheet 2A).
+pub const C9_REV_F: f64 = 3300e-6;
 /// C9 on 035435-01 revision F, Crystal Castles'.
 pub const C9_01_REV_F: f64 = 3300e-6;
 

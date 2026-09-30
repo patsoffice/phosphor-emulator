@@ -1423,8 +1423,29 @@ phosphor-emulator-i8y7."""
 [[target]]
 id = "quantum-output"
 machines = ["quantum"]
-status = "missing"
+status = "partial"
 notes = """
+MODELED under phosphor-emulator-1fvt. pokey[0] (0x840000) is 2/3D and pokey[1]
+(0x840020) is 2/3B: AB5 goes straight to 2/3D's active-low CS0 and through an
+LS04 at 4F/H to 2/3B's (sheet 9A), which the pot wiring (SW2 and SW1) agrees
+with. Each chip works into a virtual ground (PokeyLoad::VirtualGround, no series
+resistance), so its output is the current its devices sink. 2/3B passes one
+7.23 Hz coupling; 2/3D passes two and the 32.88 Hz low-pass and arrives
+inverted; summed 1:1, then the Regulator/Audio II amplifier (035435-02 rev F,
+C9 3300 uF). Unit tests pin 2/3D at -30.2 dB against 2/3B near 1 kHz and the
+two in opposite polarity.
+
+Over the committed movie the 0-150 Hz share goes 31.9 to 17.4 %, all of it the
+amplifier: the movie barely uses 2/3D (peak 1.8 mA against 2/3B's 9.4 mA; its
+path alone is 20 dB under the mix), so the low-pass stage is modeled from the
+drawing and not yet tested by any capture. Not modeled: 2/3B's LM324 probably
+saturates on the loudest passage (9.42 mA, about 14.4 V against about 13.5 V on
+a +15 V rail), but the rail is not established; the cabinet wiring (sheet 1B,
+not read; the mix does not depend on it); the TDA2002A's clipping; and anything
+checked against hardware.
+
+What follows is the reading that row was built from.
+
 EXAMINED. Atari SP-221 sheet 9A, block `Audio Output`, and sheet 2A for the
 amplifier board, transcribed at docs/schematics/quantum-audio-output.md.
 

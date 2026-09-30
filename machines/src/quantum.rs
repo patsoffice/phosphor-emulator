@@ -23,12 +23,13 @@
 //!
 //! The audio output is transcribed in
 //! [`docs/schematics/quantum-audio-output.md`](../../docs/schematics/quantum-audio-output.md).
-//! The `* 0.5` below is NOT the board's law. Both POKEYs land on a transimpedance
-//! amplifier, but only one goes straight to the mixer: the other passes an extra
-//! inverting stage whose feedback is 220k in parallel with 0.022 uF, a low-pass at
-//! 32.9 Hz, so it arrives inverted and about 30 dB down at 1 kHz. Also unmodelled:
-//! 7.23 Hz couplings throughout, an antiphase output pair, and two TDA2002A
-//! channels driving two speakers. See `phosphor-emulator-1fvt`.
+//! Modeled under `phosphor-emulator-1fvt`: both POKEYs land on a transimpedance
+//! amplifier at a virtual ground, so each chip's output is the current its
+//! devices sink; only 2/3B, `pokey[1]`, goes straight to the mixer, and 2/3D,
+//! `pokey[0]`, passes an extra inverting stage that low-passes it at 32.88 Hz, so
+//! it arrives inverted and about 30 dB down at 1 kHz. Every coupling is 0.1 uF
+//! into 220k, 7.23 Hz, and the Regulator/Audio II amplifier (035435-02 rev F)
+//! follows the mixer. See `QuantumBoard::mix_audio`.
 //!
 //! Hardware reference: MAME `src/mame/atari/quantum.cpp`.
 //!
@@ -55,6 +56,7 @@
 //! the containing word, so low-byte I/O writes (POKEY, NVRAM, color RAM,
 //! `led_w`) take `data & 0xFF` and I/O reads stay side-effect-light.
 
+use crate::atari_regulator_audio::{C9_REV_F, RegulatorAudioII};
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::display::display_settings;
@@ -71,7 +73,7 @@ use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyLoad};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::atari_dvg::rasterize_vectors;
@@ -435,11 +437,47 @@ pub struct QuantumBoard {
     /// next frame refills.
     #[save_skip(default = SampleRing::with_capacity(2048))]
     audio_buffer: SampleRing<i16>,
-    /// Output coupling capacitor: POKEY is unipolar and idles at zero, so the
-    /// DC must be tracked and removed rather than a fixed midpoint assumed.
-    #[save(id = 15)]
-    dc_blocker: DcBlocker,
+    // The audio output's filters, sheet 9A. Save id 15 was the single 10 Hz
+    // coupling these replaced, and is retired.
+    /// C79 0.1 uF into R206 220k: 2/3B's coupling into the mixer, 7.23 Hz.
+    #[save(id = 16)]
+    direct_coupling: DcBlocker,
+    /// C55 0.1 uF into R211 220k: 2/3D's coupling into its extra stage.
+    #[save(id = 17)]
+    stage_input_coupling: DcBlocker,
+    /// R212 220k in parallel with C80 0.022 uF: the extra stage's 32.88 Hz
+    /// low-pass, taken as the input less a one-pole high-pass at the same
+    /// corner, which is the one-pole low-pass exactly.
+    #[save(id = 18)]
+    stage_low_pass: DcBlocker,
+    /// C81 0.1 uF into R213 220k: the extra stage's coupling into the mixer.
+    #[save(id = 19)]
+    stage_output_coupling: DcBlocker,
+    /// The Regulator/Audio II PCB's amplifier, 035435-02 rev F.
+    #[save(id = 20)]
+    amp: RegulatorAudioII,
 }
+
+/// Each POKEY's pin 37, straight into the inverting input of an LM324 section
+/// whose non-inverting input is `AREF`, with 1k of feedback (R205 for 2/3B at
+/// 3A, R210 for 2/3D at 3C). No series resistor, so the pin is held at `AREF`
+/// and the chip's output is the current its devices sink, linear in their
+/// conductance; the 1k turns it into a voltage and is a scale here.
+///
+/// `AREF` is R204 220k to +5 V with C78 to ground, so +5 V. The transcription
+/// records that 3C is drawn with +5 V on its own supply pin, which an LM324
+/// could not reconcile with that reference; it is unresolved, and with no
+/// series resistance the reference is a pure scale on the current, so nothing
+/// here depends on it.
+const QUANTUM_POKEY_LOAD: PokeyLoad = PokeyLoad::VirtualGround {
+    series_ohms: 0.0,
+    reference_v: 5.0,
+};
+
+/// Every coupling on the sheet is 0.1 uF into 220k: 7.23 Hz.
+const COUPLING_HZ: f64 = 1.0 / (std::f64::consts::TAU * 220_000.0 * 0.1e-6);
+/// R212 220k and C80 0.022 uF, the extra stage's feedback: 32.88 Hz.
+const STAGE_LOW_PASS_HZ: f64 = 1.0 / (std::f64::consts::TAU * 220_000.0 * 0.022e-6);
 
 /// Quantum reads each trackball counter as a small signed 4-bit per-frame
 /// delta, so a step larger than +-7 aliases into a stall or a reversal. The
@@ -477,6 +515,13 @@ impl QuantumSystem {
     }
 
     pub fn new() -> Self {
+        let rate = phosphor_core::audio::host_sample_rate();
+        let pokey = || {
+            let mut p = Pokey::with_clock(POKEY_CLOCK_HZ, rate);
+            p.set_output_load(QUANTUM_POKEY_LOAD);
+            p
+        };
+        let coupling = |hz: f64| DcBlocker::with_cutoff(hz as f32, rate);
         let mut sys = Self {
             cpu: M68000::new(),
             board: QuantumBoard {
@@ -486,10 +531,7 @@ impl QuantumSystem {
                     TIMING.display_width as i32,
                     TIMING.display_height as i32,
                 ),
-                pokey: [
-                    Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
-                    Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
-                ],
+                pokey: [pokey(), pokey()],
                 color_ram: [0; 16],
                 nvram: [0xFF; 256], // X2212 powers up 1-filled
                 display_list: Vec::with_capacity(2048),
@@ -504,7 +546,11 @@ impl QuantumSystem {
                 clock: 0,
                 watchdog_count: 0,
                 audio_buffer: SampleRing::with_capacity(2048),
-                dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+                direct_coupling: coupling(COUPLING_HZ),
+                stage_input_coupling: coupling(COUPLING_HZ),
+                stage_low_pass: coupling(STAGE_LOW_PASS_HZ),
+                stage_output_coupling: coupling(COUPLING_HZ),
+                amp: RegulatorAudioII::new(C9_REV_F, rate),
             },
         };
         sys.board.refresh_dip_pots();
@@ -557,6 +603,42 @@ impl QuantumBoard {
             };
             self.pokey[0].set_pot_input(n, l0);
             self.pokey[1].set_pot_input(n, l1);
+        }
+    }
+
+    /// Drain both POKEYs and mix them to mono, as sheet 9A does.
+    ///
+    /// `pokey[0]` at 0x840000 is 2/3D and `pokey[1]` at 0x840020 is 2/3B: both
+    /// take the shared CS, and AB5 goes straight to 2/3D's active-low CS0 and
+    /// through an LS04 section at 4F/H to 2/3B's.
+    ///
+    /// 2/3B goes from its transimpedance stage through C79 into the mixer. 2/3D
+    /// goes through C55 into an extra inverting stage, gain `-R212/R211` = -1
+    /// with C80 across R212, a low-pass at 32.88 Hz, and then through C81 into
+    /// the mixer. The mixer's legs are equal (R206 and R213 into R207, all
+    /// 220k), so the two arrive 1:1 in magnitude in the flat band, with 2/3D
+    /// inverted against 2/3B and band-limited: about 30 dB down at 1 kHz. The
+    /// mixer's own inversion is common to both and dropped.
+    ///
+    /// Each chip's current over its full scale is 1.0 with every device on;
+    /// halved, so the pair's largest sum is 1.0, the convention Missile Command
+    /// and Tempest use, with the amplifier at unity in the band. `AUD 2` is
+    /// `AUD1` through a DC-coupled unity inverter, so the two amplifier channels
+    /// carry one signal up to sign and one is the mono mix. Cascaded couplings
+    /// can overshoot, so the clamp stays as a guard.
+    fn mix_audio(&mut self) {
+        let s0 = self.pokey[0].drain_audio();
+        let s1 = self.pokey[1].drain_audio();
+        let len = s0.len().min(s1.len());
+        let full = QUANTUM_POKEY_LOAD.full_scale() as f32;
+        for i in 0..len {
+            let direct = self.direct_coupling.process(s1[i] / full);
+            let coupled = self.stage_input_coupling.process(s0[i] / full);
+            let low_passed = coupled - self.stage_low_pass.process(coupled);
+            let band_limited = self.stage_output_coupling.process(low_passed);
+            let mixed = self.amp.process(0.5 * (direct - band_limited));
+            self.audio_buffer
+                .push((mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
     }
 
@@ -950,28 +1032,7 @@ impl MachineCore for QuantumSystem {
             self.reset();
         }
 
-        // Mix the two POKEYs to mono.
-        let s0 = self.board.pokey[0].drain_audio();
-        let s1 = self.board.pokey[1].drain_audio();
-        let len = s0.len().min(s1.len());
-        let blocker = &mut self.board.dc_blocker;
-        self.board.audio_buffer.extend((0..len).map(|i| {
-            // Both POKEYs are unipolar [0, 1] and idle at *zero*, so a coupling
-            // capacitor is what centres the mix. Subtracting a fixed 0.5 instead
-            // mapped silence to -32767 and pinned the output. The board has
-            // several, all 0.1 uF into 220k, so every high-pass on it is 7.23 Hz
-            // against this blocker's 10 Hz default.
-            //
-            // The `* 0.5` is NOT the board's law, though: only one of the two
-            // chips goes straight from its transimpedance buffer to the mixer.
-            // The other passes an extra inverting stage whose feedback is R212
-            // 220k in parallel with C80 0.022 uF, a low-pass at 32.9 Hz, so it
-            // arrives inverted and about 30 dB down at 1 kHz. Which chip that is
-            // has not been traced back to `pokey[0]` and `pokey[1]`, and that is
-            // the first question in `phosphor-emulator-1fvt`.
-            let mixed = (s0[i] + s1[i]) * 0.5;
-            (blocker.process(mixed) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
-        }));
+        self.board.mix_audio();
     }
 
     fn reset(&mut self) {
@@ -985,7 +1046,11 @@ impl MachineCore for QuantumSystem {
         self.board.track_x = new_track_counter();
         self.board.track_y = new_track_counter();
         self.board.audio_buffer.clear();
-        self.board.dc_blocker.reset();
+        self.board.direct_coupling.reset();
+        self.board.stage_input_coupling.reset();
+        self.board.stage_low_pass.reset();
+        self.board.stage_output_coupling.reset();
+        self.board.amp.reset();
         for p in &mut self.board.pokey {
             p.reset();
         }
@@ -1161,6 +1226,66 @@ MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two seconds of the board's mixed output with channel 1 of each chip in
+    /// `chips` playing a pure tone at volume 15, set by `audctl` and `audf`.
+    fn mixed_tone(chips: &[usize], audctl: u8, audf: u8) -> Vec<f32> {
+        let mut sys = QuantumSystem::new();
+        for &c in chips {
+            let p = &mut sys.board.pokey[c];
+            p.write(0x0F, 0x03); // SKCTL: out of reset
+            p.write(0x08, audctl);
+            p.write(0x00, audf); // AUDF1
+            p.write(0x01, 0xAF); // AUDC1: pure tone, volume 15
+        }
+        let mut out = Vec::new();
+        let mut chunk = [0i16; 2048];
+        for _ in 0..(2 * POKEY_CLOCK_HZ / 10_000) {
+            for _ in 0..10_000 {
+                sys.board.pokey[0].tick();
+                sys.board.pokey[1].tick();
+            }
+            sys.board.mix_audio();
+            let n = sys.board.audio_buffer.pop_front_into(&mut chunk);
+            out.extend(chunk[..n].iter().map(|&s| s as f32));
+        }
+        out
+    }
+
+    /// RMS of the second half, past the couplings' settling.
+    fn rms(s: &[f32]) -> f32 {
+        let tail = &s[s.len() / 2..];
+        (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt()
+    }
+
+    /// 600 kHz / 28 / 2 / 11, about 974 Hz.
+    const TONE_1K: (u8, u8) = (0x00, 10);
+    /// 600 kHz / 114 / 2 / 256, about 10.3 Hz: the 15 kHz base clock.
+    const TONE_10HZ: (u8, u8) = (0x01, 255);
+
+    /// 2/3D, `pokey[0]`, passes the 32.88 Hz stage and 2/3B, `pokey[1]`, does
+    /// not, so at about 1 kHz the first arrives near 30 dB below the second:
+    /// -30.2 dB measured, against -29.7 dB for a sine at 1 kHz. An equal mix
+    /// gives 0 dB, and the chips swapped give +30.2 dB.
+    #[test]
+    fn pokey_0_is_the_chip_behind_the_low_pass() {
+        let d = rms(&mixed_tone(&[0], TONE_1K.0, TONE_1K.1));
+        let b = rms(&mixed_tone(&[1], TONE_1K.0, TONE_1K.1));
+        let db = 20.0 * (d / b).log10();
+        assert!((-33.0..-26.0).contains(&db), "2/3D against 2/3B: {db} dB");
+    }
+
+    /// Well inside the low-pass the two paths are near equal in size and
+    /// opposite in sign, so the same tone on both chips is quieter than 2/3B
+    /// alone: 0.74 of it. Only the fundamental cancels; the square wave's
+    /// harmonics pass 2/3B's path and not 2/3D's. With the two in phase the
+    /// pair measures 1.44 of 2/3B alone, so this fails for that.
+    #[test]
+    fn the_two_chips_arrive_in_opposite_polarity() {
+        let both = rms(&mixed_tone(&[0, 1], TONE_10HZ.0, TONE_10HZ.1));
+        let b = rms(&mixed_tone(&[1], TONE_10HZ.0, TONE_10HZ.1));
+        assert!(both < 0.9 * b, "both {both} against 2/3B alone {b}");
+    }
 
     /// `AVG_CYCLES_PER_CPU_CYCLE` is a hand-derived integer sitting in a
     /// comment. It is the ratio between two domains of the declared tree, so
