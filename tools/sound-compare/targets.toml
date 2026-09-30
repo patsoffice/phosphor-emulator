@@ -1223,8 +1223,30 @@ arcade-museum StarWars.pdf, with all the audio on 142 and 143."""
 [[target]]
 id = "foodf-output"
 machines = ["foodf"]
-status = "missing"
+status = "partial"
 notes = """
+MODELED under phosphor-emulator-034y, on Tempest's pattern: each POKEY's
+open-drain output against R73/R72/R74 910 ohm and 0.015 uF, the 1:1:1 sum, and
+the Regulator/Audio II amplifier (035435-01 rev G, C9 3300 uF). The summer's
+11/18 per chip is a scale.
+
+MONO IS RIGHT: sheet 1B and the utility panel on sheet 3A wire the upright's one
+speaker across P8's two SPKR pins through the volume control R1, wiper on BN,
+Tempest's wiring. So the speaker hears AUDIO+ plus AUDIO+ through C48/R49,
+15.9 Hz on that half alone, which is now modeled. Over the committed movie the
+0-150 Hz share goes 37.1 to 15.9 %, level within 0.5 dB, nothing clipped; the
+pin load alone moves little but the top octave.
+
+NOT MODELED: the summer's DC operating point. Taken at face value (pins resting
+at 5 V, 10.3 V unregulated, LM324 swing V+ - 1.5 V) it idles at 9.17 V in
+saturation and loses 32.7 % of the movie's active samples, 94.9 % at the op-amp's
+worst-case swing; a game that silent is not what shipped, so a premise is off
+(the pins' rest level, the rail, or the swing), and none is on a sheet. Also
+not modeled: the bridged C9 pair, which depends on the volume setting; the
+TDA2002A's clipping; and any hardware comparison.
+
+What follows is the reading that row was built from.
+
 EXAMINED. THE ROW'S OWN QUESTION IS ANSWERED: SP-229 does carry the audio sheet.
 The same package whose sheets 7B, 8A and 8B were read for this board's VIDEO
 under phosphor-emulator-aih3 carries sheet 10A, `Food Fight Sound`, which is the

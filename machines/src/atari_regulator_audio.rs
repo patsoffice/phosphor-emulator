@@ -64,6 +64,8 @@ pub const C9_REV_E: f64 = 3300e-6;
 pub const C9_REV_F: f64 = 3300e-6;
 /// C9 on 035435-01 revision F, Crystal Castles'.
 pub const C9_01_REV_F: f64 = 3300e-6;
+/// C9 on 035435-01 revision G, Food Fight's (SP-229 sheet 2B).
+pub const C9_01_REV_G: f64 = 3300e-6;
 
 fn corner_hz(ohms: f64, farads: f64) -> f32 {
     (1.0 / (std::f64::consts::TAU * ohms * farads)) as f32

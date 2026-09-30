@@ -25,11 +25,12 @@
 //!
 //! The audio output is transcribed in
 //! [`docs/schematics/foodf-audio-output.md`](../../docs/schematics/foodf-audio-output.md).
-//! The three POKEYs reach one node through equal 330k legs, so the `/ 3.0` below
-//! is the board's 1:1:1 weighting, confirmed. What is NOT modelled is everything
-//! else: a 910 ohm / 0.015 uF load per POKEY, a non-inverting gain of 11, an
-//! antiphase output pair whose two halves do not share a corner, and two TDA2002A
-//! channels driving two speakers. See `phosphor-emulator-034y`.
+//! The three POKEYs reach one node through equal 330k legs, so the plain sum below
+//! is the board's 1:1:1 weighting, confirmed. Modeled under
+//! `phosphor-emulator-034y`: each POKEY's 910 ohm / 0.015 uF load, the antiphase
+//! pair's asymmetric coupling (C48 into R49 on `AUDIO-` only), which the
+//! cabinet's bridged speaker hears, and the Regulator/Audio II amplifier. The
+//! summer's gain of 11 is a scale.
 //!
 //! Hardware reference: MAME `src/mame/atari/foodf.cpp`.
 //!
@@ -58,6 +59,7 @@
 //! side-effect-light, so the stray RMW read is harmless. This is the documented
 //! limitation in the m68000 README and the main thing to watch during bring-up.
 
+use crate::atari_regulator_audio::{C9_01_REV_G, RegulatorAudioII};
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
@@ -71,7 +73,7 @@ use phosphor_core::core::{Bus, Bus16, BusMaster, TimingConfig, select_byte};
 use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyOutputNetwork};
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::{combine_weights, compute_resistor_weights};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
@@ -502,6 +504,21 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
 const POKEY_CLOCK_HZ: u32 = 604_800;
 const CPU_PER_POKEY: u64 = 10;
 
+/// Each POKEY's pin 37 load, sheet 10A: 910 ohm to +5 V and 0.015 uF mylar to
+/// ground (R73/C54, R72/C53, R74/C55). Tempest's capacitor against a resistor
+/// eleven times smaller, so the corner runs from 11.7 kHz with the chip silent
+/// upward: above the band, but the stiff pull-up also sets how much a loud mix
+/// compresses.
+const FOODF_POKEY_LOAD: PokeyOutputNetwork = PokeyOutputNetwork {
+    pullup_ohms: 910.0,
+    supply_v: 5.0,
+    load_farads: 0.015e-6,
+};
+
+/// C48 and R49, the coupling into the `AUDIO-` inverter.
+const C48: f64 = 0.1e-6;
+const R49: f64 = 100_000.0;
+
 /// First blanked scanline, where VBLANK rises and IRQ2 with it.
 const VBLANK_SCANLINE: u16 = 224;
 
@@ -612,10 +629,16 @@ pub struct FoodFightBoard {
     /// next frame refills.
     #[save_skip(default = SampleRing::with_capacity(2048))]
     audio_buffer: SampleRing<i16>,
-    /// Output coupling capacitor: POKEY is unipolar and idles at zero, so the
-    /// DC must be tracked and removed rather than a fixed midpoint assumed.
-    #[save(id = 15)]
-    dc_blocker: DcBlocker,
+    // Save id 15 was the single 10 Hz coupling these replaced, and is retired.
+    /// C48 0.1 uF into R49 100k at the `AUDIO-` inverter's virtual ground, a
+    /// high-pass at 15.9 Hz on that leg alone.
+    #[save(id = 16)]
+    audio_minus_coupling: DcBlocker,
+    /// The Regulator/Audio II PCB's amplifier, 035435-01 rev G. Its input
+    /// coupling C6 is the first series capacitor on `AUDIO+`, which is
+    /// DC-coupled from the POKEY pins.
+    #[save(id = 17)]
+    amp: RegulatorAudioII,
 
     /// Display framebuffer (native 256x224 RGB), filled one row at a time as
     /// the beam reaches each visible scanline.
@@ -781,13 +804,15 @@ impl FoodFightBoard {
     }
 
     pub fn new() -> Self {
+        let rate = phosphor_core::audio::host_sample_rate();
+        let pokey = || {
+            let mut p = Pokey::with_clock(POKEY_CLOCK_HZ, rate);
+            p.set_output_network(FOODF_POKEY_LOAD);
+            p
+        };
         let mut sys = Self {
             map: Self::build_map(),
-            pokey: [
-                Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
-                Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
-                Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
-            ],
+            pokey: [pokey(), pokey(), pokey()],
             tile_cache: GfxCache::new(512, 8, 8),
             sprite_cache: GfxCache::new(256, 16, 16),
             palette_ram: [0; 256],
@@ -807,7 +832,11 @@ impl FoodFightBoard {
             clock: 0,
             watchdog_count: 0,
             audio_buffer: SampleRing::with_capacity(2048),
-            dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            audio_minus_coupling: DcBlocker::with_cutoff(
+                (1.0 / (std::f64::consts::TAU * R49 * C48)) as f32,
+                rate,
+            ),
+            amp: RegulatorAudioII::new(C9_01_REV_G, rate),
             framebuffer: vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3],
         };
         sys.refresh_dip_pots();
@@ -1478,29 +1507,37 @@ impl MachineCore for FoodFightSystem {
         }
 
         // Mix the three POKEYs to mono.
+        //
+        // Each POKEY's output is how far its pin 37 sits below +5 V. The 1:1:1
+        // weighting is the board's: R70, R69 and R71 are all 330k into one node
+        // with R68 22k to ground, then a non-inverting gain of 11, which is
+        // 11/18 per POKEY at `AUDIO+`. That factor is a scale and cancels here:
+        // dividing by all three chips' full drop makes every device on all
+        // three read 1.0, the full scale Missile Command and Tempest use, with
+        // the amplifier at unity in the band. Cascaded couplings can overshoot
+        // their input, so the clamp stays as a guard.
+        //
+        // `AUDIO+` is DC-coupled from the pins; the amplifier's input coupling
+        // is what removes its DC. `AUDIO-` is `AUDIO+` inverted through C48
+        // into R49, 15.9 Hz. The cabinet bridges its one speaker across the
+        // amplifier's two outputs through the volume control (sheet 1B and the
+        // utility panel on sheet 3A, Tempest's wiring), so the speaker hears
+        // `AUDIO+` plus `AUDIO+` through C48. The channels are identical and
+        // linear, so the difference is taken before one amplifier model rather
+        // than after two. Halved, so the band stays at unity.
         let s0 = self.board.pokey[0].drain_audio();
         let s1 = self.board.pokey[1].drain_audio();
         let s2 = self.board.pokey[2].drain_audio();
         let len = s0.len().min(s1.len()).min(s2.len());
-        let blocker = &mut self.board.dc_blocker;
-        self.board.audio_buffer.extend((0..len).map(|i| {
-            // All three POKEYs are unipolar [0, 1] and idle at *zero*, so a
-            // coupling capacitor is what centres the mix. Subtracting a fixed
-            // 0.5 instead mapped silence to -32767 and pinned the output.
-            //
-            // The capacitor is real but it is two connectors away: sheet 10A is
-            // DC-coupled from pin 37 to `AUDIO+`, and the first series capacitor
-            // in that path is C6 or C15, 0.22 uF, at the Regulator/Audio II
-            // board's amplifier input. Missile Command is the same arrangement.
-            // The `AUDIO-` half of the pair does have one on the game PCB, C48
-            // 0.1 uF into R49 100k at 15.9 Hz, so the two halves of the antiphase
-            // pair do not share a corner. One `DcBlocker` stands in for all of it.
-            //
-            // The `/ 3.0` is the board's: R70, R69 and R71 are all 330k into one
-            // node with R68 22k to ground, so the three chips are mixed 1:1:1.
-            let mixed = (s0[i] + s1[i] + s2[i]) / 3.0;
-            (blocker.process(mixed) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
-        }));
+        let full = 3.0 * FOODF_POKEY_LOAD.full_drop_v() as f32;
+        let b = &mut self.board;
+        for i in 0..len {
+            let audio_plus = (s0[i] + s1[i] + s2[i]) / full;
+            let bridged = 0.5 * (audio_plus + b.audio_minus_coupling.process(audio_plus));
+            let mixed = b.amp.process(bridged);
+            b.audio_buffer
+                .push((mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+        }
     }
 
     fn reset(&mut self) {
@@ -1511,7 +1548,8 @@ impl MachineCore for FoodFightSystem {
         self.board.adc_channel = 0;
         self.board.system_input = 0xFF;
         self.board.audio_buffer.clear();
-        self.board.dc_blocker.reset();
+        self.board.audio_minus_coupling.reset();
+        self.board.amp.reset();
         for p in &mut self.board.pokey {
             p.reset();
         }
@@ -1656,6 +1694,29 @@ crate::register_machine!(FoodFightSystem, "foodf", &["foodf"], FOODF_CONTROLS);
 mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
+
+    /// Pin 37's settled drop below +5 V with channel 1 of `pokey[0]` alone,
+    /// volume-only, at `vol`.
+    fn pokey0_drop_at(vol: u8) -> f32 {
+        let mut board = FoodFightBoard::new();
+        board.pokey[0].write(0x0F, 0x03); // SKCTL: out of reset
+        board.pokey[0].write(0x01, 0x10 | vol); // AUDC1: volume only
+        for _ in 0..20_000 {
+            board.pokey[0].tick();
+        }
+        *board.pokey[0].drain_audio().last().unwrap()
+    }
+
+    /// Each POKEY works into 910 ohm to +5 V, so bit 3's device alone pulls
+    /// about 18.0 times what bit 0's does: the data sheet's 22.6 to 1,
+    /// compressed by the stiff pull-up. The linear mix would give 8, Tempest's
+    /// 10k about 6.5 and Crystal Castles' 220 ohm about 21.3, so this fails for
+    /// any of them.
+    #[test]
+    fn each_pokey_works_into_910_ohm() {
+        let ratio = pokey0_drop_at(8) / pokey0_drop_at(1);
+        assert!((17.5..18.5).contains(&ratio), "vol 8 / vol 1 = {ratio}");
+    }
 
     /// Every palette byte comes out the same as the three ladders solved as one
     /// network: each bit's weight a Thevenin divider against the other bits,

@@ -38,9 +38,49 @@ checked.
 
 ## What the model does today
 
-`FoodfSystem::run_frame` drains three `Pokey`s, averages them with
-`(s0 + s1 + s2) / 3.0`, runs one shared `DcBlocker` at the 10 Hz default, and
-scales by 2. That is the whole model.
+Modeled under `phosphor-emulator-034y`, on the pattern Tempest set.
+
+- Each `Pokey` works into a `PokeyOutputNetwork` of 910 ohm to +5 V with
+  0.015 uF, so its output is how far pin 37 falls below +5 V through the
+  open-drain devices.
+- `run_frame` sums the three drops 1:1:1 and divides by all three chips' full
+  drop, so every device on all three reads 1.0. The summer's 11/18 per chip is
+  a scale.
+- The cabinet bridges its one speaker across the amplifier's two outputs (see
+  below), so the speaker hears `AUDIO+` plus `AUDIO+` through C48 into R49, a
+  15.9 Hz high-pass on that half alone. That is summed and halved before one
+  Regulator/Audio II model (`atari_regulator_audio.rs`, C9 3300 uF), whose
+  input coupling is what removes `AUDIO+`'s DC.
+
+Measured over the committed movie (`foodf-1787707695.phmi`, 36 s), against the
+previous `(s0 + s1 + s2) / 3.0` at 10 Hz, with the pin load isolated first:
+
+| | before | pin load only, 10 Hz kept | + bridge and amplifier |
+|---|---|---|---|
+| 0-150 Hz share | 37.1 % | 36.9 % | 15.9 % |
+| 150-400 Hz share | 37.6 % | 38.5 % | 51.0 % |
+| 8000+ Hz share | 1.08 % | 0.61 % | 0.82 % |
+| centroid | 593 Hz | 515 Hz | 688 Hz |
+| AC RMS | -27.3 dBFS | -27.2 dBFS | -27.8 dBFS |
+
+The pin load barely moves the picture: it takes a little off the top, which is
+its 11.7 kHz and higher corner. The low end is the amplifier's, as on Missile
+Command, Tempest, Quantum and Crystal Castles. Nothing clips.
+
+**The summing stage's DC operating point is a mechanism with its values
+unknown, and it is not modeled.** The stage is DC-coupled: its output is
+`0.611 * (sum of the three pin voltages)`, so with every pin resting at +5 V it
+idles at **9.17 V** on a supply labeled `10.3 UNREG`. An LM324 swings to about
+V+ - 1.5 V typically and V+ - 3 V at worst, so taken at face value the stage
+would sit in saturation at idle and pass nothing until the pins' total drop
+exceeded 0.60 V (typical) or 3.05 V (worst). Over the movie, 32.7 % and 94.9 %
+of the active samples fall below those two thresholds, and the total drop never
+exceeds 6.65 V. The worst case would make the game nearly silent, which no real
+cabinet was, so at least one premise is wrong. The candidates are all off-sheet:
+the pins' rest level (the data sheet bounds it only at 4.2 V or more, and at
+4.2 V the stage idles at 7.7 V, comfortably linear), the actual voltage of an
+unregulated rail at this load, and the op-amp's real swing. A measurement of a
+board's `AUDIO+` at idle would settle it.
 
 ## The chain
 
@@ -196,15 +236,21 @@ direction is safe to assume; both have to be read.
   depend on it.
 - **The DC operating point of the summing stage.** It is DC-coupled and runs
   single-supply from 10.3 V unregulated, so where it sits depends on the DC level
-  at the POKEY's `AUD` pin, which is on no sheet. The stage's headroom cannot be
-  checked without it.
-- **Which of `AUDIO+` and `AUDIO-` reaches `AUDIO 1 INPUT` and which reaches
-  `AUDIO 2 INPUT`.** That is on sheet 1B, the main wiring diagram, which was not
-  read. The two amplifier channels are identical, so it decides the phase between
-  the two speakers and nothing else.
-- **Whether the speakers are 8 ohms.** Not on either sheet, and the 6.0 Hz above
-  scales with it.
-- **Any measurement.** Nothing here has been compared against a capture.
+  at the POKEY's `AUD` pin, which is on no sheet. Taken at face value it
+  saturates at idle, which the measurements above show cannot be the whole
+  story; see there.
+- **How the cabinet wires the speaker: now read.** Sheet 1B (`Food Fight Main
+  Wiring Diagram`, the US version, PDF p2) and the utility panel on sheet 3A (PDF p5): the
+  amplifier's P8 carries `SPKR 2` on W and `SPKR 1` on OR; J29 takes them to the
+  two ends of R1 `VOLUME CONTROL`, whose wiper returns on BN; and the upright's
+  one speaker LS1 sits on W and BN through P31/J31. That is Tempest's wiring: a
+  bridge, the pair heard in phase. Which of `AUDIO+` and `AUDIO-` feeds which
+  channel does not matter to a bridge. The speaker's impedance and R1's value
+  are not on these sheets, and as on Tempest the two C9s in series (a higher
+  corner than the one C9 modeled) depend on the volume setting and are not
+  modeled.
+- **Any measurement against hardware.** The tables above compare the model with
+  its own previous version.
 
 ## Confidence
 
