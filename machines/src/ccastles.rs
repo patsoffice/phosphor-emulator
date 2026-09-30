@@ -24,7 +24,11 @@
 //! +5 V as the open-drain devices see it (see [`CCASTLES_POKEY_LOAD`]); the
 //! couplings at their 7.23 Hz; and the Regulator/Audio II amplifier, 035435-01
 //! rev F. The front end's gain of `R109/R108` and the summer's 0.62 are a scale.
-//! The antiphase pair is one signal up to sign, so mono is one channel of it.
+//! The antiphase pair is one signal up to sign, and the cabinet (SP-241 sheets
+//! 1B and 2B) bridges its two 8 ohm speakers across both amplifier outputs, so
+//! they hear it in phase and mono is one channel of it up to a scale. Not
+//! modeled: in the bridge the two C9s sit in series, about 26 Hz at full volume
+//! against the 6.0 Hz of one C9 into 8 ohm, and the corner moves with the knob.
 
 use crate::atari_regulator_audio::{C9_01_REV_F, RegulatorAudioII};
 use phosphor_core::audio::{DcBlocker, SampleRing};
@@ -1403,7 +1407,8 @@ impl MachineCore for CrystalCastlesSystem {
         //
         // `AUDIO 2` is `AUDIO 1` through a unity inverter with no coupling (R131
         // and R132 both 100k), so the two amplifier channels carry one signal up
-        // to sign. However the cabinet wires them, one channel is the mono mix.
+        // to sign. The cabinet bridges its speakers across the two, so they hear
+        // twice one channel, and one channel is the mono mix.
         let full = 2.0 * CCASTLES_POKEY_LOAD.full_drop_v() as f32;
         let coupling = &mut self.board.pokey_coupling;
         let amp = &mut self.board.amp;

@@ -143,6 +143,52 @@ This is the fifth game in the sweep on that board. The set is tabulated under
 [`foodf-audio-output.md`](foodf-audio-output.md), which is also where the six
 different POKEY interfaces are collected.
 
+## How the cabinet wires the speakers
+
+Read 2026-09-29, after `phosphor-emulator-fd0d` landed.
+
+| | |
+|---|---|
+| Drawing | `Crystal Castles Main Wiring Diagram`, SP-241 sheet 1B, 2nd printing, PDF p65 |
+| Drawing | `Utility Panel Wiring Diagram`, on `Crystal Castles Game Interfaces`, SP-241 sheet 2B, 2nd printing, PDF p67 |
+| Parts | Speaker Assembly A040108-01 (Figure 5-5, manual p5-9): 148001-017, `6 x 9-Inch Oval, 8 Ω, 6-Ounce, Shielded High-Fidelity Speaker` |
+| Parts | Utility Panel Assembly A038002-01 (Figure 5-6, manual p5-10): volume control **19-9032**, the part number Missile Command's parts list gives as `50-Ohm, 12½-Watt, Wirewound Rheostat` (see [`atari-pokey-audio-output.md`](atari-pokey-audio-output.md)) |
+
+**The cabinet bridges two speakers across the amplifier's two outputs**, the
+same wiring Missile Command and Tempest use. Traced:
+
+- The Regulator/Audio II's P8 carries `SPKR` on pin 3 (W) and pin 4 (OR). Its
+  returns are not taken.
+- Both run down to the utility panel's J29, pins 1 (W) and 2 (OR), which go to
+  the two ends of R1 `VOLUME CONTROL`. J29 pin 3 (BN) is R1's wiper.
+- LS1 and LS2 are drawn in parallel: both `+` terminals on the W net, which is
+  pin 3's `SPKR`, and both other terminals on BN, the wiper.
+
+So the two speakers sit between one amplifier output and the wiper, with R1
+across both outputs. At full volume the wiper is at the OR end and the speakers
+are across the pair directly, shunted by the whole 50 ohm.
+
+What it means for the model:
+
+- **The antiphase pair is heard in phase.** The speakers see the difference of
+  the two outputs, which is twice either one, since `AUDIO 2` is `AUDIO 1`
+  through a DC-coupled unity inverter. A mono model is exactly right up to a
+  scale, as it is for Missile Command.
+- **The speakers are 8 ohm each, 4 ohm together.**
+- **The output coupling is two C9s in series, not one.** 3300 uF and 3300 uF are
+  1650 uF, into 4 ohm in parallel with 50 ohm (3.70 ohm) at full volume: **26.1
+  Hz**, against the 6.0 Hz that one C9 into 8 ohm gives in the model. These are
+  Tempest's figures exactly (its one 4 ohm speaker, the same capacitors and
+  rheostat). As the knob comes down the series section of R1 joins the loop and
+  the corner falls.
+
+**Not changed, measured.** With the amplifier's C9 stage set to the 26.1 Hz
+corner, over the committed movie the 0-150 Hz share goes from 27.3 to 21.5 %, AC
+RMS moves 0.17 dB, and nothing clips. The experiment was reverted for the reason
+Tempest's was: the corner depends on a knob the model does not have, and nothing
+here checks it against hardware. If full volume is ever adopted as the modeled
+setting, it should be done for all three games at once.
+
 ## What it establishes
 
 - **The model's plain sum is the board's law.** Two equal 100k legs into a 62k
@@ -171,17 +217,9 @@ different POKEY interfaces are collected.
   output impedance at pin 37, which is on no sheet, so 4.55 is an upper bound and
   falls as that impedance rises. The same impedance is what makes 72.3 kHz a lower
   bound rather than a figure.
-- **What `AUDIO 1` and `AUDIO 2` are wired to in the cabinet.** The two amplifier
-  channels are identical and the two signals are antiphase; how the cabinet
-  connects the two speakers decides whether that is heard as a bridge or as
-  cancellation, and the main wiring diagram on sheet 1B was not read. The model
-  does not depend on it for its mix: `AUDIO 2` is `AUDIO 1` through a unity
-  inverter with no coupling, so each channel carries the same signal up to sign
-  and mono is one of them. What does depend on it is the low end: bridged, as
-  Missile Command's and Tempest's cabinets are, the speaker current runs through
-  both C9s in series, a higher corner than the one C9 modeled.
-- **Whether the speakers are 8 ohms.** Not on either sheet, and the 6.0 Hz scales
-  with it.
+- **The volume setting.** The cabinet is now read (see above): a bridge, two 8
+  ohm speakers, 26.1 Hz at full volume. Where the knob sits is not on any sheet,
+  so the modeled corner stays at one C9 into 8 ohm.
 - **Any measurement against hardware.** The table above compares the model with
   its own previous version, not with a capture of a board.
 

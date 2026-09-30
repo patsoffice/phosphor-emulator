@@ -819,12 +819,15 @@ front end's gain of 4.55 and the summer's 0.62 are a scale. Over the committed
 movie the 0-150 Hz share falls from 48.5 to 27.3 %, most of it the amplifier;
 nothing clips, and the LM324 front ends stay under half their swing.
 
-MONO IS ONE CHANNEL whatever the cabinet does: AUDIO 2 is AUDIO 1 through a
-unity inverter with no coupling. Not modeled: the cabinet wiring (sheet 1B not
-read), which decides whether the two C9s sit in series in a bridge as on Missile
-Command and Tempest; the TDA2002A's clipping; and anything checked against
-hardware. The device law at a 220 ohm load is the data sheet's rows
-extrapolated.
+MONO IS RIGHT: sheet 1B and the utility panel on sheet 2B bridge two 8 ohm
+speakers (148001-017), in parallel, across P8's two SPKR pins through the 50 ohm
+volume rheostat 19-9032, returns not taken. AUDIO 2 is AUDIO 1 through a
+DC-coupled unity inverter, so the bridge is exactly a scale. Not modeled: the
+bridged output coupling (the two 3300 uF C9s in series into 4 ohm and the
+rheostat, 26.1 Hz at full volume against the 6.0 Hz modeled; measured as 27.3
+to 21.5 % in the 0-150 Hz share and reverted, as on Tempest, because it depends
+on the knob), the TDA2002A's clipping, and anything checked against hardware.
+The device law at a 220 ohm load is the data sheet's rows extrapolated.
 
 What follows is the reading that row was built from.
 
