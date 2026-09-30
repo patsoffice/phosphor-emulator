@@ -13,10 +13,14 @@
 //! [`docs/schematics/irobot-audio-output.md`](../../docs/schematics/irobot-audio-output.md).
 //! The scans are rotated 90 degrees: landscape content on a portrait bitmap.
 //!
-//! The four POKEY outputs are tied directly together on the board, which is why
-//! `mix_audio`'s `* 0.25` is correct. What is NOT modelled is everything after
-//! that node: a 0.22 uF shunt, about 13 dB of gain, a coupling capacitor, and a
-//! differential output pair where this is mono. See `phosphor-emulator-2u1j`.
+//! The four POKEY outputs are tied directly together on the board, so they are
+//! one [`QuadPokey`] with one load on the shared node: R19 220 ohm into the
+//! first LM324 section's virtual ground at `AUD5V`, and C9 0.22 uF to ground.
+//! Then C8 into R24, an 18.5 Hz high-pass, and a differential pair that the
+//! power supply's amplifier takes in phase (sheet 1B), so mono is right. That
+//! amplifier's own circuit is in the power supply manual, which is not in the
+//! package, and is not modeled. See `phosphor-emulator-2u1j` and
+//! `IRobotBoard::mix_audio`.
 //!
 //! Hardware (per MAME `src/mame/atari/irobot{,_m,_v}.cpp`):
 //! - Main CPU: MC6809E @ 12.096 MHz / 8 = 1.512 MHz
@@ -35,7 +39,7 @@
 //! the text layer; four POKEYs mixed to mono; and the self-centering analog
 //! flight stick via the ADC0809 are all implemented and verified on the real ROM.
 
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
@@ -49,7 +53,8 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::irobot_mathbox::IrobotMathbox;
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{PokeyLoad, PokeyOutputNetwork};
+use phosphor_core::device::quad_pokey::QuadPokey;
 use phosphor_core::device::x2212::X2212;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
@@ -115,6 +120,24 @@ const BITMAP_H: usize = 256;
 
 // Sound: four POKEYs clocked at the 6809 rate; mixed to mono at 44.1 kHz.
 const POKEY_CLOCK: u32 = 1_512_000;
+
+/// The quad POKEY's shared node, sheet 4A: the four `AUD` pins (28, 29, 27,
+/// 21) joined, R19 220 ohm to the inverting input of an LM324 section at 11C
+/// whose non-inverting input is `AUD5V`, and C9 0.22 uF to ground. `AUD5V` is
+/// R276 100k from +5 V with C31 0.47 uF, so +5 V. The op-amp holds R19's far
+/// end there, so as the devices see it this is a 220 ohm pull-up to +5 V, and
+/// the current through it is what R20 1k turns into the stage's output.
+///
+/// Against so stiff a pull-up C9 is not negligible, unlike Crystal Castles'
+/// 0.01 uF on the same circuit: 3.29 kHz with every device off, rising with the
+/// conductance of all sixteen channels together. The pin also never falls far
+/// below 5 V, so as on Crystal Castles the device law here is the data sheet's
+/// rows extrapolated.
+const IROBOT_POKEY_LOAD: PokeyLoad = PokeyLoad::PullUp(PokeyOutputNetwork {
+    pullup_ohms: 220.0,
+    supply_v: 5.0,
+    load_farads: 0.22e-6,
+});
 fn sample_rate() -> u32 {
     phosphor_core::audio::host_sample_rate() as u32
 }
@@ -580,9 +603,14 @@ pub struct IrobotBoard {
     #[save(id = 18)]
     stick: [AnalogAxis; 2],
 
-    // Sound: four POKEYs @ 1.512 MHz, all outputs summed to mono.
-    #[save(id = 19)]
-    pokeys: [Pokey; 4],
+    // Sound: four POKEYs @ 1.512 MHz on one output node. Save id 19 was the
+    // four chips held separately, and is retired.
+    #[save(id = 24)]
+    quad: QuadPokey,
+    /// C8 0.22 uF into R24 39k, the coupling into the second LM324 section:
+    /// 18.5 Hz.
+    #[save(id = 25)]
+    stage_coupling: DcBlocker,
     /// Samples already mixed and waiting for the frontend to drain, which the
     /// next frame refills.
     #[save_skip(default)]
@@ -766,7 +794,15 @@ impl IrobotBoard {
             novram: X2212::new(),
             adc: Adc0809::new(),
             stick: new_stick(),
-            pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, sample_rate())),
+            quad: {
+                let mut q = QuadPokey::with_clock(POKEY_CLOCK, sample_rate());
+                q.set_output_load(IROBOT_POKEY_LOAD);
+                q
+            },
+            stage_coupling: DcBlocker::with_cutoff(
+                (1.0 / (std::f64::consts::TAU * 39_000.0 * 0.22e-6)) as f32,
+                sample_rate(),
+            ),
             audio_buffer: SampleRing::with_capacity(2048),
             irq_pending: false,
             firq_pending: false,
@@ -984,14 +1020,14 @@ impl IrobotBoard {
         if num == 0 && reg == 8 {
             self.dsw2
         } else {
-            self.pokeys[num].read(reg)
+            self.quad.chip_mut(num).read(reg)
         }
     }
 
     /// Quad-POKEY write.
     fn quad_pokey_w(&mut self, offset: u16, data: u8) {
         let (num, reg) = Self::quad_pokey_decode(offset);
-        self.pokeys[num].write(reg, data);
+        self.quad.chip_mut(num).write(reg, data);
     }
 
     /// Board work that leads a CPU cycle: the 32V interrupt edge and the
@@ -1037,21 +1073,30 @@ impl IrobotBoard {
     /// Board work after the CPU's cycle: the POKEYs and the clock.
     fn end_cycle(&mut self) {
         // The four POKEYs run at the CPU clock (1:1).
-        for p in &mut self.pokeys {
-            p.tick();
-        }
+        self.quad.tick();
 
         self.clock += 1;
     }
 
-    /// Drain the four POKEYs' resampled output and mix it to mono (0.25 each,
-    /// matching MAME's routing). Called once per frame.
+    /// Drain the shared node and carry it to the connector. Called once per
+    /// frame.
+    ///
+    /// The node's output is how far it sits below `AUD5V`, for the devices of
+    /// all four chips together. The first LM324 section turns that into
+    /// `-R20/R19` = -4.55 times itself about `AUD5V`, a scale; dividing by the
+    /// four chips' full drop makes every device on all of them read 1.0. C8
+    /// then couples it into the second section at 18.5 Hz, and the second and
+    /// third sections give `AUD2` and its inverse `AUD1`, which the power
+    /// supply's amplifier takes as its input and its input ground: it hears the
+    /// difference, twice either one, in phase. So one channel is the mono mix,
+    /// up to a scale. What that amplifier does after its input is not on any
+    /// sheet in the package and is not modeled.
     fn mix_audio(&mut self) {
-        let chans: [Vec<f32>; 4] = std::array::from_fn(|k| self.pokeys[k].drain_audio());
-        let [c0, c1, c2, c3] = &chans;
-        for (((a, b), c), d) in c0.iter().zip(c1).zip(c2).zip(c3) {
-            let sum = a + b + c + d;
-            self.audio_buffer.push((sum * 0.25 * 32767.0) as i16);
+        let full = IROBOT_POKEY_LOAD.full_scale_of_chips(4) as f32;
+        for s in self.quad.drain_audio() {
+            let coupled = self.stage_coupling.process(s / full);
+            self.audio_buffer
+                .push((coupled * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
     }
 
@@ -1418,9 +1463,8 @@ impl MachineCore for IrobotSystem {
         self.board.adc.reset();
         self.board.stick = new_stick();
         self.board.update_adc_inputs();
-        for p in &mut self.board.pokeys {
-            p.reset();
-        }
+        self.board.quad.reset();
+        self.board.stage_coupling.reset();
         self.board.audio_buffer.clear();
         self.board.bufsel = 0;
         self.board.vg_clear = false;
@@ -2321,6 +2365,29 @@ mod tests {
             sys.board.audio_buffer.is_empty(),
             "fill_audio drains the buffer"
         );
+    }
+
+    /// Settled node drop with channel 1 of each listed chip volume-only at 15.
+    fn node_drop(chips: &[usize]) -> f32 {
+        let mut sys = IrobotSystem::new();
+        for &n in chips {
+            let p = sys.board.quad.chip_mut(n);
+            p.write(0x0F, 0x03); // SKCTL: out of reset
+            p.write(0x01, 0x1F); // AUDC1: volume only, 15
+        }
+        for _ in 0..20_000 {
+            sys.board.quad.tick();
+        }
+        *sys.board.quad.drain_audio().last().unwrap()
+    }
+
+    /// The four chips share one node on 220 ohm, so a second chip at 15 adds
+    /// less than the first did: 1.83 times one chip's drop. Four separate
+    /// loads, or the linear mix, give exactly 2.
+    #[test]
+    fn the_quad_pokey_shares_one_220_ohm_node() {
+        let ratio = node_drop(&[0, 2]) / node_drop(&[0]);
+        assert!((1.80..1.86).contains(&ratio), "two chips / one = {ratio}");
     }
 
     #[test]

@@ -1313,6 +1313,23 @@ machines = ["irobot"]
 device = "machines/src/irobot.rs"
 status = "partial"
 notes = """
+MODELED under phosphor-emulator-2u1j, as far as the connector. The four chips
+are one QuadPokey (core): their devices' conductance summed each clock into one
+node of R19 220 ohm to the LM324's virtual ground at AUD5V with C9 0.22 uF, so
+C9's corner runs from 3.29 kHz upward with all sixteen channels' conductance
+and one chip compresses another. Then C8 into R24, 18.5 Hz. The old model had
+no coupling at all: over the committed movie the DC offset goes 0.025 to 0, the
+0-150 Hz share 85.0 to 30.1 %, and the centroid 228 to 614 Hz.
+
+Sheet 1B (SP-251 PDF, p2) settles the cabinet: AUDIO 1 and AUDIO 2 feed the
+switching power supply's one amplifier channel as signal and ground, so it
+hears their difference in phase and mono is right; four speakers as two series
+pairs. STAYS PARTIAL because that amplifier's circuit is in the power supply
+manual, not this package. Also not modeled: the first LM324 stage's saturation
+(1.6 % of the movie's active samples past a typical V+ - 1.5 V ceiling).
+
+What follows is the reading that row was built from.
+
 EXAMINED. CPU PCB SP-251 sheet 4A, transcribed at
 docs/schematics/irobot-audio-output.md.
 

@@ -67,6 +67,68 @@ flowchart LR
   0.47 uF. So the amplifier's clipping is asymmetric about that bias rather than
   about zero, which a signed-integer model does not reproduce.
 
+## What the model does now
+
+Modeled under `phosphor-emulator-2u1j`.
+
+- **The four chips are one `QuadPokey`**, a core device that steps four POKEYs,
+  sums their devices' conductance every clock, and runs one output stage on the
+  shared node. Four `Pokey`s each on its own load would miss that one chip's
+  devices load another's.
+- **The node is R19 220 ohm into the first LM324 section's virtual ground at
+  `AUD5V`, with C9 0.22 uF to ground**, modeled as a 220 ohm pull-up to +5 V.
+  That answers the first "not established" item below: the resistance C9 works
+  against is at most R19, so its corner is **3.29 kHz** with every device off
+  and rises with the total conductance of all sixteen channels. It is audible.
+- **C8 into R24 39k is 18.5 Hz.** The op-amp's output impedance is negligible
+  beside 39k, which answers the second item.
+- `-R20/R19`, the two unity inverters and the differential input are a scale.
+
+Measured over the committed movie (`irobot-1787707910.phmi`, 38 s), against the
+previous four-chip average with no coupling at all:
+
+| | before | C8 coupling only | + shared node |
+|---|---|---|---|
+| DC offset | 0.0253 | 0.0000 | 0.0000 |
+| 0-150 Hz share | 85.0 % | 25.0 % | 30.1 % |
+| 3000-8000 Hz share | 1.14 % | 5.73 % | 2.26 % |
+| 8000+ Hz share | 0.51 % | 2.57 % | 0.24 % |
+| centroid | 228 Hz | 1119 Hz | 614 Hz |
+| AC RMS | -30.3 dBFS | -33.6 dBFS | -26.8 dBFS |
+
+The old output was the chips' unipolar mix with nothing to remove its DC, so it
+was dominated by a sub-audio envelope. C8 removes that; the node's C9 then takes
+the top back down. The level step at the node is its full scale: every device on
+all four chips now means the compressed drop at the node, not the linear sum.
+Nothing clips in the model.
+
+**The first stage probably saturates on the loudest passages, and this is not
+modeled.** It rests at `AUD5V` and rises 4.55 times the node's drop, on +10.3 V,
+so with the LM324's typical V+ - 1.5 V it saturates at a drop of 0.835 V. Over
+the movie 1.6 % of active samples (17,894 of 1,089,348) exceed that, peaking at
+1.658 V. The rest level here is held by the op-amp, so unlike Food Fight's the
+operating point is not in doubt; the swing is, since at the limit the stage
+sources about 3.8 mA through its own 1k and the ceiling falls with load.
+
+## The cabinet and the amplifier
+
+Read 2026-09-29 from SP-251 1st printing as a PDF,
+`arcarc.xmission.com/PDF_Arcade_Atari_Kee/I-Robot/I-Robot_SP-251_1st%20_Printing.pdf`,
+sheet 1B `I, ROBOT Main Wiring Diagram`, PDF p2. It is the same package as the
+BMP set this file was first read from.
+
+- **The amplifier is inside the switching power supply**, not a Regulator/Audio
+  II board. The CPU PCB's `AUDIO 1` (pin 8, BN) goes to the supply's P7 pin 1
+  `L AUDIO`, and `AUDIO 2` (pin 9, W) to pin 2 `L AUDIO GND`. So the differential
+  pair drives one amplifier channel with `AUDIO 2` as its ground: it hears the
+  difference, twice either one, in phase. **Mono is exactly right.**
+- Its outputs, P7 pin 3 `L SPKR +` (OR) and pin 4 `L SPKR -` (W), drive **four
+  speakers as two series pairs**: LS1's + to LS2's - on OR, the pair across BN
+  and W through P32/J32, and LS3 with LS4 the same across a second run.
+- The amplifier's circuit is in the power supply's own manual (`SEE POWER SUPPLY
+  MANUAL`), which is not in this package. Its gain, couplings and speaker
+  impedance are not established, and the model stops at the connector.
+
 ## What it establishes
 
 - The `* 0.25` in `mix_audio` is the board's passive paralleling and not an
@@ -84,13 +146,15 @@ flowchart LR
 - **The corner of the C8 high-pass**, for the same reason: it depends on the
   following stage's input resistance, which is R24 39k, but also on the first
   stage's output impedance, which was not checked.
-- **Whether both AUD pins reach the cabinet.** They leave on connector pins 8
-  and 9; where they go was not traced past the connector, and the main wiring
-  diagram on sheet 1B was not read for it.
+- **Whether both AUD pins reach the cabinet: now read.** Both do, into one
+  amplifier channel as signal and ground; see the section above.
 - **What the fourth LM324 section does.** It is drawn near +5V with its output
   apparently unused, which usually means a spare tied off, but that was not
   confirmed.
-- **Any measurement.** Nothing here was compared against a capture.
+- **The power supply's amplifier**, whose circuit is in a manual not in this
+  package.
+- **Any measurement against hardware.** The table above compares the model with
+  its own previous version.
 
 ## Confidence
 
