@@ -690,6 +690,7 @@ pub mod marble;
 pub mod mario_bros;
 pub mod mario_sound;
 pub mod mcr2;
+pub mod mhavoc;
 pub mod missile_command;
 pub mod mooncresta;
 pub mod mrdo;

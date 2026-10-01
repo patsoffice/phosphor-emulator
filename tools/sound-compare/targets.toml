@@ -1353,6 +1353,33 @@ Neither capacitor's corner is established: both depend on impedances not on this
 sheet. phosphor-emulator-2u1j."""
 
 [[target]]
+id = "mhavoc-output"
+machines = ["mhavoc", "mhavoc2", "mhavocrv", "mhavocp"]
+status = "partial"
+notes = """
+MODELED from the drawing when the machine was added (phosphor-emulator-r7pa,
+yxda); transcribed at docs/schematics/mhavoc-audio-output.md from SP-252 sheets
+10A, 1B and 2A.
+
+The quad POKEY at 13Q feeds TWO nodes: OUT1-3 tied onto one 1k transimpedance
+stage and OUT4 alone onto another, both zero-ohm virtual grounds at +5V AUD, so
+the QuadPokey runs with nodes [0, 0, 0, 1] and PokeyLoad::VirtualGround. Per
+node: 0.22 uF into 39k (18.5 Hz), then a T network and an inverting stage whose
+poles are about 1.3 kHz and 408 Hz on OUT4's node (a bass voice) and 12.9 kHz
+and 4.08 kHz on the other; the mixer weights OUT4 2.2 times each other chip;
+AUD1 through R148 2.2k and C92 0.01 uF, loaded by the amplifier's input; then
+the Regulator/Audio II model with C10 read as 3300 uF. Chip 3 is OUT4 by the
+LS139 at 11Q (Y3 to CS4), and CSn pairing with OUTn is read from pin names.
+
+MONO IS RIGHT: sheet 1B bridges three speakers (LS3 alone, LS1 and LS2 in
+series) across SPKR 1 and SPKR 2, returns unused.
+
+NOT ESTABLISHED: the LM324 rail and so the first stages' headroom (three chips
+on one 1k could want 28.5 V); the TMS5220's weight on Return to Vax, whose
+resistor the drawing marks and does not fit (SPEECH_WEIGHT is a level, not a
+reading); and any comparison against hardware."""
+
+[[target]]
 id = "missile-output"
 machines = ["missile"]
 status = "partial"
