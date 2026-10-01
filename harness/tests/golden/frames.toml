@@ -209,8 +209,8 @@ frames = 1200
 shows = "A recorded game in the space phase: score 4600 in cyan with two ships in reserve beside it, BONUS 4500 in green, the green space station top center, yellow shots in flight across the middle, the white fighter low center and red enemy ships around it, over a sparse starfield. The vector display list is pinned beside the raster frame, so this guards the generator's paging and colors under player control as well as the alpha and gamma CPUs' handshake that carries the buttons and the roller. The movie runs on to a 6700 entered as tenth place in the high-score table."
 movie = "movies/mhavoc-1790811924.phmi"
 size = [727, 630]
-frame = "sha256:2176c9cf73429cec60f89141c6f88c85641454a05240f335e5ca4710eb7fbf07"
-vectors = "sha256:41c2095c779f01721e3ec9bfee245cc0e190cd764f74dc548ee7af37eee2e77a"
+frame = "sha256:8053c5e8c982afbd4332d7e004a74553aae1bb0725dd25309045c7f0483531c5"
+vectors = "sha256:b8696ee30922a4a3f518437ad2a017cff4f936b26b730a4136c587c11c9b9648"
 
 [[frame]]
 machine = "mhavoc2"
