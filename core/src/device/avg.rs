@@ -1215,11 +1215,13 @@ impl Avg {
     /// Major Havoc's strobe3 draw: Tempest's 13-bit position math and
     /// intensity select, its own color weights, and sparkle.
     ///
-    /// With sparkle on, the beam moves in steps of 8 cycles, half the per-cycle
-    /// deflection each, and every step takes its color from color RAM entry
-    /// `15 + (LFSR bits 0, 2, 4, 6)`, the LFSR clocking once per step. So a
-    /// sparkling vector is a run of short segments in changing colors rather
-    /// than one line.
+    /// With sparkle on, the beam moves in steps of 8 cycles, each taking its
+    /// color from color RAM entry `15 + (LFSR bits 0, 2, 4, 6)`, the LFSR
+    /// clocking once per step, plus a trailing partial step in the color the
+    /// LFSR still holds. Every step ends exactly where the un-sparkled
+    /// deflection would put it, so a sparkling vector is a run of short
+    /// segments in changing colors rather than one line, with the same
+    /// endpoint.
     fn draw_major_havoc(&mut self, cycles: i32, color_ram: &[u8]) {
         let eff_intensity = if (self.int_latch >> 1) == 1 {
             self.intensity
@@ -1241,24 +1243,46 @@ impl Avg {
                 |d: u16, xor: u16| ((i32::from(d >> 3) ^ i32::from(xor)) - 0x200) * scale_factor;
             let dx = raw(self.dvx, self.xdac_xor);
             let dy = raw(self.dvy, self.ydac_xor);
-            for _ in 0..cycles / 8 {
-                self.xpos = self.xpos.wrapping_add(dx / 2);
-                self.ypos = self.ypos.wrapping_add(dy / 2);
-                let s = self.spkl_shift;
+            let sparkle_rgb = |s: u8| {
                 // The LS153s sample the even 74198 outputs, high bit first
                 // (Major Havoc sheet 9A).
-                let index = 0xF
-                    + usize::from(
-                        ((s & 1) << 3) | (s & 4) | ((s >> 3) & 2) | ((s >> 6) & 1),
-                    );
-                let rgb = rgb_of(color_ram.get(index).copied().unwrap_or(0));
+                let index =
+                    0xF + usize::from(((s & 1) << 3) | (s & 4) | ((s >> 3) & 2) | ((s >> 6) & 1));
+                rgb_of(color_ram.get(index).copied().unwrap_or(0))
+            };
+            // The beam integrates for the whole vector time; only the color
+            // LFSR clocks in 8-cycle steps. Each step ends at its exact
+            // deflection, the same (delta * cycles * scale) >> 4 `deflect`
+            // computes, in 64 bits so a long vector cannot wrap it.
+            let (x0, y0) = (self.xpos, self.ypos);
+            let at = |p0: i32, d: i32, elapsed: i32| {
+                p0.wrapping_add((i64::from(d) * i64::from(elapsed) >> 4) as i32)
+            };
+            let total = cycles.max(0);
+            let mut elapsed = 0;
+            for _ in 0..total / 8 {
+                elapsed += 8;
+                self.xpos = at(x0, dx, elapsed);
+                self.ypos = at(y0, dy, elapsed);
+                let rgb = sparkle_rgb(self.spkl_shift);
                 let (x, y) = self.flipped();
                 self.add_point(x, y, eff_intensity, rgb, 8);
+                let s = self.spkl_shift;
                 let feedback = ((s >> 6) ^ (s >> 5) ^ 1) & 1;
                 self.spkl_shift = feedback | (s << 1);
                 if self.spkl_shift & 0x7F == 0x7F {
                     self.spkl_shift = 0;
                 }
+            }
+            if elapsed < total {
+                // Trailing partial step: the beam keeps moving in the color
+                // the LFSR still holds, with no 8-cycle edge left to clock
+                // it on.
+                self.xpos = at(x0, dx, total);
+                self.ypos = at(y0, dy, total);
+                let rgb = sparkle_rgb(self.spkl_shift);
+                let (x, y) = self.flipped();
+                self.add_point(x, y, eff_intensity, rgb, (total - elapsed) as u32);
             }
             return;
         }
@@ -1765,8 +1789,9 @@ mod tests {
             *c = (i as u8) & 0xF;
         }
         let plain = build_vmem(&[&word(0x8000)[..], &word(0x6000), &down].concat());
-        let plain = visible(&run_major_havoc(&plain, &[], &color_ram)).len();
-        assert_eq!(plain, 1, "without sparkle the vector is one segment");
+        let plain = run_major_havoc(&plain, &[], &color_ram);
+        let plain = visible(&plain);
+        assert_eq!(plain.len(), 1, "without sparkle the vector is one segment");
 
         let sparkle = build_vmem(&[&word(0x8000)[..], &word(0x6805), &down].concat());
         let lines = run_major_havoc(&sparkle, &[], &color_ram);
@@ -1792,7 +1817,71 @@ mod tests {
             ],
             "first five sparkle colors"
         );
-        assert!(lines.iter().all(|l| l.beam_cycles == 8));
+        // Full steps cost 8 cycles each; only the trailing partial step may
+        // cost less.
+        let (last, full) = lines.split_last().unwrap();
+        assert!(full.iter().all(|l| l.beam_cycles == 8));
+        assert!((1..=8).contains(&last.beam_cycles));
+        // Sparkle portions the same travel, so the run ends where the plain
+        // vector does and relative vectors drawn after it keep their
+        // endpoints.
+        let end = lines.last().unwrap();
+        assert_eq!((end.x1, end.y1), (plain[0].x1, plain[0].y1));
+    }
+
+    /// A vector shorter than 8 cycles still travels its full deflection,
+    /// drawn as one partial step in the seed color with the LFSR unclocked;
+    /// a 20-cycle vector is two full steps plus a 4-cycle tail, ending
+    /// exactly at (delta * cycles * scale) >> 4.
+    #[test]
+    fn major_havoc_sparkle_draws_the_trailing_partial_step() {
+        fn sparkled(cycles: i32) -> (Avg, Vec<VectorLine>) {
+            let mut avg = Avg::with_variant(AvgVariant::MajorHavoc, 300, 260);
+            avg.has_prev = true;
+            avg.dvx = 8;
+            avg.dvy = 8;
+            avg.scale = 0xF0;
+            avg.int_latch = 0x08;
+            avg.enspkl = true;
+            avg.spkl_shift = 0x0A;
+            let mut color_ram = [0u8; 32];
+            for (i, c) in color_ram.iter_mut().enumerate() {
+                *c = (i as u8) & 0xF;
+            }
+            avg.draw_major_havoc(cycles, &color_ram);
+            let lines = avg.take_display_list();
+            (avg, lines)
+        }
+        // dv 8 >> 3 is 1, signed to +1, times scale factor 0xF: the
+        // deflection is 15 per 16 cycles on both axes.
+        let (avg, lines) = sparkled(5);
+        let (x0, y0) = ((300 / 2) << 16, (260 / 2) << 16);
+        assert_eq!(lines.len(), 1, "a 5-cycle vector is one partial step");
+        assert_eq!(lines[0].beam_cycles, 5);
+        assert_eq!(
+            (avg.xpos, avg.ypos),
+            (x0 + (15 * 5 >> 4), y0 + (15 * 5 >> 4))
+        );
+        assert_eq!(avg.spkl_shift, 0x0A, "no 8-cycle edge, no clock");
+        assert_eq!(
+            (lines[0].r, lines[0].g, lines[0].b),
+            (0x00, 0x00, 0x00),
+            "partial step keeps the seed color"
+        );
+
+        let (avg, lines) = sparkled(20);
+        assert_eq!(
+            lines.iter().map(|l| l.beam_cycles).collect::<Vec<_>>(),
+            &[8, 8, 4]
+        );
+        assert_eq!(
+            (avg.xpos, avg.ypos),
+            (x0 + (15 * 20 >> 4), y0 + (15 * 20 >> 4))
+        );
+        assert_eq!(avg.spkl_shift, 0x2B, "two full steps clock twice");
+        // The second step ends at 15 * 16 >> 4 = 15, not at twice the
+        // truncated 15 * 8 >> 4 = 7.
+        assert_eq!(lines[1].x1, (x0 + 15) as f32 / 65536.0);
     }
 
     /// The first instruction latches the clip window's top at the beam's Y,
