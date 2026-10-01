@@ -1245,9 +1245,11 @@ impl Avg {
                 self.xpos = self.xpos.wrapping_add(dx / 2);
                 self.ypos = self.ypos.wrapping_add(dy / 2);
                 let s = self.spkl_shift;
+                // The LS153s sample the even 74198 outputs, high bit first
+                // (Major Havoc sheet 9A).
                 let index = 0xF
                     + usize::from(
-                        ((s & 1) << 3) | ((s >> 1) & 4) | ((s >> 3) & 2) | ((s >> 6) & 1),
+                        ((s & 1) << 3) | (s & 4) | ((s >> 3) & 2) | ((s >> 6) & 1),
                     );
                 let rgb = rgb_of(color_ram.get(index).copied().unwrap_or(0));
                 let (x, y) = self.flipped();
@@ -1772,6 +1774,24 @@ mod tests {
         assert!(lines.len() > 10, "{} segments", lines.len());
         let colors: std::collections::HashSet<_> = lines.iter().map(|l| (l.r, l.g, l.b)).collect();
         assert!(colors.len() > 2, "{colors:?}");
+        // The seed is DVY 0x805's low nibble reversed (0xA) with a zero host
+        // address, and the color muxes sample the 74198's Q0, Q2, Q4 and Q6
+        // (Major Havoc sheet 9A): the first five segments' colors pin the
+        // seed, the tap set, the tap order and both feedback parities. The
+        // first is black: seed 0xA reads all zero taps, indexing entry 15
+        // whose 0xF inverts to no color.
+        let rgb: Vec<(u8, u8, u8)> = lines.iter().map(|l| (l.r, l.g, l.b)).collect();
+        assert_eq!(
+            &rgb[..5],
+            &[
+                (0x00, 0x00, 0x00),
+                (0x00, 0xCB, 0x00),
+                (0xCB, 0x00, 0x00),
+                (0xCB, 0x00, 0xCB),
+                (0xFF, 0x00, 0x00),
+            ],
+            "first five sparkle colors"
+        );
         assert!(lines.iter().all(|l| l.beam_cycles == 8));
     }
 
