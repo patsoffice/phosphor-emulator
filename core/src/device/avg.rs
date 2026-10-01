@@ -1,16 +1,19 @@
-//! Atari Analog Vector Generator (AVG): Tempest, Quantum, Star Wars and Major
-//! Havoc variants
+//! Atari Analog Vector Generator (AVG): Tempest, Quantum, Star Wars, Major
+//! Havoc and Space Duel variants
 //!
 //! A state-machine coprocessor that reads instructions from shared vector
 //! RAM/ROM and generates a display list of colored line segments for rendering
 //! on a color vector CRT.
 //!
-//! Four variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
+//! Five variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
 //! byte-addressed decode), Quantum (1982, word-addressed decode with 12-bit
 //! normalization, Quantum color weights, and an X/Y coordinate swap), Star
 //! Wars (1983, byte-addressed like Tempest but with no XOR-1 swap and a simple
-//! `color111`/8-bit-intensity color path), and Major Havoc (1983, Tempest's
-//! decode plus a paged vector ROM, sparkle, X mirroring and a clip window).
+//! `color111`/8-bit-intensity color path), Major Havoc (1983, Tempest's
+//! decode plus a paged vector ROM, sparkle, X mirroring and a clip window),
+//! and Space Duel (1982, the base AVG: Tempest's decode and normalization with
+//! a STAT that latches a 3-bit `color111` index and a 4-bit intensity together
+//! and an unswapped `color111` draw).
 //! Battle Zone's differs further and is not implemented.
 //!
 //! # Architecture
@@ -112,6 +115,11 @@ pub enum AvgVariant {
     /// latched from the beam's Y position. Color RAM is 32 entries: ordinary
     /// vectors use 0-15 and sparkle 15-30.
     MajorHavoc,
+    /// Space Duel (1982): the base AVG. Tempest's XOR-1 byte decode and 13-bit
+    /// normalization, but the STAT latches a 3-bit `color111` index and a
+    /// 4-bit intensity together (no 0x800 select, no color RAM), and the draw
+    /// is unswapped. The reference driver's plain `AVG` device.
+    SpaceDuel,
 }
 
 /// Atari AVG (Tempest / Quantum / Star Wars variants).
@@ -535,12 +543,13 @@ impl Avg {
 
     /// Present the byte (Quantum: word) at the address counter to the latches.
     ///
-    /// Tempest addresses vector memory as `pc ^ 1`, Star Wars in native order,
-    /// and Quantum reads the big-endian word the counter is inside.
+    /// Tempest and Space Duel address vector memory as `pc ^ 1`, Star Wars in
+    /// native order, and Quantum reads the big-endian word the counter is
+    /// inside.
     fn update_databus(&mut self, mem: &VectorMemory) {
         let byte = |i: usize| u16::from(mem.byte(i));
         self.data = match self.variant {
-            AvgVariant::Tempest => byte(usize::from(self.pc) ^ 1),
+            AvgVariant::Tempest | AvgVariant::SpaceDuel => byte(usize::from(self.pc) ^ 1),
             AvgVariant::StarWars => byte(usize::from(self.pc)),
             AvgVariant::Quantum => Self::read_word_be(mem, self.pc & !1),
             AvgVariant::MajorHavoc if self.pc & 0x2000 != 0 => {
@@ -920,6 +929,12 @@ impl Avg {
                         self.intensity = ((self.dvy >> 4) & 0xF) as u8;
                     }
                 }
+                // Space Duel latches a 3-bit color111 index and a 4-bit
+                // intensity together, with no select bit.
+                AvgVariant::SpaceDuel => {
+                    self.color = (self.dvy & 0x7) as u8;
+                    self.intensity = ((self.dvy >> 4) & 0xF) as u8;
+                }
                 // Quantum latches color and intensity together, gated on bit 11.
                 AvgVariant::Quantum => {
                     if self.dvy & 0x800 != 0 {
@@ -1002,6 +1017,7 @@ impl Avg {
             AvgVariant::Quantum => self.draw_quantum(cycles, color_ram),
             AvgVariant::StarWars => self.draw_starwars(cycles),
             AvgVariant::MajorHavoc => self.draw_major_havoc(cycles, color_ram),
+            AvgVariant::SpaceDuel => self.draw_spacduel(cycles),
         }
         cycles
     }
@@ -1163,6 +1179,37 @@ impl Avg {
             [r, g, b],
             cycles.max(0) as u32,
         );
+    }
+
+    /// Space Duel's strobe3 draw: Tempest's 13-bit position math and intensity
+    /// select, a `color111` color like Star Wars, and the hardware flip bits.
+    ///
+    /// The reference base AVG draws `(x, y)` unswapped with
+    /// `color111(m_color)`; Tempest's color RAM lookup and 0x800 select do not
+    /// exist here.
+    fn draw_spacduel(&mut self, cycles: i32) {
+        let (dx, dy) = self.deflect(cycles, 3);
+        self.xpos = self.xpos.wrapping_add(dx);
+        // Y-up, the convention the renderers expect of a display list.
+        self.ypos = self.ypos.wrapping_add(dy);
+
+        // color111: low 3 bits index one-bit-per-channel RGB (bit2=R, 1=G, 0=B).
+        let c = self.color;
+        let r = if (c >> 2) & 1 != 0 { 0xFF } else { 0 };
+        let g = if (c >> 1) & 1 != 0 { 0xFF } else { 0 };
+        let b = if c & 1 != 0 { 0xFF } else { 0 };
+
+        // int_latch bits 3:1 == 001 is the DATEA signal, selecting the
+        // intensity the STAT strobe stored; otherwise those bits are the
+        // intensity directly.
+        let eff_intensity = if (self.int_latch >> 1) == 1 {
+            self.intensity
+        } else {
+            self.int_latch & 0xE
+        };
+
+        let (x, y) = self.flipped();
+        self.add_point(x, y, eff_intensity, [r, g, b], cycles.max(0) as u32);
     }
 
     /// Major Havoc's strobe3 draw: Tempest's 13-bit position math and
@@ -2171,5 +2218,77 @@ mod tests {
         let list = sw.take_display_list();
         let drawn = list.iter().find(|l| l.intensity != 0).expect("a lit line");
         assert_eq!((drawn.r, drawn.g, drawn.b), (0xFF, 0x00, 0x00));
+    }
+
+    // --- Space Duel variant ----------------------------------------------
+    //
+    // Space Duel is the base AVG: Tempest's XOR-1 byte decode, so words are
+    // laid out [low, high] here, but its STAT latches a 3-bit color111 index
+    // and a 4-bit intensity together with no select bit.
+
+    #[test]
+    fn spacduel_decodes_xor1_like_tempest() {
+        // HALT is word 0x2000, stored [0x00, 0x20]: the AVG reads the high
+        // byte from the odd address. A native-order decode would see op 0.
+        let vmem = build_vmem(&[0x00, 0x20]);
+        let mut sd = Avg::with_variant(AvgVariant::SpaceDuel, 1024, 1024);
+        sd.go();
+        sd.run_to_stop(&vmem, &default_color_ram());
+        assert!(sd.is_halted(), "Space Duel reads [lo, hi] swapped");
+    }
+
+    #[test]
+    fn spacduel_stat_latches_color_and_intensity_together() {
+        // STAT, dvy low byte 0xA5: color = 0xA5 & 7 = 5, intensity = 0xA.
+        //   word(0x60A5) = [0xA5, 0x60]: op 3, dvy12 0, high nibble 0.
+        let w0 = word(0x60A5); // STAT
+        let w1 = word(0x2000); // HALT
+        let vmem = build_vmem(&[w0[0], w0[1], w1[0], w1[1]]);
+        let mut sd = Avg::with_variant(AvgVariant::SpaceDuel, 1024, 1024);
+        sd.go();
+        sd.run_to_stop(&vmem, &default_color_ram());
+        assert!(sd.is_halted());
+        assert_eq!(sd.color, 5);
+        assert_eq!(sd.intensity, 0xA);
+
+        // Tempest on the same bytes takes the intensity branch (bit 11
+        // clear) and leaves color alone: the select bit is its own logic.
+        let mut tempest = Avg::new(1024, 1024);
+        tempest.go();
+        tempest.run_to_stop(&vmem, &default_color_ram());
+        assert!(tempest.is_halted());
+        assert_eq!(tempest.intensity, 0xA);
+        assert_eq!(tempest.color, 0);
+    }
+
+    #[test]
+    fn spacduel_vctr_draws_color111_line() {
+        // STAT sets intensity=0xF, color=2 (green via color111); CNTR seeds
+        // the beam at center; VCTR draws the first lit line; HALT stops.
+        //   STAT: word(0x60F2) = [0xF2, 0x60]
+        //   CNTR: op 4 -> word(0x8000) = [0x00, 0x80]
+        //   VCTR: word0 dvy=0x100 -> word(0x0100) = [0x00, 0x01];
+        //         word1 int_latch=2, dvx=0x100 -> word(0x2100) = [0x00, 0x21]
+        //   HALT: word(0x2000) = [0x00, 0x20]
+        let vmem = build_vmem(&[
+            0xF2, 0x60, // STAT
+            0x00, 0x80, // CNTR
+            0x00, 0x01, 0x00, 0x21, // VCTR
+            0x00, 0x20, // HALT
+        ]);
+        let mut sd = Avg::with_variant(AvgVariant::SpaceDuel, 1024, 1024);
+        sd.go();
+        sd.run_to_stop(&vmem, &default_color_ram());
+        assert!(sd.is_halted());
+
+        let list = sd.take_display_list();
+        let drawn = list
+            .iter()
+            .find(|l| l.intensity != 0)
+            .expect("a lit line from the VCTR");
+        // color111(2): r = bit2 = 0, g = bit1 = 0xFF, b = bit0 = 0.
+        assert_eq!((drawn.r, drawn.g, drawn.b), (0x00, 0xFF, 0x00));
+        // DATEA (int_latch 2) selects the STAT intensity 0xF.
+        assert_eq!(drawn.intensity, 0xF);
     }
 }
