@@ -1,15 +1,17 @@
-//! Atari Analog Vector Generator (AVG) — Tempest, Quantum, and Star Wars variants
+//! Atari Analog Vector Generator (AVG): Tempest, Quantum, Star Wars and Major
+//! Havoc variants
 //!
 //! A state-machine coprocessor that reads instructions from shared vector
 //! RAM/ROM and generates a display list of colored line segments for rendering
 //! on a color vector CRT.
 //!
-//! Three variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
+//! Four variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
 //! byte-addressed decode), Quantum (1982, word-addressed decode with 12-bit
-//! normalization, Quantum color weights, and an X/Y coordinate swap), and Star
+//! normalization, Quantum color weights, and an X/Y coordinate swap), Star
 //! Wars (1983, byte-addressed like Tempest but with no XOR-1 swap and a simple
-//! `color111`/8-bit-intensity color path). Other variants (Battle Zone, Major
-//! Havoc) differ further in color decoding and coordinate handling.
+//! `color111`/8-bit-intensity color path), and Major Havoc (1983, Tempest's
+//! decode plus a paged vector ROM, sparkle, X mirroring and a clip window).
+//! Battle Zone's differs further and is not implemented.
 //!
 //! # Architecture
 //!
@@ -103,6 +105,13 @@ pub enum AvgVariant {
     /// STAT strobe latches an 8-bit intensity plus a 3-bit `color111` index
     /// (no color RAM lookup).
     StarWars,
+    /// Major Havoc (1983): Tempest's byte-addressed decode, plus a 32K vector
+    /// ROM paged into addresses 0x2000-0x3FFF by the STAT's map bits, a
+    /// "sparkle" mode that walks the beam through an LFSR of colors, X
+    /// mirroring by inverting the X DAC input, and a clip window whose top is
+    /// latched from the beam's Y position. Color RAM is 32 entries: ordinary
+    /// vectors use 0-15 and sparkle 15-30.
+    MajorHavoc,
 }
 
 /// Atari AVG (Tempest / Quantum / Star Wars variants).
@@ -256,7 +265,33 @@ pub struct Avg {
     /// state rather than resumed part way through.
     #[save_skip(default)]
     display_list: Vec<VectorLine>,
+
+    // Major Havoc only.
+    /// Which 8K page of the banked vector ROM addresses 0x2000-0x3FFF read,
+    /// from DVY bits 9:8 of a color STAT.
+    #[save(id = 24)]
+    map: u8,
+    /// Sparkle enabled, DVY bit 11 of a color STAT.
+    #[save(id = 25)]
+    enspkl: bool,
+    /// The sparkle LFSR, whose bits 0, 2, 4 and 6 pick the color RAM entry.
+    #[save(id = 26)]
+    spkl_shift: u8,
+    /// Set once the clip window's top has been latched; cleared by a scale
+    /// STAT with DVY bit 11, which re-arms it for the next instruction.
+    #[save(id = 27)]
+    lst: bool,
+    /// The clip window's top in beam coordinates, if one is latched for this
+    /// frame: nothing above it is drawn. Per frame, so not saved.
+    #[save_skip(default)]
+    clip_top: Option<i32>,
+    /// The host CPU's low address bits, which seed part of the sparkle LFSR.
+    #[save_skip(default)]
+    host_address: u8,
 }
+
+/// A beam position in fixed point, `(x, y)`.
+type Point = (i32, i32);
 
 /// Master-clock cycles per state-machine iteration, independent of drawing.
 /// The sequencer is clocked at a fixed rate and every state costs the same;
@@ -278,6 +313,7 @@ pub struct VectorMemory<'a> {
     ram: &'a [u8],
     rom: &'a [u8],
     rom_base: usize,
+    banked: &'a [u8],
 }
 
 impl<'a> VectorMemory<'a> {
@@ -287,12 +323,26 @@ impl<'a> VectorMemory<'a> {
             ram,
             rom: &[],
             rom_base: usize::MAX,
+            banked: &[],
         }
     }
 
     /// RAM from 0, vector ROM from `rom_base`.
     pub fn split(ram: &'a [u8], rom: &'a [u8], rom_base: usize) -> Self {
-        Self { ram, rom, rom_base }
+        Self {
+            ram,
+            rom,
+            rom_base,
+            banked: &[],
+        }
+    }
+
+    /// Add a banked vector ROM, which only the Major Havoc variant reads: its
+    /// generator sees 8K pages of it at 0x2000-0x3FFF, the page chosen by the
+    /// STAT's map bits. The host CPU does not see it at all.
+    pub fn with_banked(mut self, banked: &'a [u8]) -> Self {
+        self.banked = banked;
+        self
     }
 
     fn byte(&self, addr: usize) -> u8 {
@@ -406,7 +456,21 @@ impl Avg {
             state_latch: 0,
             frame_done: false,
             display_list: Vec::with_capacity(2048),
+            map: 0,
+            enspkl: false,
+            spkl_shift: 0,
+            lst: false,
+            clip_top: None,
+            host_address: 0,
         }
+    }
+
+    /// Present the host CPU's address bus to the generator. Major Havoc wires
+    /// the alpha CPU's A0-A2 into three bits of the sparkle LFSR's seed, so
+    /// the seed depends on what the CPU is doing when the STAT lands; a board
+    /// that has no such wiring need not call this.
+    pub fn set_host_address(&mut self, address: u16) {
+        self.host_address = address as u8;
     }
 
     /// Trigger AVG execution (CPU writes to AVG GO register).
@@ -479,6 +543,11 @@ impl Avg {
             AvgVariant::Tempest => byte(usize::from(self.pc) ^ 1),
             AvgVariant::StarWars => byte(usize::from(self.pc)),
             AvgVariant::Quantum => Self::read_word_be(mem, self.pc & !1),
+            AvgVariant::MajorHavoc if self.pc & 0x2000 != 0 => {
+                let i = (usize::from(self.map) << 13) | ((usize::from(self.pc) ^ 1) & 0x1FFF);
+                u16::from(mem.banked.get(i).copied().unwrap_or(0))
+            }
+            AvgVariant::MajorHavoc => byte(usize::from(self.pc) ^ 1),
         };
     }
 
@@ -522,6 +591,9 @@ impl Avg {
         self.prev_x = self.xcenter;
         self.prev_y = self.ycenter;
         self.display_list.clear();
+        // Major Havoc's reset also stops sparkle; the page and the clip
+        // window's arming survive it.
+        self.enspkl = false;
     }
 
     /// Clock the sequencer once and return the master-clock cycles it took.
@@ -530,7 +602,7 @@ impl Avg {
     /// is set, and charge [`AVG_CYCLES_PER_STATE`] plus whatever beam time the
     /// handler consumed. Per-instruction timing therefore falls out of the PROM
     /// rather than being assumed anywhere.
-    fn run_one_state(&mut self, mem: &VectorMemory, color_ram: &[u8; 16]) -> u32 {
+    fn run_one_state(&mut self, mem: &VectorMemory, color_ram: &[u8]) -> u32 {
         self.frame_done = false;
         self.state_latch = (self.state_latch & 0x10) | self.state_prom[self.state_addr()];
 
@@ -583,7 +655,7 @@ impl Avg {
     ///
     /// A halted generator is parked in the PROM's all-zero half and consumes no
     /// time until the next [`go`](Self::go).
-    pub fn step(&mut self, cycles: u32, mem: &VectorMemory, color_ram: &[u8; 16]) -> bool {
+    pub fn step(&mut self, cycles: u32, mem: &VectorMemory, color_ram: &[u8]) -> bool {
         if self.halted {
             return false;
         }
@@ -616,7 +688,7 @@ impl Avg {
     /// whose list ends in HALT return false; their frame is delimited by the
     /// halt instead.
     #[cfg(test)]
-    fn run_to_stop(&mut self, vmem: &[u8], color_ram: &[u8; 16]) -> bool {
+    fn run_to_stop(&mut self, vmem: &[u8], color_ram: &[u8]) -> bool {
         let mem = VectorMemory::ram_only(vmem);
         self.frame_done = false;
 
@@ -641,7 +713,7 @@ impl Avg {
     /// Run the handler for a dispatched state. Handlers 0-3 latch operands off
     /// the data bus; 4-7 are strobe0-strobe3. The return value is the beam
     /// time the handler consumed, in master-clock cycles.
-    fn dispatch(&mut self, handler: u8, color_ram: &[u8; 16]) -> u32 {
+    fn dispatch(&mut self, handler: u8, color_ram: &[u8]) -> u32 {
         match handler {
             0 => self.latch0(),
             1 => self.latch1(),
@@ -658,6 +730,9 @@ impl Avg {
     /// Drain the display list, returning ownership to the caller.
     pub fn take_display_list(&mut self) -> Vec<VectorLine> {
         self.has_prev = false;
+        // Major Havoc's clip window lasts one frame: the game re-arms it each
+        // pass, and a frame it does not stays unclipped.
+        self.clip_top = None;
         std::mem::take(&mut self.display_list)
     }
 
@@ -699,6 +774,12 @@ impl Avg {
     /// This is where an instruction begins — the opcode it latches selects the
     /// PROM row that sequences the rest of it.
     fn latch1(&mut self) -> i32 {
+        // Major Havoc latches the top of its clip window from the beam's Y on
+        // the first instruction after the window is armed.
+        if self.variant == AvgVariant::MajorHavoc && !self.lst {
+            self.clip_top = Some(self.ypos);
+            self.lst = true;
+        }
         if self.variant == AvgVariant::Quantum {
             self.dvy = self.data & 0x1FFF;
             self.dvy12 = ((self.data >> 12) & 1) as u8;
@@ -846,7 +927,32 @@ impl Avg {
                         self.intensity = ((self.dvy >> 4) & 0xF) as u8;
                     }
                 }
+                // Major Havoc latches color, intensity and the vector ROM page
+                // together; bit 11 turns sparkle on and bit 10 mirrors X by
+                // inverting the X DAC's input.
+                AvgVariant::MajorHavoc => {
+                    self.color = (self.dvy & 0xF) as u8;
+                    self.intensity = ((self.dvy >> 4) & 0xF) as u8;
+                    self.map = ((self.dvy >> 8) & 3) as u8;
+                    self.enspkl = self.dvy & 0x800 != 0;
+                    if self.enspkl {
+                        // DVY bits 0-3 reversed into the LFSR's low nibble,
+                        // and the host's A0-A2 into bits 4-6.
+                        let d = self.dvy;
+                        let low = ((d & 1) << 3) | ((d & 2) << 1) | ((d & 4) >> 1) | ((d & 8) >> 3);
+                        self.spkl_shift = low as u8 | ((self.host_address & 7) << 4);
+                    }
+                    self.xdac_xor = if self.dvy & 0x400 != 0 { 0x1FF } else { 0x200 };
+                }
             }
+        }
+        // A scale STAT with bit 11 re-arms Major Havoc's clip window.
+        if self.variant == AvgVariant::MajorHavoc
+            && !self.op2()
+            && self.dvy12 != 0
+            && self.dvy & 0x800 != 0
+        {
+            self.lst = false;
         }
 
         if self.op2() {
@@ -873,7 +979,7 @@ impl Avg {
     /// The count is the beam's travel time, so it is also what this state
     /// charges the sequencer — the reason a screen full of long vectors holds
     /// VG_HALT low far longer than the state count alone implies.
-    fn strobe3(&mut self, color_ram: &[u8; 16]) -> i32 {
+    fn strobe3(&mut self, color_ram: &[u8]) -> i32 {
         self.halted = self.op0();
 
         // CNTR re-centers the beam; the timer still has to run down first.
@@ -895,6 +1001,7 @@ impl Avg {
             AvgVariant::Tempest => self.draw_tempest(cycles, color_ram),
             AvgVariant::Quantum => self.draw_quantum(cycles, color_ram),
             AvgVariant::StarWars => self.draw_starwars(cycles),
+            AvgVariant::MajorHavoc => self.draw_major_havoc(cycles, color_ram),
         }
         cycles
     }
@@ -954,7 +1061,7 @@ impl Avg {
     }
 
     /// Tempest's strobe3 draw: 13-bit DAC and a 16-entry color RAM lookup.
-    fn draw_tempest(&mut self, cycles: i32, color_ram: &[u8; 16]) {
+    fn draw_tempest(&mut self, cycles: i32, color_ram: &[u8]) {
         let (dx, dy) = self.deflect(cycles, 3);
         self.xpos = self.xpos.wrapping_add(dx);
         // Y-up, the convention the renderers expect of a display list, as Star
@@ -993,7 +1100,7 @@ impl Avg {
 
     /// Quantum's strobe3 draw: 12-bit DAC and Quantum's color weights —
     /// r = bit3·0xCE, g = bit1·0xAA + bit0·0x54, b = bit2·0xCE.
-    fn draw_quantum(&mut self, cycles: i32, color_ram: &[u8; 16]) {
+    fn draw_quantum(&mut self, cycles: i32, color_ram: &[u8]) {
         self.dvx &= 0xFFF;
         self.dvy &= 0xFFF;
         let (dx, dy) = self.deflect(cycles, 2);
@@ -1058,6 +1165,95 @@ impl Avg {
         );
     }
 
+    /// Major Havoc's strobe3 draw: Tempest's 13-bit position math and
+    /// intensity select, its own color weights, and sparkle.
+    ///
+    /// With sparkle on, the beam moves in steps of 8 cycles, half the per-cycle
+    /// deflection each, and every step takes its color from color RAM entry
+    /// `15 + (LFSR bits 0, 2, 4, 6)`, the LFSR clocking once per step. So a
+    /// sparkling vector is a run of short segments in changing colors rather
+    /// than one line.
+    fn draw_major_havoc(&mut self, cycles: i32, color_ram: &[u8]) {
+        let eff_intensity = if (self.int_latch >> 1) == 1 {
+            self.intensity
+        } else {
+            self.int_latch & 0xE
+        };
+        let rgb_of = |data: u8| {
+            let bit = |n: u8| (!data >> n) & 1;
+            [
+                (bit(3).wrapping_mul(0xCB)).wrapping_add(bit(2).wrapping_mul(0x34)),
+                bit(1).wrapping_mul(0xCB),
+                bit(0).wrapping_mul(0xCB),
+            ]
+        };
+
+        if self.enspkl {
+            let scale_factor = i32::from(self.scale) ^ 0xFF;
+            let raw =
+                |d: u16, xor: u16| ((i32::from(d >> 3) ^ i32::from(xor)) - 0x200) * scale_factor;
+            let dx = raw(self.dvx, self.xdac_xor);
+            let dy = raw(self.dvy, self.ydac_xor);
+            for _ in 0..cycles / 8 {
+                self.xpos = self.xpos.wrapping_add(dx / 2);
+                self.ypos = self.ypos.wrapping_add(dy / 2);
+                let s = self.spkl_shift;
+                let index = 0xF
+                    + usize::from(
+                        ((s & 1) << 3) | ((s >> 1) & 4) | ((s >> 3) & 2) | ((s >> 6) & 1),
+                    );
+                let rgb = rgb_of(color_ram.get(index).copied().unwrap_or(0));
+                let (x, y) = self.flipped();
+                self.add_point(x, y, eff_intensity, rgb, 8);
+                let feedback = ((s >> 6) ^ (s >> 5) ^ 1) & 1;
+                self.spkl_shift = feedback | (s << 1);
+                if self.spkl_shift & 0x7F == 0x7F {
+                    self.spkl_shift = 0;
+                }
+            }
+            return;
+        }
+
+        let (dx, dy) = self.deflect(cycles, 3);
+        self.xpos = self.xpos.wrapping_add(dx);
+        // Y-up, the convention the renderers expect of a display list.
+        self.ypos = self.ypos.wrapping_add(dy);
+        let rgb = rgb_of(
+            color_ram
+                .get(usize::from(self.color & 0xF))
+                .copied()
+                .unwrap_or(0),
+        );
+        let (x, y) = self.flipped();
+        self.add_point(x, y, eff_intensity, rgb, cycles.max(0) as u32);
+    }
+
+    /// Clip the segment from `(x0, y0)` to `(x1, y1)` to Major Havoc's window,
+    /// which keeps everything at or below `top` (Y-up). Returns the visible
+    /// part and the fraction of the segment it is, or `None` if none of it is.
+    fn clip_below(top: i32, (x0, y0): Point, (x1, y1): Point) -> Option<(Point, Point, f32)> {
+        let (a_in, b_in) = (y0 <= top, y1 <= top);
+        match (a_in, b_in) {
+            (true, true) => Some(((x0, y0), (x1, y1), 1.0)),
+            (false, false) => None,
+            _ => {
+                let t = (i64::from(top) - i64::from(y0)) as f64
+                    / (i64::from(y1) - i64::from(y0)) as f64;
+                let xc = (f64::from(x0) + t * (f64::from(x1) - f64::from(x0))) as i32;
+                // A segment that only touches the top, from either side,
+                // leaves nothing visible.
+                let frac = if a_in { t } else { 1.0 - t };
+                if frac <= 0.0 {
+                    None
+                } else if a_in {
+                    Some(((x0, y0), (xc, top), frac as f32))
+                } else {
+                    Some(((xc, top), (x1, y1), frac as f32))
+                }
+            }
+        }
+    }
+
     /// Add a point to the display list, creating a line from the previous point.
     ///
     /// `beam_cycles` is the travel time strobe3 charged for getting here, which
@@ -1089,19 +1285,43 @@ impl Avg {
                 return;
             }
 
+            // Major Havoc's clip window: draw only the part at or below its
+            // top, with that share of the beam time. A hidden start has no
+            // visible dwell.
+            let (mut x0, mut y0, mut x1, mut y1) = (prev_px, prev_py, px, py);
+            let (mut beam, mut dwell) = (beam_cycles, self.idle_cycles);
+            if let (AvgVariant::MajorHavoc, Some(top)) = (self.variant, self.clip_top) {
+                match Self::clip_below(top, (self.prev_x, self.prev_y), (x, y)) {
+                    None => {
+                        self.idle_cycles = 0;
+                        self.prev_x = x;
+                        self.prev_y = y;
+                        return;
+                    }
+                    Some((a, b, frac)) => {
+                        if a != (self.prev_x, self.prev_y) {
+                            dwell = 0;
+                        }
+                        (x0, y0) = (a.0 as f32 / UNIT, a.1 as f32 / UNIT);
+                        (x1, y1) = (b.0 as f32 / UNIT, b.1 as f32 / UNIT);
+                        beam = (beam as f32 * frac) as u32;
+                    }
+                }
+            }
+
             self.display_list.push(VectorLine {
-                x0: prev_px,
-                y0: prev_py,
-                x1: px,
-                y1: py,
+                x0,
+                y0,
+                x1,
+                y1,
                 intensity,
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
-                beam_cycles,
+                beam_cycles: beam,
                 // Everything the sequencer spent since the last vector was
                 // drawn, which the beam spent parked on this segment's start.
-                dwell_cycles: self.idle_cycles,
+                dwell_cycles: dwell,
             });
         } else {
             // Nothing to travel from yet: this only parks the beam where the
@@ -1440,6 +1660,87 @@ mod tests {
             !display_list.is_empty(),
             "display list should contain vectors drawn before HALT"
         );
+    }
+
+    // --- Major Havoc variant ---------------------------------------------
+
+    /// Run a Major Havoc list from RAM, with `banked` as the paged vector
+    /// ROM and 32 color RAM entries, until it halts; return the lines drawn.
+    fn run_major_havoc(ram: &[u8], banked: &[u8], color_ram: &[u8; 32]) -> Vec<VectorLine> {
+        let mut avg = Avg::with_variant(AvgVariant::MajorHavoc, 300, 260);
+        avg.go();
+        let mem = VectorMemory::split(ram, &[], 0x1000).with_banked(banked);
+        avg.step(1_000_000, &mem, color_ram);
+        assert!(avg.is_halted(), "the list should end in HALT");
+        avg.take_display_list()
+    }
+
+    fn visible(lines: &[VectorLine]) -> Vec<&VectorLine> {
+        lines.iter().filter(|l| l.intensity > 0).collect()
+    }
+
+    /// A VCTR up and to the right at intensity 8, then HALT.
+    const MH_VCTR_UP: [u8; 6] = [0x00, 0x02, 0x00, 0x82, 0x00, 0x20];
+    /// A VCTR down and to the right at intensity 8, then HALT: below the clip
+    /// window's top, which the first instruction latches at the center.
+    const MH_VCTR_DOWN: [u8; 6] = [0x00, 0x1E, 0x00, 0x82, 0x00, 0x20];
+
+    /// Addresses 0x2000-0x3FFF read the page of the banked ROM the last color
+    /// STAT chose. Page 0 holds a VCTR and page 1 a bare HALT, so the page
+    /// decides whether anything is drawn.
+    #[test]
+    fn major_havoc_reads_the_paged_vector_rom() {
+        let mut banked = vec![0u8; 0x8000];
+        banked[..6].copy_from_slice(&MH_VCTR_DOWN);
+        banked[0x2000..0x2002].copy_from_slice(&word(0x2000));
+        let color_ram = [0u8; 32];
+        // STAT: color 0, intensity 0, map 0 or 1; then JMP to byte 0x2000.
+        // CNTR first, so the VCTR has a point to draw from.
+        let page0 = build_vmem(&[word(0x8000), word(0x6000), word(0xF000)].concat());
+        let lines = run_major_havoc(&page0, &banked, &color_ram);
+        assert_eq!(visible(&lines).len(), 1, "page 0 draws its VCTR");
+
+        let page1 = build_vmem(&[word(0x8000), word(0x6100), word(0xF000)].concat());
+        let lines = run_major_havoc(&page1, &banked, &color_ram);
+        assert!(visible(&lines).is_empty(), "page 1 is a bare HALT");
+    }
+
+    /// A sparkling vector is a run of 8-cycle segments whose colors come from
+    /// color RAM entries 15 to 30 as the LFSR steps; the same vector without
+    /// sparkle is one segment.
+    #[test]
+    fn major_havoc_sparkle_steps_the_beam_through_color_ram() {
+        let down = MH_VCTR_DOWN;
+        let mut color_ram = [0u8; 32];
+        for (i, c) in color_ram.iter_mut().enumerate() {
+            *c = (i as u8) & 0xF;
+        }
+        let plain = build_vmem(&[&word(0x8000)[..], &word(0x6000), &down].concat());
+        let plain = visible(&run_major_havoc(&plain, &[], &color_ram)).len();
+        assert_eq!(plain, 1, "without sparkle the vector is one segment");
+
+        let sparkle = build_vmem(&[&word(0x8000)[..], &word(0x6805), &down].concat());
+        let lines = run_major_havoc(&sparkle, &[], &color_ram);
+        let lines = visible(&lines);
+        assert!(lines.len() > 10, "{} segments", lines.len());
+        let colors: std::collections::HashSet<_> = lines.iter().map(|l| (l.r, l.g, l.b)).collect();
+        assert!(colors.len() > 2, "{colors:?}");
+        assert!(lines.iter().all(|l| l.beam_cycles == 8));
+    }
+
+    /// The first instruction latches the clip window's top at the beam's Y,
+    /// the center at power-on: a vector going up from there is not drawn and
+    /// one going down is.
+    #[test]
+    fn major_havoc_clips_above_the_latched_window_top() {
+        let color_ram = [0u8; 32];
+        let up = build_vmem(&[&word(0x8000)[..], &MH_VCTR_UP].concat());
+        assert!(visible(&run_major_havoc(&up, &[], &color_ram)).is_empty());
+        let down = build_vmem(&[&word(0x8000)[..], &MH_VCTR_DOWN].concat());
+        let lines = run_major_havoc(&down, &[], &color_ram);
+        let lines = visible(&lines);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].y1 < lines[0].y0, "{:?}", lines[0]);
     }
 
     // --- Quantum variant -------------------------------------------------
