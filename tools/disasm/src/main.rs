@@ -461,6 +461,20 @@ enum MovieCommand {
         /// ROM set: a `.zip` archive or a directory of loose ROM files.
         path: String,
     },
+    /// Rewrite a movie's registry name, for carrying a recording across a
+    /// machine rename. Records address controls by stable name, so a rename
+    /// that keeps the control table intact replays byte-identically; verify
+    /// with `movie check` against the golden hash.
+    Retarget {
+        /// Movie file (`.phmi`).
+        movie: PathBuf,
+        /// New registry name.
+        #[arg(long)]
+        machine: String,
+        /// Where to write the retargeted movie.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 /// Address-range / instruction-count limits shared by every mode.
@@ -662,6 +676,9 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 frames,
                 path,
             } => run_movie_check(&movie, frames, &path),
+            MovieCommand::Retarget { movie, machine, out } => {
+                run_movie_retarget(&movie, &machine, &out)
+            }
         },
         Command::Imgdiff {
             a,
@@ -928,6 +945,24 @@ fn run_replay(
         ));
     }
     Ok(msg)
+}
+
+/// Rewrite a movie's registry name, keeping every record. The rename is only
+/// sound across a machine rename that keeps the control table intact; the
+/// caller proves it with `movie check` against the golden hash.
+fn run_movie_retarget(movie_path: &Path, machine: &str, out: &Path) -> Result<String, String> {
+    let mut movie = load_movie(movie_path)?;
+    let from = movie.header.machine.clone();
+    movie.header.machine = machine.to_string();
+    std::fs::write(out, movie.encode())
+        .map_err(|e| format!("writing retargeted movie {}: {e}", out.display()))?;
+    Ok(format!(
+        "retargeted {} -> {} ({} record(s)) -> {}\n",
+        from,
+        machine,
+        movie.records.len(),
+        out.display()
+    ))
 }
 
 /// Describe a movie without booting anything.

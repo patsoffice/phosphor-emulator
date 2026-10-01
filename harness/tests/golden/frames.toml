@@ -347,6 +347,24 @@ size = [240, 292]
 frame = "sha256:6af3e54bcc51b1f2d9262e9aa40771691a83a30d0c4c0bf969cb2f6e6e838311"
 
 [[frame]]
+machine = "spaceduel"
+frames = 1800
+shows = "Attract mode: 1 COIN 1 PLAYER in yellow across the top with green and red score boxes and reserve ships in the corners, BONUS EVERY 10000 in blue and the copyright line in red across the bottom, and the two player ships with drifting saucers and shots in green, red, cyan and white over black. Pins the base AVG's STAT colors, the unswapped draw and the halt-delimited frame."
+size = [727, 538]
+frame = "sha256:9614c35b46fcb13cd4c1861be0c863f4a67db04fc719a0a2972d75d377ca12a6"
+vectors = "sha256:6daae5882e519ca5ced25e07f6aed9520c44c3588fede699f4295ada8056cde3"
+
+[[frame]]
+machine = "spaceduel"
+id = "gameplay"
+frames = 4181
+shows = "A recorded game in flight: COMBINED SCORE 5340 in yellow with reserve ships beside it, the green player ship firing a yellow shot at a red enemy amid cyan stars and saucers over black. The vector display list is pinned beside the raster frame, so this guards the generator's colors and the player controls under a real session: input lands on 404 of the movie's 4181 frames."
+movie = "movies/spaceduel-1790823704.phmi"
+size = [727, 538]
+frame = "sha256:fd686690c6d2eccce3c5ad5f572d03a44d9d63f90c3d7367cacfaab2fe4d78db"
+vectors = "sha256:55ad4018e918ea9d21fb2961b58decf6ab92e144e9092ae972544c66f0bbd4bb"
+
+[[frame]]
 machine = "starwars"
 frames = 2400
 shows = "Attract mode: the FLIGHT INSTRUCTIONS TO RED FIVE briefing, five numbered red paragraphs under the blue INSERT COINS and yellow 1 COIN 1 PLAY header, over a starfield."
