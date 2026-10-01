@@ -19,36 +19,74 @@
 //! lines and interrupts stay per chip: reach them through [`Self::chip`] and
 //! [`Self::chip_mut`]. Only the shared audio output is new.
 //!
+//! Not every board ties all four. Major Havoc's (SP-252 sheet 10A) ties OUT1 to
+//! OUT3 onto one node and gives OUT4 a node of its own, each into its own
+//! amplifier. So each chip is assigned to an output node with
+//! [`Self::set_nodes`], every node has its own load and its own stream, and by
+//! default all four share node 0.
+//!
 //! Boards whose four chips each have their own resistor into a mixer, such as
 //! Star Wars' sound board, are four [`Pokey`]s, not this.
 
 use super::pokey::{OutputStage, Pokey, PokeyLoad};
 
-/// Four POKEYs sharing one audio output node.
+/// Four POKEYs whose audio outputs are tied onto up to four nodes.
 #[derive(phosphor_macros::Saveable)]
-#[save_version(1)]
+#[save_version(2)]
 pub struct QuadPokey {
     chips: [Pokey; 4],
-    resampler: crate::audio::AudioResampler<f32>,
-    /// The node's load, when the board models it; `None` keeps the linear mix,
-    /// the four chips' volume levels summed and scaled so every channel of
-    /// every chip at 15 is 1.0. Board configuration rather than state, as on
-    /// [`Pokey`].
+    /// One stream per node; only the first [`Self::node_count`] are ticked.
+    resamplers: [crate::audio::AudioResampler<f32>; 4],
+    /// Each node's load, when the board models it; `None` keeps the linear
+    /// mix, the node's chips' volume levels summed and scaled so every channel
+    /// of every chip on it at 15 is 1.0. Board configuration rather than state,
+    /// as on [`Pokey`], and so is everything below.
     #[save_skip]
-    output_stage: Option<OutputStage>,
+    output_stages: [Option<OutputStage>; 4],
+    /// Which node each chip's output is tied to.
+    #[save_skip]
+    node_of: [usize; 4],
+    /// Nodes in use: one more than the highest in `node_of`.
+    #[save_skip]
+    node_count: usize,
 }
 
 impl QuadPokey {
-    /// Four chips on `master_clock_hz`, resampled to `output_sample_rate`.
+    /// Four chips on `master_clock_hz`, resampled to `output_sample_rate`, all
+    /// tied to node 0.
     pub fn with_clock(master_clock_hz: u32, output_sample_rate: u32) -> Self {
         Self {
             chips: std::array::from_fn(|_| Pokey::with_clock(master_clock_hz, output_sample_rate)),
-            resampler: crate::audio::AudioResampler::new(
-                master_clock_hz as u64,
-                output_sample_rate as u64,
-            ),
-            output_stage: None,
+            resamplers: std::array::from_fn(|_| {
+                crate::audio::AudioResampler::new(master_clock_hz as u64, output_sample_rate as u64)
+            }),
+            output_stages: [None, None, None, None],
+            node_of: [0; 4],
+            node_count: 1,
         }
+    }
+
+    /// Tie chip `n`'s output to node `nodes[n]`, 0 to 3. Nodes are numbered
+    /// from 0 without gaps; a node no chip is tied to is a board error.
+    pub fn set_nodes(&mut self, nodes: [usize; 4]) {
+        let count = nodes.iter().max().map_or(1, |&m| m + 1);
+        assert!(count <= 4, "a quad POKEY has at most four nodes: {nodes:?}");
+        for node in 0..count {
+            assert!(nodes.contains(&node), "node {node} has no chip: {nodes:?}");
+        }
+        self.node_of = nodes;
+        self.node_count = count;
+    }
+
+    /// Nodes in use.
+    pub fn node_count(&self) -> usize {
+        self.node_count
+    }
+
+    /// How many chips are tied to `node`, for scaling its output with
+    /// [`PokeyLoad::full_scale_of_chips`].
+    pub fn chips_on(&self, node: usize) -> usize {
+        self.node_of.iter().filter(|&&n| n == node).count()
     }
 
     /// Chip `n`, 0 to 3, for its registers, pot lines and interrupt.
@@ -61,43 +99,59 @@ impl QuadPokey {
         &mut self.chips[n]
     }
 
-    /// Model the load on the shared node. The output is then what that load
-    /// reads, in its own units (see [`PokeyLoad`]), for the devices of all
-    /// four chips together; divide by
-    /// [`PokeyLoad::full_scale_of_chips`]`(4)` to scale it.
+    /// Model the load on node `node`. Its output is then what that load reads,
+    /// in its own units (see [`PokeyLoad`]), for the devices of every chip tied
+    /// to it together; divide by
+    /// [`PokeyLoad::full_scale_of_chips`]`(self.chips_on(node))` to scale it.
+    pub fn set_node_load(&mut self, node: usize, load: PokeyLoad) {
+        self.output_stages[node] = Some(OutputStage::new(load, self.chips[0].master_clock_hz()));
+    }
+
+    /// [`Self::set_node_load`] on node 0, the only node when all four chips
+    /// share one.
     pub fn set_output_load(&mut self, load: PokeyLoad) {
-        self.output_stage = Some(OutputStage::new(load, self.chips[0].master_clock_hz()));
+        self.set_node_load(0, load);
     }
 
-    /// Advance all four chips one master clock and the shared node with them.
+    /// Advance all four chips one master clock and every node with them.
     pub fn tick(&mut self) {
-        let mut mixed = 0.0;
-        let mut conductance = 0.0;
-        for chip in &mut self.chips {
+        let mut mixed = [0.0f32; 4];
+        let mut conductance = [0.0f64; 4];
+        for (chip, &node) in self.chips.iter_mut().zip(&self.node_of) {
             let (m, g) = chip.clock();
-            mixed += m;
-            conductance += g;
+            mixed[node] += m;
+            conductance[node] += g;
         }
-        let sample = match &mut self.output_stage {
-            Some(stage) => stage.step(conductance) as f32,
-            None => mixed / 240.0,
-        };
-        self.resampler.tick(sample);
+        for node in 0..self.node_count {
+            let sample = match &mut self.output_stages[node] {
+                Some(stage) => stage.step(conductance[node]) as f32,
+                None => mixed[node] / (60.0 * self.chips_on(node) as f32),
+            };
+            self.resamplers[node].tick(sample);
+        }
     }
 
-    /// Take the node's resampled output accumulated since the last call.
+    /// Take node `node`'s resampled output accumulated since the last call.
+    pub fn drain_node(&mut self, node: usize) -> Vec<f32> {
+        self.resamplers[node].drain_audio()
+    }
+
+    /// [`Self::drain_node`] on node 0, the only node when all four chips
+    /// share one.
     pub fn drain_audio(&mut self) -> Vec<f32> {
-        self.resampler.drain_audio()
+        self.drain_node(0)
     }
 
-    /// Reset all four chips and put the node back at rest.
+    /// Reset all four chips and put every node back at rest.
     pub fn reset(&mut self) {
         for chip in &mut self.chips {
             chip.reset();
         }
-        self.resampler.reset();
-        if let Some(stage) = &mut self.output_stage {
-            stage.rest();
+        for (resampler, stage) in self.resamplers.iter_mut().zip(&mut self.output_stages) {
+            resampler.reset();
+            if let Some(stage) = stage {
+                stage.rest();
+            }
         }
     }
 }
@@ -203,6 +257,55 @@ mod tests {
         }
         g
     };
+
+    /// Settled output of each node, with channel 1 of the listed chips
+    /// volume-only at 15, chips 0 to 2 on node 0 and chip 3 on node 1, each
+    /// node on 220 ohm to +5 V.
+    fn split_drops(chips: &[usize]) -> (f32, f32) {
+        let mut quad = QuadPokey::with_clock(CLOCK, RATE);
+        quad.set_nodes([0, 0, 0, 1]);
+        let load = PokeyLoad::PullUp(PokeyOutputNetwork {
+            pullup_ohms: 220.0,
+            supply_v: 5.0,
+            load_farads: 0.0,
+        });
+        quad.set_node_load(0, load);
+        quad.set_node_load(1, load);
+        for &n in chips {
+            let p = quad.chip_mut(n);
+            p.write(0x0F, 0x03);
+            p.write(0x01, 0x1F); // AUDC1: volume only, 15
+        }
+        for _ in 0..20_000 {
+            quad.tick();
+        }
+        let a = *quad.drain_node(0).last().unwrap();
+        let b = *quad.drain_node(1).last().unwrap();
+        (a, b)
+    }
+
+    /// A chip on its own node does not load the others: chip 3 playing
+    /// leaves node 0 exactly where chip 0 alone puts it, and node 1 carries
+    /// chip 3 alone. With all four on one node, chip 3 would compress chip 0.
+    #[test]
+    fn a_chip_on_its_own_node_does_not_load_the_others() {
+        let (alone, silent) = split_drops(&[0]);
+        let (with_three, three) = split_drops(&[0, 3]);
+        assert_eq!(silent, 0.0);
+        assert!(alone > 0.05, "{alone}");
+        assert!(
+            (with_three - alone).abs() < 1e-6,
+            "{with_three} against {alone}"
+        );
+        assert!((three - alone).abs() < 1e-6, "chip 3 on node 1: {three}");
+    }
+
+    /// Nodes must be numbered without gaps.
+    #[test]
+    #[should_panic(expected = "node 1 has no chip")]
+    fn a_node_without_a_chip_is_rejected() {
+        QuadPokey::with_clock(CLOCK, RATE).set_nodes([0, 0, 2, 2]);
+    }
 
     /// Reset puts every chip and the node back at rest.
     #[test]
