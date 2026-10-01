@@ -713,6 +713,7 @@ pub mod scramble;
 pub mod sega_zaxxon;
 pub mod simple_system;
 pub mod sinistar;
+pub mod spacduel;
 pub mod starwars;
 pub mod tempest;
 pub mod tkg04;
