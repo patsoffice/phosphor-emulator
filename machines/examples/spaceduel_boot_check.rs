@@ -7,7 +7,7 @@
 //! bounding box, distinct colors, and a coarse ASCII thumbnail of the
 //! rasterized frame so bring-up can be eyeballed without a window.
 //!
-//!   cargo run -p phosphor-machines --example spacduel_boot_check -- <roms-dir> [frames]
+//!   cargo run -p phosphor-machines --example spaceduel_boot_check -- <roms-dir> [frames]
 //!
 //! where <roms-dir> holds the extracted `spacduel` ROM files (unzip the MAME
 //! `spacduel.zip` set into a directory first). Exits non-zero if the display
@@ -25,7 +25,7 @@ const TAIL: usize = 60;
 fn main() {
     let dir = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/tmp/spacduel-roms".to_string());
+        .unwrap_or_else(|| "/tmp/spaceduel-roms".to_string());
     let frames: u32 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -39,10 +39,10 @@ fn main() {
         }
     };
 
-    let entry = match registry::find("spacduel") {
+    let entry = match registry::find("spaceduel") {
         Some(e) => e,
         None => {
-            eprintln!("spacduel not registered");
+            eprintln!("spaceduel not registered");
             std::process::exit(1);
         }
     };

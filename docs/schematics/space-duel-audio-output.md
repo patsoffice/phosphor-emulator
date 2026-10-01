@@ -1,7 +1,7 @@
 # Space Duel's audio output
 
 What Atari's Space Duel main PCB does between its two POKEYs and the cabinet.
-Read for `phosphor-emulator-djlf`. The model will live in `machines/src/spacduel.rs`.
+Read for `phosphor-emulator-djlf`. The model lives in `machines/src/spaceduel.rs`.
 
 The finding in one line: **each POKEY drives its own transimpedance stage and
 its own multi-pole filter chain, and the two chains meet at one mixer.** The

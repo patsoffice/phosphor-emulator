@@ -1017,7 +1017,7 @@ impl Avg {
             AvgVariant::Quantum => self.draw_quantum(cycles, color_ram),
             AvgVariant::StarWars => self.draw_starwars(cycles),
             AvgVariant::MajorHavoc => self.draw_major_havoc(cycles, color_ram),
-            AvgVariant::SpaceDuel => self.draw_spacduel(cycles),
+            AvgVariant::SpaceDuel => self.draw_spaceduel(cycles),
         }
         cycles
     }
@@ -1187,7 +1187,7 @@ impl Avg {
     /// The reference base AVG draws `(x, y)` unswapped with
     /// `color111(m_color)`; Tempest's color RAM lookup and 0x800 select do not
     /// exist here.
-    fn draw_spacduel(&mut self, cycles: i32) {
+    fn draw_spaceduel(&mut self, cycles: i32) {
         let (dx, dy) = self.deflect(cycles, 3);
         self.xpos = self.xpos.wrapping_add(dx);
         // Y-up, the convention the renderers expect of a display list.
@@ -2227,7 +2227,7 @@ mod tests {
     // and a 4-bit intensity together with no select bit.
 
     #[test]
-    fn spacduel_decodes_xor1_like_tempest() {
+    fn spaceduel_decodes_xor1_like_tempest() {
         // HALT is word 0x2000, stored [0x00, 0x20]: the AVG reads the high
         // byte from the odd address. A native-order decode would see op 0.
         let vmem = build_vmem(&[0x00, 0x20]);
@@ -2238,7 +2238,7 @@ mod tests {
     }
 
     #[test]
-    fn spacduel_stat_latches_color_and_intensity_together() {
+    fn spaceduel_stat_latches_color_and_intensity_together() {
         // STAT, dvy low byte 0xA5: color = 0xA5 & 7 = 5, intensity = 0xA.
         //   word(0x60A5) = [0xA5, 0x60]: op 3, dvy12 0, high nibble 0.
         let w0 = word(0x60A5); // STAT
@@ -2262,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn spacduel_vctr_draws_color111_line() {
+    fn spaceduel_vctr_draws_color111_line() {
         // STAT sets intensity=0xF, color=2 (green via color111); CNTR seeds
         // the beam at center; VCTR draws the first lit line; HALT stops.
         //   STAT: word(0x60F2) = [0xF2, 0x60]

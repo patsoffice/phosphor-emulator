@@ -72,18 +72,6 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 // ROM sets
 // ---------------------------------------------------------------------------
 
-/// Where one Space Duel ROM set's chips go. Version 1 and 2 differ only in
-/// the $4000 page; the vector ROM and the AVG PROM are shared.
-pub struct SpacduelConfig {
-    /// The registry name, which is also the machine id.
-    id: &'static str,
-    /// Program ROM, 20K at 0x4000-0x8FFF.
-    program: &'static RomRegion,
-    /// The DSW1 and DSW2 banks; the prototype would lay these out
-    /// differently, and it has no ROM here.
-    dip_banks: &'static [DipSwitchBank],
-}
-
 macro_rules! rom {
     ($name:expr, $size:expr, $offset:expr, $crc:expr) => {
         RomEntry {
@@ -168,7 +156,7 @@ const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
-enum SpacduelRegion {
+enum SpaceduelRegion {
     Ram = 1,
     Io = 2,
     VectorRam = 3,
@@ -179,29 +167,29 @@ enum SpacduelRegion {
 fn build_map() -> AddressSpace16 {
     let mut map = AddressSpace16::new();
     map.region(
-        SpacduelRegion::Ram,
+        SpaceduelRegion::Ram,
         "RAM",
         0x0000,
         0x0400,
         AccessKind::ReadWrite,
     )
-    .region(SpacduelRegion::Io, "I/O", 0x0800, 0x1000, AccessKind::Io)
+    .region(SpaceduelRegion::Io, "I/O", 0x0800, 0x1000, AccessKind::Io)
     .region(
-        SpacduelRegion::VectorRam,
+        SpaceduelRegion::VectorRam,
         "Vector RAM",
         0x2000,
         0x0800,
         AccessKind::ReadWrite,
     )
     .region(
-        SpacduelRegion::VectorRom,
+        SpaceduelRegion::VectorRom,
         "Vector ROM",
         0x2800,
         0x1800,
         AccessKind::ReadOnly,
     )
     .region(
-        SpacduelRegion::ProgramRom,
+        SpaceduelRegion::ProgramRom,
         "Program ROM",
         0x4000,
         0x5000,
@@ -223,7 +211,7 @@ fn build_map() -> AddressSpace16 {
 #[derive(BusDebug, DebugTrace, Saveable)]
 #[save_version(1)]
 #[save_tlv]
-pub struct SpacduelBoard {
+pub struct SpaceduelBoard {
     #[debug_map(cpu = 0)]
     #[save(id = 1)]
     map: AddressSpace16,
@@ -320,7 +308,7 @@ const POKEY_LOAD: PokeyLoad = PokeyLoad::VirtualGround {
 const B3_WEIGHT: f32 = 3.3 / 10.0;
 const SCALE: f32 = 1.0 / (1.0 + B3_WEIGHT);
 
-impl SpacduelBoard {
+impl SpaceduelBoard {
     fn new() -> Self {
         let rate = phosphor_core::audio::host_sample_rate();
         let mut pokey1 = Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate);
@@ -465,8 +453,8 @@ impl SpacduelBoard {
     /// Run the vector generator for one CPU cycle's worth of its own clock.
     fn step_avg(&mut self) {
         let mem = VectorMemory::split(
-            self.map.region_data(SpacduelRegion::VectorRam),
-            self.map.region_data(SpacduelRegion::VectorRom),
+            self.map.region_data(SpaceduelRegion::VectorRam),
+            self.map.region_data(SpaceduelRegion::VectorRom),
             0x0800,
         );
         // No color RAM on this board; the STAT carries color111 directly.
@@ -533,7 +521,7 @@ impl SpacduelBoard {
 // The CPU's bus
 // ---------------------------------------------------------------------------
 
-impl Bus for SpacduelBoard {
+impl Bus for SpaceduelBoard {
     type Address = u16;
     type Data = u8;
 
@@ -543,11 +531,11 @@ impl Bus for SpacduelBoard {
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let data = match self.map.page(addr).region_id {
-            SpacduelRegion::RAM
-            | SpacduelRegion::VECTOR_RAM
-            | SpacduelRegion::VECTOR_ROM
-            | SpacduelRegion::PROGRAM_ROM => self.map.read_backing(addr),
-            SpacduelRegion::IO => match addr {
+            SpaceduelRegion::RAM
+            | SpaceduelRegion::VECTOR_RAM
+            | SpaceduelRegion::VECTOR_ROM
+            | SpaceduelRegion::PROGRAM_ROM => self.map.read_backing(addr),
+            SpaceduelRegion::IO => match addr {
                 // IN0: coins and service; done and clock generated.
                 0x0800 => self.in0(),
                 // IN3 mux: players, DSW2 options, cabinet.
@@ -584,7 +572,7 @@ impl Bus for SpacduelBoard {
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         self.map.watch_write(0, master, addr, data);
         let region = self.map.page(addr).region_id;
-        if region == SpacduelRegion::IO {
+        if region == SpaceduelRegion::IO {
             match addr {
                 // Coin latch: counters, lockout and lamps are bookkeeping
                 // with no emulation effect; the flip bits reach the AVG.
@@ -626,7 +614,7 @@ impl Bus for SpacduelBoard {
                 0x1400..=0x17FF => self.pokey2.write(addr & 0x0F, data),
                 _ => {}
             }
-        } else if region == SpacduelRegion::RAM || region == SpacduelRegion::VECTOR_RAM {
+        } else if region == SpaceduelRegion::RAM || region == SpaceduelRegion::VECTOR_RAM {
             self.map.write_backing(addr, data);
         }
     }
@@ -643,40 +631,43 @@ impl Bus for SpacduelBoard {
 // The machine
 // ---------------------------------------------------------------------------
 
-/// Atari Space Duel and its version 1 ROM set.
+/// Atari Space Duel, both ROM revisions on the one board.
 #[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
-pub struct SpacduelSystem {
+pub struct SpaceduelSystem {
     #[debug_cpu("M6502")]
     #[save(id = 1)]
     cpu: M6502,
     #[debug_bus]
     #[save(id = 2)]
-    board: SpacduelBoard,
+    board: SpaceduelBoard,
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
-    #[save_skip]
-    config: &'static SpacduelConfig,
+}
+
+/// One ROM revision's program ROM. Version 1 and 2 differ only in the $4000
+/// page; the vector ROM and the AVG PROM are shared, so one config each.
+pub struct SpaceduelRomConfig {
+    program: &'static RomRegion,
 }
 
 /// Space Duel, version 2.
-pub static SPACDUEL: SpacduelConfig = SpacduelConfig {
-    id: "spacduel",
+pub static SPACEDEL_CONFIG: SpaceduelRomConfig = SpaceduelRomConfig {
     program: &PROGRAM_V2,
-    dip_banks: &[DSW0, DSW1, DSW2],
 };
 
 /// Space Duel, version 1.
-pub static SPACDUEL1: SpacduelConfig = SpacduelConfig {
-    id: "spacduel1",
+pub static SPACEDEL1_CONFIG: SpaceduelRomConfig = SpaceduelRomConfig {
     program: &PROGRAM_V1,
-    dip_banks: &[DSW0, DSW1, DSW2],
 };
+
+/// Newest revision first: a set matches the first config whose files it has.
+const ALL_CONFIGS: &[&SpaceduelRomConfig] = &[&SPACEDEL_CONFIG, &SPACEDEL1_CONFIG];
 
 /// One CPU cycle: the two POKEYs, the IRQ clock and the AVG, then the 6502.
 #[inline]
-fn tick(cpu: &mut M6502, board: &mut SpacduelBoard) {
+fn tick(cpu: &mut M6502, board: &mut SpaceduelBoard) {
     board.pokey1.tick();
     board.pokey2.tick();
     board.clock_interrupts();
@@ -689,23 +680,31 @@ fn tick(cpu: &mut M6502, board: &mut SpacduelBoard) {
     board.clock += 1;
 }
 
-impl SpacduelSystem {
-    pub fn new(config: &'static SpacduelConfig) -> Self {
+impl SpaceduelSystem {
+    pub fn new() -> Self {
         Self {
             cpu: M6502::new(),
-            board: SpacduelBoard::new(),
+            board: SpaceduelBoard::new(),
             audio_buffer: SampleRing::with_capacity(2048),
-            config,
         }
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
-        let c = self.config;
+        self.load_roms(rom_set, &SPACEDEL_CONFIG)
+    }
+
+    fn load_roms(
+        &mut self,
+        rom_set: &RomSet,
+        config: &SpaceduelRomConfig,
+    ) -> Result<(), RomLoadError> {
         let b = &mut self.board;
+        b.map.load_region(
+            SpaceduelRegion::ProgramRom,
+            &config.program.load(rom_set)?,
+        );
         b.map
-            .load_region(SpacduelRegion::ProgramRom, &c.program.load(rom_set)?);
-        b.map
-            .load_region(SpacduelRegion::VectorRom, &VECTOR_ROM.load(rom_set)?);
+            .load_region(SpaceduelRegion::VectorRom, &VECTOR_ROM.load(rom_set)?);
         b.avg.load_state_prom(&AVG_PROM.load(rom_set)?);
         Ok(())
     }
@@ -759,9 +758,9 @@ impl SpacduelSystem {
     }
 }
 
-impl Default for SpacduelSystem {
+impl Default for SpaceduelSystem {
     fn default() -> Self {
-        Self::new(&SPACDUEL)
+        Self::new()
     }
 }
 
@@ -795,7 +794,7 @@ fn set_bit_active_high(reg: &mut u8, bit: u8, pressed: bool) {
     }
 }
 
-const SPACDUEL_CONTROLS: &[InputControl] = &[
+const SPACEDEL_CONTROLS: &[InputControl] = &[
     InputControl {
         id: InputId(INPUT_COIN1 as u16),
         stable_name: "coin1",
@@ -926,9 +925,9 @@ const SPACDUEL_CONTROLS: &[InputControl] = &[
     },
 ];
 
-impl InputConfigurable for SpacduelSystem {
+impl InputConfigurable for SpaceduelSystem {
     fn input_controls(&self) -> &'static [InputControl] {
-        SPACDUEL_CONTROLS
+        SPACEDEL_CONTROLS
     }
 
     fn handle_input(&mut self, event: InputEvent) {
@@ -972,7 +971,7 @@ impl InputConfigurable for SpacduelSystem {
 // Machine traits
 // ---------------------------------------------------------------------------
 
-impl Renderable for SpacduelSystem {
+impl Renderable for SpaceduelSystem {
     fn display_size(&self) -> (u32, u32) {
         let (w, h) = TIMING.display_size();
         raster_size_for_field(w, h)
@@ -995,7 +994,7 @@ impl Renderable for SpacduelSystem {
     }
 }
 
-impl AudioSource for SpacduelSystem {
+impl AudioSource for SpaceduelSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
         self.audio_buffer.pop_front_into(buffer)
     }
@@ -1005,16 +1004,16 @@ impl AudioSource for SpacduelSystem {
     }
 }
 
-crate::impl_board_debug!(SpacduelSystem, board, TIMING);
-crate::impl_board_debug_trace!(SpacduelSystem, board);
+crate::impl_board_debug!(SpaceduelSystem, board, TIMING);
+crate::impl_board_debug_trace!(SpaceduelSystem, board);
 
-impl MachineCore for SpacduelSystem {
+impl MachineCore for SpaceduelSystem {
     fn frame_rate_hz(&self) -> f64 {
         TIMING.frame_rate_hz()
     }
 
     fn machine_id(&self) -> &str {
-        self.config.id
+        "spaceduel"
     }
 
     crate::machine_clock_declaration!(TIMING, atari_avg::clock_tree);
@@ -1055,11 +1054,11 @@ impl MachineCore for SpacduelSystem {
     }
 }
 
-impl SaveState for SpacduelSystem {
+impl SaveState for SpaceduelSystem {
     crate::machine_save_state!();
 }
 
-impl Nvram for SpacduelSystem {
+impl Nvram for SpaceduelSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
         Some(self.board.earom.snapshot())
     }
@@ -1069,7 +1068,7 @@ impl Nvram for SpacduelSystem {
     }
 }
 
-impl Profilable for SpacduelSystem {}
+impl Profilable for SpaceduelSystem {}
 
 // ---------------------------------------------------------------------------
 // DIP switches
@@ -1206,9 +1205,12 @@ const DSW2: DipSwitchBank = DipSwitchBank {
     ],
 };
 
-impl DipSwitches for SpacduelSystem {
+/// The three banks both revisions share.
+const SPACEDEL_DIP_BANKS: &[DipSwitchBank] = &[DSW0, DSW1, DSW2];
+
+impl DipSwitches for SpaceduelSystem {
     fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        self.config.dip_banks
+        SPACEDEL_DIP_BANKS
     }
 
     fn dip_bank_value(&self, bank: usize) -> u8 {
@@ -1234,17 +1236,14 @@ impl DipSwitches for SpacduelSystem {
 // Registry
 // ---------------------------------------------------------------------------
 
+// One board, two ROM revisions: the registry tries each config in
+// ALL_CONFIGS order and the first whose files the set has wins.
 crate::register_machine!(
-    new = SpacduelSystem::new(&SPACDUEL),
-    "spacduel",
-    &["spacduel"],
-    SPACDUEL_CONTROLS
-);
-crate::register_machine!(
-    new = SpacduelSystem::new(&SPACDUEL1),
-    "spacduel1",
-    &["spacduel1"],
-    SPACDUEL_CONTROLS
+    SpaceduelSystem,
+    "spaceduel",
+    &["spacduel", "spacduel1"],
+    SPACEDEL_CONTROLS,
+    configs = ALL_CONFIGS
 );
 
 #[cfg(test)]
@@ -1253,27 +1252,25 @@ mod tests {
     use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
-    fn read(sys: &mut SpacduelSystem, addr: u16) -> u8 {
+    fn read(sys: &mut SpaceduelSystem, addr: u16) -> u8 {
         sys.bus_read(BusMaster::Cpu(0), addr)
     }
 
     /// All three banks' tables are valid against the power-on switch bytes.
     #[test]
     fn dip_tables_are_valid() {
-        for config in [&SPACDUEL, &SPACDUEL1] {
-            let sys = SpacduelSystem::new(config);
-            assert_eq!(sys.dip_bank_value(0), 0x01);
-            assert_eq!(sys.dip_bank_value(1), 0x00);
-            assert_eq!(sys.dip_bank_value(2), 0x07);
-            crate::assert_dip_banks_valid(sys.dip_banks(), &[0x01, 0x00, 0x07]);
-        }
+        let sys = SpaceduelSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x01);
+        assert_eq!(sys.dip_bank_value(1), 0x00);
+        assert_eq!(sys.dip_bank_value(2), 0x07);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[0x01, 0x00, 0x07]);
     }
 
     /// The IN3 mux spreads the players, the DSW2 jumpers and the cabinet over
     /// eight reads at 0x0900-0x0907, in the reference driver's bit positions.
     #[test]
     fn in3_mux_spreads_players_options_and_cabinet() {
-        let mut sys = SpacduelSystem::new(&SPACDUEL);
+        let mut sys = SpaceduelSystem::new();
         // P1: rotate left + fire; P2: BUTTON3 + thrust; jumpers clear.
         sys.board.in3 = 0x01 | 0x04;
         sys.board.in4 = 0x08 | 0x10;
@@ -1314,7 +1311,7 @@ mod tests {
     #[test]
     fn p1_shield_rides_the_tertiary_ladder() {
         use phosphor_core::core::machine::InputConfigurable;
-        let sys = SpacduelSystem::new(&SPACDUEL);
+        let sys = SpaceduelSystem::new();
         let shield = sys
             .input_controls()
             .iter()
@@ -1333,7 +1330,7 @@ mod tests {
     #[test]
     fn thrust_and_shield_land_on_the_playtest_confirmed_bits() {
         use phosphor_core::core::machine::InputConfigurable;
-        let mut sys = SpacduelSystem::new(&SPACDUEL);
+        let mut sys = SpaceduelSystem::new();
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_P1_THRUST as u16),
             pressed: true,
@@ -1359,7 +1356,7 @@ mod tests {
     /// Both POKEYs' ALLPOT registers read their DIP bank, not the pot scan.
     #[test]
     fn allpot_reads_the_dip_banks() {
-        let mut sys = SpacduelSystem::new(&SPACDUEL);
+        let mut sys = SpaceduelSystem::new();
         sys.board.dsw0 = 0xA5;
         sys.board.dsw1 = 0x5A;
         assert_eq!(read(&mut sys, 0x1008), 0xA5);
@@ -1373,7 +1370,7 @@ mod tests {
     /// through the same control bits the reference driver uses.
     #[test]
     fn earom_write_read() {
-        let mut sys = SpacduelSystem::new(&SPACDUEL);
+        let mut sys = SpaceduelSystem::new();
 
         // Latch address 0x05 with data 0xAB.
         sys.bus_write(BusMaster::Cpu(0), 0x0F05, 0xAB);
@@ -1398,9 +1395,9 @@ mod tests {
     /// carried.
     #[test]
     fn save_load_round_trip() {
-        let mut sys = SpacduelSystem::new(&SPACDUEL);
-        sys.board.map.region_data_mut(SpacduelRegion::Ram)[0x100] = 0xAA;
-        sys.board.map.region_data_mut(SpacduelRegion::VectorRam)[0x200] = 0xBB;
+        let mut sys = SpaceduelSystem::new();
+        sys.board.map.region_data_mut(SpaceduelRegion::Ram)[0x100] = 0xAA;
+        sys.board.map.region_data_mut(SpaceduelRegion::VectorRam)[0x200] = 0xBB;
         sys.board.in3 = 0x2A;
         sys.board.clock = 75_000;
         sys.board.irq_counter = 3000;
@@ -1414,12 +1411,12 @@ mod tests {
         let data = sys.save_state().expect("save_state should return Some");
         let cpu_snap = sys.cpu.snapshot();
 
-        let mut sys2 = SpacduelSystem::new(&SPACDUEL);
+        let mut sys2 = SpaceduelSystem::new();
         sys2.load_state(&data).unwrap();
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.board.map.region_data(SpacduelRegion::Ram)[0x100], 0xAA);
+        assert_eq!(sys2.board.map.region_data(SpaceduelRegion::Ram)[0x100], 0xAA);
         assert_eq!(
-            sys2.board.map.region_data(SpacduelRegion::VectorRam)[0x200],
+            sys2.board.map.region_data(SpaceduelRegion::VectorRam)[0x200],
             0xBB
         );
         assert_eq!(sys2.board.in3, 0x2A);
@@ -1436,7 +1433,7 @@ mod tests {
     fn a_vector_drawn_up_the_display_list_lands_up_the_screen() {
         use phosphor_core::core::machine::Renderable;
         let (fw, fh) = (TIMING.display_width as f32, TIMING.display_height as f32);
-        let mut sys = SpacduelSystem::new(&SPACDUEL);
+        let mut sys = SpaceduelSystem::new();
         sys.board.display_list = vec![VectorLine {
             x0: fw / 2.0,
             y0: fh / 2.0,

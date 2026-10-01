@@ -1353,23 +1353,27 @@ Neither capacitor's corner is established: both depend on impedances not on this
 sheet. phosphor-emulator-2u1j."""
 
 [[target]]
-id = "spacduel-output"
-machines = ["spacduel", "spacduel1"]
+id = "spaceduel-output"
+machines = ["spaceduel"]
 status = "partial"
 notes = """
 EXAMINED. SP-181 sheet 6A read and transcribed at
 docs/schematics/space-duel-audio-output.md (phosphor-emulator-djlf).
 
-MODELED SO FAR is only the DC weights: each POKEY works into a 1k virtual
-ground, C/D3 (POKEY 1) reaching the mixer at 1 and B3 (POKEY 2) through its
--10 and -1 stages at 0.33, so the code sums POKEY 1 at 1 and POKEY 2 at 3.3.
-NOT MODELED YET: every pole (the 723 Hz and 1.59 kHz first stages, the 159 Hz
-pair, the 7.2 and 18.5 Hz couplings, the 482 Hz mixer) and therefore the DC
-this sum keeps, which the couplings remove on hardware.
+MODELED: each POKEY works into a 1k virtual ground. C/D3 (POKEY 1) passes
+its 723 Hz first stage and 18.5 Hz coupling to the mixer at 1; B3 (POKEY 2)
+passes its 1.59 kHz first stage, 7.2 Hz coupling, and the -10 and -1 stages
+at 159 Hz to the mixer at 0.33. The mixer low-passes the sum at 482 Hz. The
+two unity inverters are omitted (no frequency effect) and every device on
+both chips scales to 1.0. Ear-checked by ear against live play (djlf).
+
+NOT MODELED: LM324 finite gain-bandwidth and clipping; the C34/C133 shunt
+poles (no AC effect in the ideal virtual-ground model).
 
 NOT ESTABLISHED: everything past J19 pins 11/12 (sheet 2B not read), so mono
 is an assumption, not a reading; C33's value past 0.1 at moderate confidence;
-and any comparison against hardware or the reference."""
+the POKEYs' source impedances; and any comparison against hardware or the
+reference."""
 
 [[target]]
 id = "mhavoc-output"
