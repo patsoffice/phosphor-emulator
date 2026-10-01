@@ -140,7 +140,11 @@ fn movie_retarget_renames_the_machine_and_keeps_the_records() {
         "--out",
         out_path.to_str().unwrap(),
     ]);
-    assert!(out.ok, "movie retarget failed: {}{}", out.stdout, out.stderr);
+    assert!(
+        out.ok,
+        "movie retarget failed: {}{}",
+        out.stdout, out.stderr
+    );
     assert!(
         out.stdout.contains("retargeted mrdo -> spaceduel"),
         "expected a rename summary, got:\n{}",
@@ -150,7 +154,11 @@ fn movie_retarget_renames_the_machine_and_keeps_the_records() {
     // The output is a decodable movie for the new machine with the same
     // records: same frame span, same marker, same DIP bytes.
     let info = disasm(&["movie", "info", out_path.to_str().unwrap()]);
-    assert!(info.ok, "retargeted movie failed info: {}{}", info.stdout, info.stderr);
+    assert!(
+        info.ok,
+        "retargeted movie failed info: {}{}",
+        info.stdout, info.stderr
+    );
     for expected in [
         "machine:     spaceduel",
         "frames:      3",

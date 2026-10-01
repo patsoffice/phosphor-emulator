@@ -676,9 +676,11 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 frames,
                 path,
             } => run_movie_check(&movie, frames, &path),
-            MovieCommand::Retarget { movie, machine, out } => {
-                run_movie_retarget(&movie, &machine, &out)
-            }
+            MovieCommand::Retarget {
+                movie,
+                machine,
+                out,
+            } => run_movie_retarget(&movie, &machine, &out),
         },
         Command::Imgdiff {
             a,

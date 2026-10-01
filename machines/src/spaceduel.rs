@@ -699,10 +699,8 @@ impl SpaceduelSystem {
         config: &SpaceduelRomConfig,
     ) -> Result<(), RomLoadError> {
         let b = &mut self.board;
-        b.map.load_region(
-            SpaceduelRegion::ProgramRom,
-            &config.program.load(rom_set)?,
-        );
+        b.map
+            .load_region(SpaceduelRegion::ProgramRom, &config.program.load(rom_set)?);
         b.map
             .load_region(SpaceduelRegion::VectorRom, &VECTOR_ROM.load(rom_set)?);
         b.avg.load_state_prom(&AVG_PROM.load(rom_set)?);
@@ -1414,7 +1412,10 @@ mod tests {
         let mut sys2 = SpaceduelSystem::new();
         sys2.load_state(&data).unwrap();
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.board.map.region_data(SpaceduelRegion::Ram)[0x100], 0xAA);
+        assert_eq!(
+            sys2.board.map.region_data(SpaceduelRegion::Ram)[0x100],
+            0xAA
+        );
         assert_eq!(
             sys2.board.map.region_data(SpaceduelRegion::VectorRam)[0x200],
             0xBB
