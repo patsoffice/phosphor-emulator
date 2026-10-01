@@ -848,7 +848,7 @@ const SPACDUEL_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_P1_SHIELD as u16),
         stable_name: "p1_shield",
         label: "P1 Shield",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Tertiary),
         player: Some(1),
         default_bindings: &[],
     },
@@ -1307,6 +1307,24 @@ mod tests {
         );
         assert_eq!(read(&mut sys, 0x0906), 0x80, "P1 select lands on bit 7");
         assert_eq!(read(&mut sys, 0x0907), 0x00, "cabinet upright, jumper set");
+    }
+
+    /// P1 shield rides the Tertiary rung (LCtrl): the third ranked action
+    /// after fire (Primary) and thrust (Secondary).
+    #[test]
+    fn p1_shield_rides_the_tertiary_ladder() {
+        use phosphor_core::core::machine::InputConfigurable;
+        let sys = SpacduelSystem::new(&SPACDUEL);
+        let shield = sys
+            .input_controls()
+            .iter()
+            .find(|c| c.stable_name == "p1_shield")
+            .expect("p1_shield control exists");
+        assert_eq!(
+            shield.kind,
+            InputKind::Action(ActionRole::Tertiary),
+            "P1 shield must carry a default key (LCtrl)"
+        );
     }
 
     /// Thrust and shield land on the playtest-confirmed bits: pressing the
