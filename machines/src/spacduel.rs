@@ -49,7 +49,7 @@
 use crate::atari_avg;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
@@ -65,7 +65,7 @@ use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::Er2055;
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyLoad};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
@@ -276,14 +276,57 @@ pub struct SpacduelBoard {
     #[save(id = 12)]
     earom: Er2055,
 
+    // Audio: see `mix_audio`.
+    #[save(id = 13)]
+    b1_low_pass: DcBlocker,
+    #[save(id = 14)]
+    b_coupling: DcBlocker,
+    #[save(id = 15)]
+    a1_low_pass: DcBlocker,
+    #[save(id = 16)]
+    a_coupling: DcBlocker,
+    #[save(id = 17)]
+    a2_low_pass: DcBlocker,
+    #[save(id = 18)]
+    a3_low_pass: DcBlocker,
+    #[save(id = 19)]
+    mixer_low_pass: DcBlocker,
+
     #[debug_events]
     #[save_skip]
     debug_trace: DebugTraceBuffer,
 }
 
+/// A one-pole low-pass as the input less a one-pole high-pass at the same
+/// corner, which is the low-pass exactly.
+fn low_pass(stage: &mut DcBlocker, x: f32) -> f32 {
+    x - stage.process(x)
+}
+
+fn corner(ohms: f64, farads: f64) -> f32 {
+    (1.0 / (std::f64::consts::TAU * ohms * farads)) as f32
+}
+
+/// Each POKEY's AUD pin goes straight to an LM324 inverting input, a zero-ohm
+/// virtual ground. C/D3's reference is +5 V off R49; B3's was not traced, and
+/// the reference cancels in the normalization below in any case.
+const POKEY_LOAD: PokeyLoad = PokeyLoad::VirtualGround {
+    series_ohms: 0.0,
+    reference_v: 5.0,
+};
+
+/// Mixer weight of the B3 chain against C/D3's: R51 3.3k over R45 10k.
+/// Every device on both chips is scaled to 1.0.
+const B3_WEIGHT: f32 = 3.3 / 10.0;
+const SCALE: f32 = 1.0 / (1.0 + B3_WEIGHT);
+
 impl SpacduelBoard {
     fn new() -> Self {
         let rate = phosphor_core::audio::host_sample_rate();
+        let mut pokey1 = Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate);
+        pokey1.set_output_load(POKEY_LOAD);
+        let mut pokey2 = Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate);
+        pokey2.set_output_load(POKEY_LOAD);
         Self {
             map: build_map(),
             avg: Avg::with_variant(
@@ -303,9 +346,18 @@ impl SpacduelBoard {
             dsw1: 0x00,
             dsw2: 0x07,
             cabinet: 0x00,
-            pokey1: Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate),
-            pokey2: Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate),
+            pokey1,
+            pokey2,
             earom: Er2055::new(),
+            // Sheet 6A corners: B1 R50/C32, C31 into R48; A1 R46/C29, C30
+            // into R44; A2 R42/C27; A3 R43/C28; mixer R51/C33.
+            b1_low_pass: DcBlocker::with_cutoff(corner(1_000.0, 0.22e-6), rate),
+            b_coupling: DcBlocker::with_cutoff(corner(39_000.0, 0.22e-6), rate),
+            a1_low_pass: DcBlocker::with_cutoff(corner(1_000.0, 0.1e-6), rate),
+            a_coupling: DcBlocker::with_cutoff(corner(100_000.0, 0.22e-6), rate),
+            a2_low_pass: DcBlocker::with_cutoff(corner(1_000_000.0, 1e-9), rate),
+            a3_low_pass: DcBlocker::with_cutoff(corner(1_000_000.0, 1e-9), rate),
+            mixer_low_pass: DcBlocker::with_cutoff(corner(3_300.0, 0.1e-6), rate),
             debug_trace: DebugTraceBuffer::new(),
         }
     }
@@ -675,21 +727,32 @@ impl SpacduelSystem {
         self.board.write(master, addr, data)
     }
 
-    /// Mix the two POKEYs' outputs.
+    /// Drain both POKEYs' currents and carry them to the speaker, as sheet 6A
+    /// does. Refdes and values are in
+    /// `docs/schematics/space-duel-audio-output.md`.
     ///
-    /// Schematic DC weights from `docs/schematics/space-duel-audio-output.md`:
-    /// C/D3 (POKEY 1) reaches the mixer at 1, B3 (POKEY 2) through its -10 and
-    /// -1 stages at 0.33, so 3.3 effective against POKEY 1's 1K. The filter
-    /// poles (723 Hz and 1.59 kHz first stages, the 159 Hz pair, the 482 Hz
-    /// mixer) are not modeled yet; the couplings are what remove the DC this
-    /// sum keeps.
+    /// Each chip works into a zero-ohm virtual ground, so its output is the
+    /// current its devices sink; one chip with every device on is 1.0. C/D3
+    /// (POKEY 1) passes its 723 Hz first stage and 18.5 Hz coupling to the
+    /// mixer at 1; B3 (POKEY 2) passes its 1.59 kHz first stage, 7.2 Hz
+    /// coupling, and the -10 and -1 stages at 159 Hz to the mixer at 0.33.
+    /// The unity inverters contribute no frequency effect and are omitted,
+    /// and each chain inverts four times, so the two add in phase. The mixer
+    /// low-passes the sum at 482 Hz. Every device on both chips is 1.0.
     fn mix_audio(&mut self) {
-        let s1 = self.board.pokey1.drain_audio();
-        let s2 = self.board.pokey2.drain_audio();
-        let len = s1.len().min(s2.len());
-        let full = 1.0 + 3.3;
+        let b = &mut self.board;
+        let i1 = b.pokey1.drain_audio();
+        let i2 = b.pokey2.drain_audio();
+        let full = POKEY_LOAD.full_scale() as f32;
+        let len = i1.len().min(i2.len());
         for i in 0..len {
-            let mixed = (s1[i] + 3.3 * s2[i]) / full;
+            let vb = low_pass(&mut b.b1_low_pass, i1[i] / full);
+            let vb = b.b_coupling.process(vb);
+            let va = low_pass(&mut b.a1_low_pass, i2[i] / full);
+            let va = b.a_coupling.process(va);
+            let va = 10.0 * low_pass(&mut b.a2_low_pass, va);
+            let va = low_pass(&mut b.a3_low_pass, va);
+            let mixed = low_pass(&mut b.mixer_low_pass, SCALE * (vb + B3_WEIGHT * va));
             self.audio_buffer
                 .push((mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
@@ -878,20 +941,21 @@ impl InputConfigurable for SpacduelSystem {
                 INPUT_SERVICE => set_bit_active_low(&mut b.in0, 4, pressed),
                 INPUT_DIAG => set_bit_active_low(&mut b.in0, 5, pressed),
                 // IN3/IN4, active high. Fire is bit 2 on both players;
-                // thrust and shield are bits 3 and 4 in panel order, which
-                // playtesting has to confirm against the reference.
+                // shield is bit 3 and thrust is bit 4, confirmed by playtest:
+                // Space (the Secondary default on thrust) shielded before
+                // the swap.
                 INPUT_P1_LEFT => set_bit_active_high(&mut b.in3, 0, pressed),
                 INPUT_P1_RIGHT => set_bit_active_high(&mut b.in3, 1, pressed),
                 INPUT_P1_FIRE => set_bit_active_high(&mut b.in3, 2, pressed),
-                INPUT_P1_THRUST => set_bit_active_high(&mut b.in3, 3, pressed),
-                INPUT_P1_SHIELD => set_bit_active_high(&mut b.in3, 4, pressed),
+                INPUT_P1_SHIELD => set_bit_active_high(&mut b.in3, 3, pressed),
+                INPUT_P1_THRUST => set_bit_active_high(&mut b.in3, 4, pressed),
                 INPUT_P1_START => set_bit_active_high(&mut b.in3, 5, pressed),
                 INPUT_SELECT => set_bit_active_high(&mut b.in3, 6, pressed),
                 INPUT_P2_LEFT => set_bit_active_high(&mut b.in4, 0, pressed),
                 INPUT_P2_RIGHT => set_bit_active_high(&mut b.in4, 1, pressed),
                 INPUT_P2_FIRE => set_bit_active_high(&mut b.in4, 2, pressed),
-                INPUT_P2_THRUST => set_bit_active_high(&mut b.in4, 3, pressed),
-                INPUT_P2_SHIELD => set_bit_active_high(&mut b.in4, 4, pressed),
+                INPUT_P2_SHIELD => set_bit_active_high(&mut b.in4, 3, pressed),
+                INPUT_P2_THRUST => set_bit_active_high(&mut b.in4, 4, pressed),
                 _ => {}
             },
             InputEvent::Relative { .. } => {}
@@ -978,6 +1042,13 @@ impl MachineCore for SpacduelSystem {
         b.pokey1.reset();
         b.pokey2.reset();
         b.earom.reset();
+        b.b1_low_pass.reset();
+        b.b_coupling.reset();
+        b.a1_low_pass.reset();
+        b.a_coupling.reset();
+        b.a2_low_pass.reset();
+        b.a3_low_pass.reset();
+        b.mixer_low_pass.reset();
         b.avg.set_flip(false, false);
         self.audio_buffer.clear();
         self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
@@ -1236,6 +1307,35 @@ mod tests {
         );
         assert_eq!(read(&mut sys, 0x0906), 0x80, "P1 select lands on bit 7");
         assert_eq!(read(&mut sys, 0x0907), 0x00, "cabinet upright, jumper set");
+    }
+
+    /// Thrust and shield land on the playtest-confirmed bits: pressing the
+    /// thrust control fires the game's bit 4, shield its bit 3, on both
+    /// players. Space (the Secondary default) thrusts.
+    #[test]
+    fn thrust_and_shield_land_on_the_playtest_confirmed_bits() {
+        use phosphor_core::core::machine::InputConfigurable;
+        let mut sys = SpacduelSystem::new(&SPACDUEL);
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_THRUST as u16),
+            pressed: true,
+        });
+        assert_eq!(sys.board.in3, 0x10, "P1 thrust is bit 4");
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_SHIELD as u16),
+            pressed: true,
+        });
+        assert_eq!(sys.board.in3, 0x18, "P1 shield is bit 3");
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P2_THRUST as u16),
+            pressed: true,
+        });
+        assert_eq!(sys.board.in4, 0x10, "P2 thrust is bit 4");
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P2_SHIELD as u16),
+            pressed: true,
+        });
+        assert_eq!(sys.board.in4, 0x18, "P2 shield is bit 3");
     }
 
     /// Both POKEYs' ALLPOT registers read their DIP bank, not the pot scan.
