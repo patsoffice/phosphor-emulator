@@ -518,7 +518,7 @@ pub struct MhavocBoard {
     #[save(id = 20)]
     gamma_irq_clock: u8,
 
-    /// Alpha cycles since power-on; bit 10 is the 2.4 kHz input at 0x1200.
+    /// Alpha cycles since power-on; bit 9 is the 2.4 kHz input at 0x1200.
     #[save(id = 21)]
     clock: u64,
     /// Coins at 0x1200 bits 6-7 while `player_1` is clear, active low.
@@ -690,8 +690,9 @@ impl MhavocBoard {
     fn in0(&self) -> u8 {
         let mut v = self.in0_switches & 0x30;
         v |= u8::from(self.avg.is_halted());
-        // 2.4 kHz: alpha's cycle count over 1024, high for the first half.
-        v |= u8::from(self.clock & 0x400 == 0) << 1;
+        // 2.4 kHz (sheet 4B: 625 kHz / 256): bit 9 of alpha's cycle
+        // count, high for the first half.
+        v |= u8::from(self.clock & 0x200 == 0) << 1;
         v |= u8::from(self.gamma_xmtd) << 2;
         v |= u8::from(self.gamma_rcvd) << 3;
         let upper = if self.player_1 {
@@ -1704,6 +1705,29 @@ mod tests {
         b.write(BusMaster::Cpu(0), 0x1600, 0x08);
         assert!(b.gamma_reset_pending, "release schedules gamma's reset");
         assert!(!GammaView(b).check_interrupts(BusMaster::Cpu(1)).nmi);
+    }
+
+    /// The 0x1200 bit 1 input is the 2.4 kHz clock (sheet 4B: 625 kHz /
+    /// 256): bit 9 of alpha's cycle count, high for the first half of
+    /// each 1024-cycle period.
+    #[test]
+    fn in0_bit_1_is_the_2_4_khz_clock() {
+        let mut sys = MhavocSystem::new(&MHAVOC);
+        let b = &mut sys.board;
+        for (clock, high) in [
+            (0, true),
+            (511, true),
+            (512, false),
+            (1023, false),
+            (1024, true),
+        ] {
+            b.clock = clock;
+            assert_eq!(
+                b.read(BusMaster::Cpu(0), 0x1200) & 0x02 != 0,
+                high,
+                "clock {clock}"
+            );
+        }
     }
 
     /// The RAM page register moves both windows, 0x0200 and 0x0A00, together;
