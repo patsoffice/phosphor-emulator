@@ -54,9 +54,9 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
-    Profilable, Renderable, SaveState, TimingConfig,
+    ActionRole, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
+    DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
+    MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState, TimingConfig,
 };
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster};
@@ -865,13 +865,18 @@ const SPACEDEL_CONTROLS: &[InputControl] = &[
         player: Some(1),
         default_bindings: crate::input_defaults::P2_START,
     },
+    // Player 2 plays along, so every control needs a default. Fire rides
+    // Primary (RShift, the one role the ladder differentiates per player);
+    // thrust and shield stay plain Buttons with explicit keys because
+    // Secondary and Tertiary share Space and LCtrl across both players.
+    // The pads mirror P1's A/B/X, slot-scoped to player 2.
     InputControl {
         id: InputId(INPUT_P2_LEFT as u16),
         stable_name: "p2_left",
         label: "P2 Rotate Left",
         kind: InputKind::Button,
         player: Some(2),
-        default_bindings: &[],
+        default_bindings: crate::input_defaults::P2_LEFT,
     },
     InputControl {
         id: InputId(INPUT_P2_RIGHT as u16),
@@ -879,13 +884,13 @@ const SPACEDEL_CONTROLS: &[InputControl] = &[
         label: "P2 Rotate Right",
         kind: InputKind::Button,
         player: Some(2),
-        default_bindings: &[],
+        default_bindings: crate::input_defaults::P2_RIGHT,
     },
     InputControl {
         id: InputId(INPUT_P2_FIRE as u16),
         stable_name: "p2_fire",
         label: "P2 Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(2),
         default_bindings: &[],
     },
@@ -895,7 +900,10 @@ const SPACEDEL_CONTROLS: &[InputControl] = &[
         label: "P2 Thrust",
         kind: InputKind::Button,
         player: Some(2),
-        default_bindings: &[],
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Enter),
+            DefaultBinding::Pad(PadControl::Button(PadButton::B)),
+        ],
     },
     InputControl {
         id: InputId(INPUT_P2_SHIELD as u16),
@@ -903,7 +911,10 @@ const SPACEDEL_CONTROLS: &[InputControl] = &[
         label: "P2 Shield",
         kind: InputKind::Button,
         player: Some(2),
-        default_bindings: &[],
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::RCtrl),
+            DefaultBinding::Pad(PadControl::Button(PadButton::X)),
+        ],
     },
     InputControl {
         id: InputId(INPUT_SERVICE as u16),
@@ -1320,6 +1331,31 @@ mod tests {
             InputKind::Action(ActionRole::Tertiary),
             "P1 shield must carry a default key (LCtrl)"
         );
+    }
+
+    /// Both players can play out of the box: every P2 control resolves to
+    /// at least one physical default, through the role ladder or inline.
+    /// Space Duel runs both players at once, so an unbound P2 control is a
+    /// control P2 cannot reach without rebinding.
+    #[test]
+    fn p2_controls_all_have_defaults() {
+        use phosphor_core::core::machine::InputConfigurable;
+        let sys = SpaceduelSystem::new();
+        for name in ["p2_left", "p2_right", "p2_fire", "p2_thrust", "p2_shield"] {
+            let control = sys
+                .input_controls()
+                .iter()
+                .find(|c| c.stable_name == name)
+                .unwrap_or_else(|| panic!("{name} control exists"));
+            let role: &[DefaultBinding] = match control.kind {
+                InputKind::Action(role) => role.default_bindings(control.player),
+                _ => &[],
+            };
+            assert!(
+                !role.is_empty() || !control.default_bindings.is_empty(),
+                "{name} has no default binding"
+            );
+        }
     }
 
     /// Thrust and shield land on the playtest-confirmed bits: pressing the
