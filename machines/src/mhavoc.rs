@@ -298,6 +298,13 @@ pub fn clock_tree() -> ClockTree {
 /// against 10 MHz / 4.
 const IRQ_CLOCK_ALPHA_CYCLES: u64 = 512;
 
+/// A completed vector pass this long or shorter that draws nothing is the
+/// game's beam-parking run, not a picture. The park list is 6 vectors in
+/// every phase probed across all four ROMs (tens of thousands of passes,
+/// zero variance); the smallest lit completion seen is 218 vectors, so 16
+/// sits well clear of both.
+const PARK_PASS_MAX_VECTORS: usize = 16;
+
 // ---------------------------------------------------------------------------
 // Address maps
 // ---------------------------------------------------------------------------
@@ -550,7 +557,7 @@ pub struct MhavocBoard {
     /// neither.
     #[save_skip(default)]
     display_list: Vec<VectorLine>,
-    /// The latest pass that drew something, waiting for the frame's end.
+    /// The latest accepted pass, waiting for the frame's end.
     #[save_skip(default)]
     latest_picture: Vec<VectorLine>,
 
@@ -755,11 +762,18 @@ impl MhavocBoard {
         .with_banked(&self.avg_rom);
         if self.avg.step(cycles, &mem, &self.color_ram) {
             let pass = self.avg.take_display_list();
-            // Only a pass that drew something is a picture; the game's
-            // parking pass between pictures draws nothing.
-            if pass.iter().any(|l| l.intensity > 0) {
-                self.latest_picture = pass;
-            }
+            self.file_pass(pass);
+        }
+    }
+
+    /// File a completed vector pass: anything lit is the new picture, and
+    /// so is a dark pass longer than the parking pass, which means the
+    /// picture itself went dark. Short dark passes are the game's
+    /// beam-parking runs and are dropped so they never blank a picture.
+    fn file_pass(&mut self, pass: Vec<VectorLine>) {
+        let lit = pass.iter().any(|l| l.intensity > 0);
+        if lit || pass.len() > PARK_PASS_MAX_VECTORS {
+            self.latest_picture = pass;
         }
     }
 
@@ -800,9 +814,10 @@ impl MhavocBoard {
         }
     }
 
-    /// End a presentation frame: show the latest picture the generator
-    /// finished, if it finished one during the frame, or keep the last one. A
-    /// frame is never doubled or blank, whatever the game's rate against it.
+    /// End a presentation frame: show the latest pass the generator
+    /// finished, if it finished one during the frame, or keep the last one.
+    /// The parking pass never displaces a picture, but a picture that goes
+    /// dark does reach the screen.
     fn present(&mut self) {
         if !self.latest_picture.is_empty() {
             std::mem::swap(&mut self.display_list, &mut self.latest_picture);
@@ -1728,6 +1743,46 @@ mod tests {
                 "clock {clock}"
             );
         }
+    }
+
+    /// A lit pass is always the new picture; a short dark pass is the
+    /// beam-parking run and is dropped; a dark pass longer than the parking
+    /// pass means the picture itself went dark and shows.
+    #[test]
+    fn only_parking_short_dark_passes_are_dropped() {
+        fn line(intensity: u8) -> VectorLine {
+            VectorLine {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 1.0,
+                y1: 1.0,
+                intensity,
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF,
+                beam_cycles: 8,
+                dwell_cycles: 0,
+            }
+        }
+        let dark = |n: usize| vec![line(0); n];
+        let mut sys = MhavocSystem::new(&MHAVOC);
+        let b = &mut sys.board;
+        b.file_pass(vec![line(8)]);
+        b.present();
+        assert_eq!(b.display_list.len(), 1);
+        b.file_pass(dark(PARK_PASS_MAX_VECTORS));
+        b.file_pass(dark(PARK_PASS_MAX_VECTORS));
+        b.present();
+        assert_eq!(
+            b.display_list[0].intensity, 8,
+            "parking passes change nothing, however many in a row"
+        );
+        b.file_pass(dark(PARK_PASS_MAX_VECTORS + 1));
+        b.present();
+        assert_eq!(b.display_list[0].intensity, 0, "a dark picture shows");
+        b.file_pass(vec![line(8)]);
+        b.present();
+        assert_eq!(b.display_list[0].intensity, 8, "light returns");
     }
 
     /// The RAM page register moves both windows, 0x0200 and 0x0A00, together;
