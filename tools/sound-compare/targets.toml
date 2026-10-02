@@ -1401,6 +1401,28 @@ assumption; and any comparison against hardware or the reference. A recorded
 game replays with audio peaking at about a quarter of full scale."""
 
 [[target]]
+id = "gravitar-output"
+machines = ["gravitar"]
+status = "partial"
+notes = """
+EXAMINED. SP-206 sheet 5A read and transcribed at
+docs/schematics/bwidow-gravitar-board.md (phosphor-emulator-quwu.1), the
+same topology as Black Widow's with four parts different. The model is the
+shared board's mix_audio in machines/src/atari_bwidow.rs.
+
+MODELED: each POKEY works into a 1k virtual ground on +5 V. C/D3 ($6000)
+passes C34 0.22 uF's 723 Hz pole across R51 and C33/R49's 185 Hz coupling to
+the summing amplifier at -1. B3 ($6800) passes C30/R45's 7.2 Hz coupling, the
+gain-of-10 stage with C27 0.001 uF's 159 Hz pole, and the unity stage with
+C28's 159 Hz pole, to the summing amplifier at R52/R46 = 3.9/10. Both chains
+add in phase. The mix is scaled so both chains' in-band peaks fit at once.
+
+NOT MODELED: LM324 gain-bandwidth and clipping; C31 and C32.
+
+NOT ESTABLISHED: the parts list; everything past J19 pins 11/12, so mono is
+an assumption; and any comparison against hardware or the reference."""
+
+[[target]]
 id = "mhavoc-output"
 machines = ["mhavoc", "mhavoc2", "mhavocrv", "mhavocp"]
 status = "partial"

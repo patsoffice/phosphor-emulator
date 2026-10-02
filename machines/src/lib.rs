@@ -749,6 +749,7 @@ pub mod galaxian;
 pub mod galaxian_video;
 pub mod gfx_registry;
 pub mod gottlieb;
+pub mod gravitar;
 pub mod gridlee;
 pub(crate) mod input_defaults;
 pub mod irobot;
