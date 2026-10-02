@@ -173,6 +173,33 @@ fn movie_retarget_renames_the_machine_and_keeps_the_records() {
     }
 }
 
+#[test]
+fn movie_retarget_rejects_an_unknown_target_machine() {
+    let path = write_movie("retarget-typo.phmi", &synthetic_movie());
+    let out_path = scratch().join("retarget-typo-out.phmi");
+
+    let out = disasm(&[
+        "movie",
+        "retarget",
+        path.to_str().unwrap(),
+        "--machine",
+        "mrdo_typo",
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    assert!(!out.ok, "retargeting to a typo must not succeed");
+    assert!(
+        out.stderr.contains("unknown machine 'mrdo_typo'"),
+        "expected an unknown-machine error, got: {}{}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        !out_path.exists(),
+        "a rejected retarget must not write its output"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // replay / movie check — ROM-gated
 // ---------------------------------------------------------------------------

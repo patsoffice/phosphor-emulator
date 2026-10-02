@@ -954,6 +954,16 @@ fn run_replay(
 /// caller proves it with `movie check` against the golden hash.
 fn run_movie_retarget(movie_path: &Path, machine: &str, out: &Path) -> Result<String, String> {
     let mut movie = load_movie(movie_path)?;
+    // The target must resolve: a typo here would otherwise fail only at
+    // replay. The source name is not checked, since a rename is exactly
+    // when it stops resolving.
+    registry::find(machine).ok_or_else(|| {
+        let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
+        format!(
+            "unknown machine '{machine}'; available: {}",
+            avail.join(", ")
+        )
+    })?;
     let from = movie.header.machine.clone();
     movie.header.machine = machine.to_string();
     std::fs::write(out, movie.encode())
