@@ -432,6 +432,8 @@ pub(crate) const fn option(
 /// crate::impl_dip_switches!(DkongSystem, DKONG_DIP_BANKS, board.dsw0);
 /// // Two banks.
 /// crate::impl_dip_switches!(DigDugSystem, DIGDUG_DIP_BANKS, board.dswa, board.dswb);
+/// // Three banks.
+/// crate::impl_dip_switches!(SpaceduelSystem, SPACEDUEL_DIP_BANKS, board.dsw0, board.dsw1, board.dsw2);
 /// // Banks sharing an input port with live signals: reads mask, writes merge
 /// // so the non-DIP bits of the port survive.
 /// crate::impl_dip_switches!(
@@ -483,6 +485,33 @@ macro_rules! impl_dip_switches {
                 match bank {
                     0 => self.$($f0).+ = value,
                     1 => self.$($f1).+ = value,
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    // Three banks.
+    ($type:ty, $banks:expr, $($f0:ident).+, $($f1:ident).+, $($f2:ident).+ $(,)?) => {
+        impl phosphor_core::core::machine::DipSwitches for $type {
+            fn dip_banks(&self) -> &'static [phosphor_core::core::machine::DipSwitchBank] {
+                $banks
+            }
+
+            fn dip_bank_value(&self, bank: usize) -> u8 {
+                match bank {
+                    0 => self.$($f0).+,
+                    1 => self.$($f1).+,
+                    2 => self.$($f2).+,
+                    _ => 0,
+                }
+            }
+
+            fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+                match bank {
+                    0 => self.$($f0).+ = value,
+                    1 => self.$($f1).+ = value,
+                    2 => self.$($f2).+ = value,
                     _ => {}
                 }
             }

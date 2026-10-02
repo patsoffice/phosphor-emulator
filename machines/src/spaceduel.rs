@@ -54,8 +54,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DefaultBinding, DipSwitchBank, DipSwitches,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
+    ActionRole, AudioSource, DefaultBinding, DipSwitchBank, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, KeyId,
     MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState, TimingConfig,
 };
 use phosphor_core::core::watchpoint::DebugAccessSource;
@@ -1204,29 +1204,13 @@ const DSW2: DipSwitchBank = DipSwitchBank {
 /// The three banks both revisions share.
 const SPACEDUEL_DIP_BANKS: &[DipSwitchBank] = &[DSW0, DSW1, DSW2];
 
-impl DipSwitches for SpaceduelSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        SPACEDUEL_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.dsw0,
-            1 => self.board.dsw1,
-            2 => self.board.dsw2,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.dsw0 = value,
-            1 => self.board.dsw1 = value,
-            2 => self.board.dsw2 = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(
+    SpaceduelSystem,
+    SPACEDUEL_DIP_BANKS,
+    board.dsw0,
+    board.dsw1,
+    board.dsw2
+);
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -1527,3 +1511,8 @@ mod tests {
         );
     }
 }
+
+// Power-on bytes: DSW0 0x01 (3 ships, normal, English, 10K bonus), DSW1
+// 0x00 (1 coin 1 credit), DSW2 0x07 (jumpers open).
+#[cfg(test)]
+crate::dip_test_suite!(SpaceduelSystem, &[0x01, 0x00, 0x07]);
