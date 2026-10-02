@@ -2,6 +2,8 @@
 // phosphor-core's lib.rs for why.
 #![allow(rustdoc::private_intra_doc_links)]
 
+use phosphor_core::core::machine::{DipApplyTiming, DipChoice, DipOption};
+
 /// Active-high bit manipulation: set bit on press, clear on release.
 pub(crate) fn set_bit_active_high(reg: &mut u8, bit: u8, pressed: bool) {
     if pressed {
@@ -397,6 +399,28 @@ macro_rules! machine_save_state {
 }
 pub(crate) use machine_save_state;
 
+/// One row of a DIP table: the label the menu shows and the bits it selects.
+/// Shared by the machine files; the tables themselves stay per-game data.
+pub(crate) const fn choice(label: &'static str, value: u8) -> DipChoice {
+    DipChoice { label, value }
+}
+
+/// One immediate DIP option over `mask`, with no conditional relabeling. A
+/// table that needs other apply timing or conditionals writes the literal.
+pub(crate) const fn option(
+    name: &'static str,
+    mask: u8,
+    choices: &'static [DipChoice],
+) -> DipOption {
+    DipOption {
+        name,
+        mask,
+        apply: DipApplyTiming::Immediate,
+        choices,
+        conditional: &[],
+    }
+}
+
 /// Implements `DipSwitches` from the bank table plus the field each bank lives
 /// in. The `DipSwitchBank`/`DipOption`/`DipChoice` table itself is per-game
 /// hardware data and stays hand-written in the machine file — only the
@@ -523,6 +547,20 @@ macro_rules! impl_dip_switches {
     };
 }
 pub(crate) use impl_dip_switches;
+
+/// One file of a ROM region: name, expected size, load offset, and CRC32.
+/// Shared by the machine files' ROM tables, which invoke it by bare name; it
+/// deliberately has no `pub(crate) use`, unlike the path-invoked macros here.
+macro_rules! rom {
+    ($name:expr, $size:expr, $offset:expr, $crc:expr) => {
+        $crate::rom_loader::RomEntry {
+            name: $name,
+            size: $size,
+            offset: $offset,
+            crc32: &[$crc],
+        }
+    };
+}
 
 /// Registers a machine with the front-end registry: builds the ROM-set factory
 /// and its ROM-less counterpart, and submits the [`registry::MachineEntry`] in

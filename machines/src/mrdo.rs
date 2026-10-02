@@ -61,7 +61,7 @@ use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
 use crate::input_defaults as ind;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
-use crate::set_bit_active_low;
+use crate::{choice, set_bit_active_low};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs
@@ -1428,10 +1428,6 @@ const fn coinage(shift: u8) -> [DipChoice; 11] {
 
 const COIN_B_CHOICES: [DipChoice; 11] = coinage(0);
 const COIN_A_CHOICES: [DipChoice; 11] = coinage(4);
-
-const fn choice(label: &'static str, value: u8) -> DipChoice {
-    DipChoice { label, value }
-}
 
 const MRDO_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {

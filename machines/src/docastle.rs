@@ -71,7 +71,7 @@ use crate::gfx_registry::GfxRegion;
 use crate::input_defaults as ind;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::scanline::ScanlineDriven;
-use crate::set_bit_active_low;
+use crate::{choice, set_bit_active_low};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs
@@ -2024,10 +2024,6 @@ const DORUNRUN_DSW1_DEFAULT: u8 = 0xDF;
 const DOWILD_DSW1_DEFAULT: u8 = 0xDF;
 /// DSW2: 1 coin / 1 credit on both slots.
 const DSW2_DEFAULT: u8 = 0xFF;
-
-const fn choice(label: &'static str, value: u8) -> DipChoice {
-    DipChoice { label, value }
-}
 
 /// Coinage choices, shared by Coin B (low nibble, `shift = 0`) and Coin A
 /// (high nibble, `shift = 4`).

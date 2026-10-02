@@ -33,16 +33,16 @@
 
 use crate::atari_dvg::rasterize_vectors;
 use crate::atari_regulator_audio::{C9_MHAVOC, RegulatorAudioII};
-use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
-use crate::set_bit_active_low;
+use crate::rom_loader::{RomLoadError, RomRegion, RomSet};
+use crate::{choice, option, set_bit_active_low};
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
-    ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipSwitchBank, DipSwitches,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState, TimingConfig,
 };
 use phosphor_core::core::watchpoint::DebugAccessSource;
@@ -79,17 +79,6 @@ pub struct MhavocConfig {
     dip_banks: &'static [DipSwitchBank],
     /// Return to Vax fits the TMS5220 that production boards leave off.
     speech: bool,
-}
-
-macro_rules! rom {
-    ($name:expr, $size:expr, $offset:expr, $crc:expr) => {
-        RomEntry {
-            name: $name,
-            size: $size,
-            offset: $offset,
-            crc32: &[$crc],
-        }
-    };
 }
 
 /// The AVG state PROM at 6C, common to every set.
@@ -1451,20 +1440,6 @@ impl Profilable for MhavocSystem {}
 // ---------------------------------------------------------------------------
 // DIP switches
 // ---------------------------------------------------------------------------
-
-const fn choice(label: &'static str, value: u8) -> DipChoice {
-    DipChoice { label, value }
-}
-
-const fn option(name: &'static str, mask: u8, choices: &'static [DipChoice]) -> DipOption {
-    DipOption {
-        name,
-        mask,
-        apply: DipApplyTiming::Immediate,
-        choices,
-        conditional: &[],
-    }
-}
 
 /// DSW1 at 13/14S, read through chip 0's ALLPOT.
 const DSW1: DipSwitchBank = DipSwitchBank {

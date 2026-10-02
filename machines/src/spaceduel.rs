@@ -47,15 +47,15 @@
 //! and the cocktail cabinet (upright only, so the flip bits stay clear).
 
 use crate::atari_avg;
-use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
-use crate::set_bit_active_low;
+use crate::rom_loader::{RomLoadError, RomRegion, RomSet};
+use crate::{choice, option, set_bit_active_low};
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
-    DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
+    ActionRole, AudioSource, DefaultBinding, DipSwitchBank, DipSwitches,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
     MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState, TimingConfig,
 };
 use phosphor_core::core::watchpoint::DebugAccessSource;
@@ -71,17 +71,6 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 // ---------------------------------------------------------------------------
 // ROM sets
 // ---------------------------------------------------------------------------
-
-macro_rules! rom {
-    ($name:expr, $size:expr, $offset:expr, $crc:expr) => {
-        RomEntry {
-            name: $name,
-            size: $size,
-            offset: $offset,
-            crc32: &[$crc],
-        }
-    };
-}
 
 /// Vector ROM: 2K at AVG address $800-$FFF (CPU $2800-$2FFF), 4K at
 /// $1000-$1FFF (CPU $3000-$3FFF).
@@ -1094,20 +1083,6 @@ impl Profilable for SpaceduelSystem {}
 // ---------------------------------------------------------------------------
 // DIP switches
 // ---------------------------------------------------------------------------
-
-const fn choice(label: &'static str, value: u8) -> DipChoice {
-    DipChoice { label, value }
-}
-
-const fn option(name: &'static str, mask: u8, choices: &'static [DipChoice]) -> DipOption {
-    DipOption {
-        name,
-        mask,
-        apply: DipApplyTiming::Immediate,
-        choices,
-        conditional: &[],
-    }
-}
 
 /// DSW0 at D4: lives, difficulty, language, bonus life. Choice values follow
 /// the reference driver's `spacduel` layout; the power-on default is 0x01
