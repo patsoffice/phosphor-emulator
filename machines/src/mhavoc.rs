@@ -42,8 +42,8 @@ use phosphor_core::core::display::display_settings;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipSwitchBank, DipSwitches,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState, TimingConfig,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MouseControl,
+    Nvram, Profilable, Renderable, SaveState, TimingConfig,
 };
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, ClockTree, DomainId};

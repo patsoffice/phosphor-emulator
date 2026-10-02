@@ -1260,7 +1260,7 @@ impl Avg {
             // computes, in 64 bits so a long vector cannot wrap it.
             let (x0, y0) = (self.xpos, self.ypos);
             let at = |p0: i32, d: i32, elapsed: i32| {
-                p0.wrapping_add((i64::from(d) * i64::from(elapsed) >> 4) as i32)
+                p0.wrapping_add(((i64::from(d) * i64::from(elapsed)) >> 4) as i32)
             };
             let total = cycles.max(0);
             let mut elapsed = 0;
@@ -1864,7 +1864,7 @@ mod tests {
         assert_eq!(lines[0].beam_cycles, 5);
         assert_eq!(
             (avg.xpos, avg.ypos),
-            (x0 + (15 * 5 >> 4), y0 + (15 * 5 >> 4))
+            (x0 + ((15 * 5) >> 4), y0 + ((15 * 5) >> 4))
         );
         assert_eq!(avg.spkl_shift, 0x0A, "no 8-cycle edge, no clock");
         assert_eq!(
@@ -1880,7 +1880,7 @@ mod tests {
         );
         assert_eq!(
             (avg.xpos, avg.ypos),
-            (x0 + (15 * 20 >> 4), y0 + (15 * 20 >> 4))
+            (x0 + ((15 * 20) >> 4), y0 + ((15 * 20) >> 4))
         );
         assert_eq!(avg.spkl_shift, 0x2B, "two full steps clock twice");
         // The second step ends at 15 * 16 >> 4 = 15, not at twice the

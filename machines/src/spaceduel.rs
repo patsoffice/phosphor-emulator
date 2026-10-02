@@ -55,8 +55,8 @@ use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuf
 use phosphor_core::core::display::display_settings;
 use phosphor_core::core::machine::{
     ActionRole, AudioSource, DefaultBinding, DipSwitchBank, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId,
-    MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState, TimingConfig,
+    InputEvent, InputId, InputKind, KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable,
+    Renderable, SaveState, TimingConfig,
 };
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster};
@@ -1335,10 +1335,7 @@ mod tests {
     /// `mix_audio` comment states so a weight change revisits them.
     #[test]
     fn mixer_in_band_peaks_match_the_documented_gains() {
-        assert!(
-            (SCALE - 0.75).abs() < 0.01,
-            "POKEY 1 peaks at {SCALE}"
-        );
+        assert!((SCALE - 0.75).abs() < 0.01, "POKEY 1 peaks at {SCALE}");
         let pokey2 = A2_GAIN * B3_WEIGHT * SCALE;
         assert!(
             (pokey2 - 2.5).abs() < 0.05,
