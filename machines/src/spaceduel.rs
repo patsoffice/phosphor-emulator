@@ -653,17 +653,17 @@ pub struct SpaceduelRomConfig {
 }
 
 /// Space Duel, version 2.
-pub static SPACEDEL_CONFIG: SpaceduelRomConfig = SpaceduelRomConfig {
+pub static SPACEDUEL_CONFIG: SpaceduelRomConfig = SpaceduelRomConfig {
     program: &PROGRAM_V2,
 };
 
 /// Space Duel, version 1.
-pub static SPACEDEL1_CONFIG: SpaceduelRomConfig = SpaceduelRomConfig {
+pub static SPACEDUEL1_CONFIG: SpaceduelRomConfig = SpaceduelRomConfig {
     program: &PROGRAM_V1,
 };
 
 /// Newest revision first: a set matches the first config whose files it has.
-const ALL_CONFIGS: &[&SpaceduelRomConfig] = &[&SPACEDEL_CONFIG, &SPACEDEL1_CONFIG];
+const ALL_CONFIGS: &[&SpaceduelRomConfig] = &[&SPACEDUEL_CONFIG, &SPACEDUEL1_CONFIG];
 
 /// One CPU cycle: the two POKEYs, the IRQ clock and the AVG, then the 6502.
 #[inline]
@@ -690,7 +690,7 @@ impl SpaceduelSystem {
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
-        self.load_roms(rom_set, &SPACEDEL_CONFIG)
+        self.load_roms(rom_set, &SPACEDUEL_CONFIG)
     }
 
     fn load_roms(
@@ -792,7 +792,7 @@ fn set_bit_active_high(reg: &mut u8, bit: u8, pressed: bool) {
     }
 }
 
-const SPACEDEL_CONTROLS: &[InputControl] = &[
+const SPACEDUEL_CONTROLS: &[InputControl] = &[
     InputControl {
         id: InputId(INPUT_COIN1 as u16),
         stable_name: "coin1",
@@ -936,7 +936,7 @@ const SPACEDEL_CONTROLS: &[InputControl] = &[
 
 impl InputConfigurable for SpaceduelSystem {
     fn input_controls(&self) -> &'static [InputControl] {
-        SPACEDEL_CONTROLS
+        SPACEDUEL_CONTROLS
     }
 
     fn handle_input(&mut self, event: InputEvent) {
@@ -1215,11 +1215,11 @@ const DSW2: DipSwitchBank = DipSwitchBank {
 };
 
 /// The three banks both revisions share.
-const SPACEDEL_DIP_BANKS: &[DipSwitchBank] = &[DSW0, DSW1, DSW2];
+const SPACEDUEL_DIP_BANKS: &[DipSwitchBank] = &[DSW0, DSW1, DSW2];
 
 impl DipSwitches for SpaceduelSystem {
     fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        SPACEDEL_DIP_BANKS
+        SPACEDUEL_DIP_BANKS
     }
 
     fn dip_bank_value(&self, bank: usize) -> u8 {
@@ -1251,7 +1251,7 @@ crate::register_machine!(
     SpaceduelSystem,
     "spaceduel",
     &["spacduel", "spacduel1"],
-    SPACEDEL_CONTROLS,
+    SPACEDUEL_CONTROLS,
     configs = ALL_CONFIGS
 );
 
