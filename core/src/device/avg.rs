@@ -208,8 +208,10 @@ pub struct Avg {
     #[save_skip]
     ycenter: i32,
 
-    /// DAC sign XOR values (0x200 for standard AVG).
-    #[save_skip]
+    /// DAC sign XOR values (0x200 for standard AVG). Major Havoc rewrites
+    /// the X one on every color STAT (DVY bit 10 mirrors X), so it is live
+    /// state; Y never changes anywhere.
+    #[save(id = 28)]
     xdac_xor: u16,
     #[save_skip]
     ydac_xor: u16,
@@ -600,9 +602,11 @@ impl Avg {
         self.prev_x = self.xcenter;
         self.prev_y = self.ycenter;
         self.display_list.clear();
-        // Major Havoc's reset also stops sparkle; the page and the clip
-        // window's arming survive it.
+        // Major Havoc's reset also stops sparkle and clears the X mirror
+        // (DISRST clears the STAT latch); the page and the clip window's
+        // arming survive it.
         self.enspkl = false;
+        self.xdac_xor = 0x200;
     }
 
     /// Clock the sequencer once and return the master-clock cycles it took.
@@ -1882,6 +1886,33 @@ mod tests {
         // The second step ends at 15 * 16 >> 4 = 15, not at twice the
         // truncated 15 * 8 >> 4 = 7.
         assert_eq!(lines[1].x1, (x0 + 15) as f32 / 65536.0);
+    }
+
+    /// A color STAT with DVY bit 10 mirrors X by rewriting the X DAC's
+    /// sign XOR; the bit persists across a save/load round trip, and reset
+    /// clears it as the DISRST-cleared STAT latch does.
+    #[test]
+    fn major_havoc_stat_x_mirror_survives_save_and_reset_clears_it() {
+        use crate::core::save_state::{StateReader, StateWriter};
+        use crate::prelude::Saveable;
+
+        let vmem = build_vmem(&[word(0x6400), word(0x2000)].concat());
+        let mut avg = Avg::with_variant(AvgVariant::MajorHavoc, 300, 260);
+        avg.go();
+        let mem = VectorMemory::split(&vmem, &[], 0x1000).with_banked(&[]);
+        avg.step(1_000_000, &mem, &[0u8; 32]);
+        assert!(avg.is_halted());
+        assert_eq!(avg.xdac_xor, 0x1FF, "DVY bit 10 selects the X mirror");
+
+        let mut w = StateWriter::new();
+        avg.save_state(&mut w);
+        let data = w.into_vec();
+        let mut loaded = Avg::with_variant(AvgVariant::MajorHavoc, 300, 260);
+        loaded.load_state(&mut StateReader::new(&data)).unwrap();
+        assert_eq!(loaded.xdac_xor, 0x1FF, "the mirror survives a save/load");
+
+        loaded.reset();
+        assert_eq!(loaded.xdac_xor, 0x200, "reset clears the X mirror");
     }
 
     /// The first instruction latches the clip window's top at the beam's Y,
