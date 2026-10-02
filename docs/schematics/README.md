@@ -243,3 +243,9 @@ section is there so that is obvious.
   into Xevious's discrete ladders and band-passes.
 - [`toobin-audio-output.md`](toobin-audio-output.md), Toobin's JSA-I sound board
   on its own crystal.
+- [`bwidow-gravitar-board.md`](bwidow-gravitar-board.md), the board Black Widow
+  and Gravitar share: memory map and decode PROM, an IRQ counter that restarts
+  on every acknowledge, a 128-count watchdog, a RAM bank select and active-high
+  picture inverts on the output latch, and both games' audio chains, which
+  differ in four part values. Also where the drawings disagree with each other,
+  settled by dumping the decode PROM.
