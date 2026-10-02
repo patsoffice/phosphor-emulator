@@ -41,6 +41,24 @@ frame = "sha256:7b9eb1466f956beacf845bfb70a3ab21decb16270110e584487a5041667e9583
 vectors = "sha256:82b4622802b5ab08da6259ad936f1d207f0f7d4337750b52a6740d1827ccae78"
 
 [[frame]]
+machine = "blackwidow"
+frames = 1800
+shows = "Attract mode: INSERT COINS in red and SHOOT GRENADE BUGS WITH CAUTION in white across the top, the blue web with the green spider beside the hub, white and green bugs drifting out of it, a cyan ring around a blue 500 at upper left, and CREDITS 0 in green over the blue copyright line at the bottom. The right way up because the latch's invert bits are read active low: the program writes both set in an upright cabinet, and read the other way the whole picture turns 180 degrees."
+size = [727, 666]
+frame = "sha256:3deef5794a139e4558fd277c5c49b3dffcf863914e450ffc7da0a016a24eac93"
+vectors = "sha256:3b30ee7bb4193af3aeef5f61d5226dcb17e32c93b2d27e58f74371df0ead1b66"
+
+[[frame]]
+machine = "blackwidow"
+id = "gameplay"
+frames = 5685
+shows = "A recorded game ending in the BLACK WIDOW HALL OF FAME: the top entry, A and 38375 at wave 7, being entered in red over the multicolored initials of the default table, with ENTER YOUR INITIALS, CHANGE WITH LEFT STICK and MOVE RIGHT STICK TO ENTER along the bottom. Pins both sticks and the starts under a real session, and the EAROM's score table."
+movie = "movies/blackwidow-1790949343.phmi"
+size = [727, 666]
+frame = "sha256:fb9a72f048b4c8d4551b2e3c8c7f420edcb5f0394b796295da3ad443868b3689"
+vectors = "sha256:2c2e27ad2b3cb8e87f7017cb242d2a0a14027092f4dd62bb941517eba75b24f0"
+
+[[frame]]
 machine = "burgertime"
 frames = 1800
 shows = "Attract demo: the first burger level, its ladders and platforms with a hot dog and a pickle chasing, and the completed burgers on the bottom tray."
