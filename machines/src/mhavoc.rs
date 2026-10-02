@@ -707,11 +707,13 @@ impl MhavocBoard {
         self.player_1 = data & 0x20 != 0;
         let held = data & 0x08 == 0;
         if held {
-            // Holding gamma in reset clears both sides' flags.
+            // Holding gamma in reset clears both sides' flags and a queued
+            // NMI with them (sheet 9B: RESETγ holds the flag flops' CLR).
             self.alpha_rcvd = false;
             self.alpha_xmtd = false;
             self.gamma_rcvd = false;
             self.gamma_xmtd = false;
+            self.gamma_nmi = false;
         } else if self.gamma_reset_held {
             self.gamma_reset_pending = true;
         }
@@ -909,11 +911,16 @@ impl Bus for MhavocBoard {
                     select_ram_page(&mut self.map, self.ram_page);
                 }
                 0x17C0 => {
-                    // Writing gamma's latch, with an NMI to say so.
-                    self.gamma_rcvd = false;
-                    self.alpha_xmtd = true;
+                    // Writing gamma's latch, with an NMI to say so. While
+                    // gamma is held in reset the data still latches (the
+                    // LS374 has no clear) but the flag flops cannot set, so
+                    // no flags and no NMI.
                     self.alpha_data = data;
-                    self.gamma_nmi = true;
+                    if !self.gamma_reset_held {
+                        self.gamma_rcvd = false;
+                        self.alpha_xmtd = true;
+                        self.gamma_nmi = true;
+                    }
                 }
                 _ => {}
             }
@@ -1674,6 +1681,29 @@ mod tests {
         assert_eq!(b.read(BusMaster::Cpu(0), 0x1000), 0xA5);
         assert_eq!(b.read(BusMaster::Cpu(0), 0x1200) & 0x0C, 0x08);
         assert!(b.alpha_rcvd);
+    }
+
+    /// Asserting gamma's reset hold clears a queued NMI with the latch
+    /// flags, and a latch write during the hold latches data but sets no
+    /// flags and queues no NMI (sheet 9B: RESETγ holds the flag flops'
+    /// CLR, while the data latch has no clear). Releasing the hold resets
+    /// gamma with no NMI pending.
+    #[test]
+    fn gamma_reset_hold_clears_and_blocks_the_nmi() {
+        let mut sys = MhavocSystem::new(&MHAVOC);
+        let b = &mut sys.board;
+        b.write(BusMaster::Cpu(0), 0x17C0, 0x5A);
+        assert!(b.gamma_nmi, "a latch write queues an NMI");
+        b.write(BusMaster::Cpu(0), 0x1600, 0x00);
+        assert!(!b.gamma_nmi, "asserting the hold clears the queued NMI");
+        assert!(!b.alpha_xmtd, "the hold clears the flags with it");
+        b.write(BusMaster::Cpu(0), 0x17C0, 0xA5);
+        assert_eq!(b.alpha_data, 0xA5, "data still latches during the hold");
+        assert!(!b.gamma_nmi, "no NMI queues while held");
+        assert!(!b.alpha_xmtd, "no flags set while held");
+        b.write(BusMaster::Cpu(0), 0x1600, 0x08);
+        assert!(b.gamma_reset_pending, "release schedules gamma's reset");
+        assert!(!GammaView(b).check_interrupts(BusMaster::Cpu(1)).nmi);
     }
 
     /// The RAM page register moves both windows, 0x0200 and 0x0A00, together;
