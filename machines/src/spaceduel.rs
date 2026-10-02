@@ -304,9 +304,16 @@ const POKEY_LOAD: PokeyLoad = PokeyLoad::VirtualGround {
 };
 
 /// Mixer weight of the B3 chain against C/D3's: R51 3.3k over R45 10k.
-/// Every device on both chips is scaled to 1.0.
+/// Both POKEY outputs are normalized to 1.0 upstream, but B3's x10 stage
+/// multiplies back up: in band, POKEY 2 reaches the mixer 3.3x hotter
+/// than POKEY 1, and SCALE's headroom does not cover it (see `mix_audio`).
 const B3_WEIGHT: f32 = 3.3 / 10.0;
+/// Headroom for the two chains at their mixer weights. It bounds the sum
+/// only while B3 stays near unity; B3 in band exceeds that tenfold, so
+/// the output clamp bounds the mix instead.
 const SCALE: f32 = 1.0 / (1.0 + B3_WEIGHT);
+/// Voltage gain of B3's A2 stage; A3 after it is unity.
+const A2_GAIN: f32 = 10.0;
 
 impl SpaceduelBoard {
     fn new() -> Self {
@@ -735,7 +742,12 @@ impl SpaceduelSystem {
     /// coupling, and the -10 and -1 stages at 159 Hz to the mixer at 0.33.
     /// The unity inverters contribute no frequency effect and are omitted,
     /// and each chain inverts four times, so the two add in phase. The mixer
-    /// low-passes the sum at 482 Hz. Every device on both chips is 1.0.
+    /// low-passes the sum at 482 Hz.
+    ///
+    /// In band, POKEY 1 peaks at SCALE (0.75) while POKEY 2 peaks at its
+    /// mixer weight times the A2 gain times SCALE (about 2.5 from 7 to
+    /// 159 Hz): strong bass on POKEY 2 drives the mix past 1.0, where the
+    /// output clamp stands in for the op-amps saturating.
     fn mix_audio(&mut self) {
         let b = &mut self.board;
         let i1 = b.pokey1.drain_audio();
@@ -747,7 +759,7 @@ impl SpaceduelSystem {
             let vb = b.b_coupling.process(vb);
             let va = low_pass(&mut b.a1_low_pass, i2[i] / full);
             let va = b.a_coupling.process(va);
-            let va = 10.0 * low_pass(&mut b.a2_low_pass, va);
+            let va = A2_GAIN * low_pass(&mut b.a2_low_pass, va);
             let va = low_pass(&mut b.a3_low_pass, va);
             let mixed = low_pass(&mut b.mixer_low_pass, SCALE * (vb + B3_WEIGHT * va));
             self.audio_buffer
@@ -1356,6 +1368,23 @@ mod tests {
                 "{name} has no default binding"
             );
         }
+    }
+
+    /// The mixer's in-band peaks, from the stage constants: POKEY 1 tops
+    /// out at SCALE (0.75), while POKEY 2's x10 stage drives the mix to
+    /// about 2.5, where the output clamp takes over. Pins the numbers the
+    /// `mix_audio` comment states so a weight change revisits them.
+    #[test]
+    fn mixer_in_band_peaks_match_the_documented_gains() {
+        assert!(
+            (SCALE - 0.75).abs() < 0.01,
+            "POKEY 1 peaks at {SCALE}"
+        );
+        let pokey2 = A2_GAIN * B3_WEIGHT * SCALE;
+        assert!(
+            (pokey2 - 2.5).abs() < 0.05,
+            "POKEY 2 peaks at {pokey2} in band"
+        );
     }
 
     /// Thrust and shield land on the playtest-confirmed bits: pressing the
