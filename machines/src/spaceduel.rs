@@ -1360,7 +1360,9 @@ mod tests {
 
     /// Thrust and shield land on the playtest-confirmed bits: pressing the
     /// thrust control fires the game's bit 4, shield its bit 3, on both
-    /// players. Space (the Secondary default) thrusts.
+    /// players, and the mux port shows them where the game reads them
+    /// (thrust on offsets 4/5, shield on offsets 0/1). Space (the Secondary
+    /// default) thrusts.
     #[test]
     fn thrust_and_shield_land_on_the_playtest_confirmed_bits() {
         use phosphor_core::core::machine::InputConfigurable;
@@ -1370,21 +1372,41 @@ mod tests {
             pressed: true,
         });
         assert_eq!(sys.board.in3, 0x10, "P1 thrust is bit 4");
+        assert_eq!(
+            read(&mut sys, 0x0904) & 0x80,
+            0x80,
+            "P1 thrust reaches the game"
+        );
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_P1_SHIELD as u16),
             pressed: true,
         });
         assert_eq!(sys.board.in3, 0x18, "P1 shield is bit 3");
+        assert_eq!(
+            read(&mut sys, 0x0900) & 0x80,
+            0x80,
+            "P1 shield reaches the game"
+        );
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_P2_THRUST as u16),
             pressed: true,
         });
         assert_eq!(sys.board.in4, 0x10, "P2 thrust is bit 4");
+        assert_eq!(
+            read(&mut sys, 0x0905) & 0x80,
+            0x80,
+            "P2 thrust reaches the game"
+        );
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_P2_SHIELD as u16),
             pressed: true,
         });
         assert_eq!(sys.board.in4, 0x18, "P2 shield is bit 3");
+        assert_eq!(
+            read(&mut sys, 0x0901) & 0x80,
+            0x80,
+            "P2 shield reaches the game"
+        );
     }
 
     /// Both POKEYs' ALLPOT registers read their DIP bank, not the pot scan.
