@@ -7,21 +7,25 @@
 //! AVG, two POKEYs reading switch banks through ALLPOT, the ER2055 behind its
 //! K2 control latch, and one audio topology with different part values.
 //!
-//! Gravitar and Black Widow run on one PCB, which is what this file models
-//! today. Space Duel's PCB (SP-181) decodes differently and still lives in
-//! `spaceduel.rs`; moving it here as a second decode is
-//! `phosphor-emulator-a6so`.
+//! There are two PCBs. Gravitar and Black Widow share one; Space Duel's
+//! decodes the same parts at different addresses ([`Decode`]). Each game's
+//! file supplies its controls, switch tables, ROMs, display field and audio
+//! part values. The memory map and notes below are the Gravitar/Black Widow
+//! PCB's; Space Duel's are in `spaceduel.rs`.
 //!
 //! # Schematics
 //!
 //! | Drawing | Source | Sheets |
 //! |---|---|---|
+//! | `Space Duel` PCB schematic, SP-181, 2nd printing | `arcarc.xmission.com/PDF_Arcade_Atari_Kee/Space_Duel/Space_Duel_SP-181_2nd_Printing.pdf` | 4A clock and watchdog, 4B decoder and IRQ, 5B I/O and audio, CAT-box memory map |
 //! | `Black Widow PCB Schematic Diagram`, SP-234, 2nd printing | `arcarc.xmission.com/PDF_Arcade_Atari_Kee/Black_Widow/Black_Widow_SP-234_2nd_Printing.pdf` | 3A memory map, 4A/4B signal names, 5B clock and watchdog, 6A decoder and IRQ, 6B memories, 7A I/O and audio |
 //! | `Gravitar PCB Schematic Diagram`, SP-206, 2nd printing | `arcarc.xmission.com/PDF_Arcade_Atari_Kee/Gravitar/Gravitar_SP-206_2nd_Printing.pdf` | 5A I/O and audio, 11A memory map |
 //!
 //! Everything this file models is transcribed, with the places the sheets
 //! disagree, in
-//! [`docs/schematics/bwidow-gravitar-board.md`](../../docs/schematics/bwidow-gravitar-board.md).
+//! [`docs/schematics/bwidow-gravitar-board.md`](../../docs/schematics/bwidow-gravitar-board.md)
+//! and, for Space Duel's PCB,
+//! [`docs/schematics/space-duel-audio-output.md`](../../docs/schematics/space-duel-audio-output.md).
 //!
 //! # The board
 //!
@@ -134,13 +138,31 @@ pub(crate) enum ConversionRegion {
     ProgramRom = 5,
 }
 
-fn build_map() -> AddressSpace16 {
+/// The two PCBs in the class decode the same parts at different addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Decode {
+    /// SP-181: LS42s and an LS139. 1K of RAM, the I/O page at $0800, the
+    /// POKEYs at $1000 and $1400, the input muxes at $0900-$0907, 6K of
+    /// vector ROM and 20K of program ROM from $4000.
+    SpaceDuel,
+    /// SP-206 and SP-234: R2's and R1's PROMs ([`decode`]). 2K of banked RAM,
+    /// the POKEYs at $6000 and $6800, the input buffers at $7800-$8FFF, 14K
+    /// of vector ROM and 24K of program ROM from $9000.
+    GravitarBlackWidow,
+}
+
+fn build_map(decode: Decode) -> AddressSpace16 {
+    // (RAM size, I/O base and size, vector ROM size, program ROM base and size)
+    let (ram, io, io_len, vrom, prom, prom_len) = match decode {
+        Decode::SpaceDuel => (0x0400, 0x0800, 0x1000, 0x1800, 0x4000, 0x5000),
+        Decode::GravitarBlackWidow => (0x0800, 0x6000, 0x3000, 0x3800, 0x9000, 0x6000),
+    };
     let mut map = AddressSpace16::new();
     map.region(
         ConversionRegion::Ram,
         "RAM",
         0x0000,
-        0x0800,
+        ram,
         AccessKind::ReadWrite,
     )
     .region(
@@ -154,20 +176,30 @@ fn build_map() -> AddressSpace16 {
         ConversionRegion::VectorRom,
         "Vector ROM",
         0x2800,
-        0x3800,
+        vrom,
         AccessKind::ReadOnly,
     )
-    .region(ConversionRegion::Io, "I/O", 0x6000, 0x3000, AccessKind::Io)
+    .region(ConversionRegion::Io, "I/O", io, io_len, AccessKind::Io)
     .region(
         ConversionRegion::ProgramRom,
         "Program ROM",
-        0x9000,
-        0x6000,
+        prom,
+        prom_len,
         AccessKind::ReadOnly,
     );
-    // R1 selects ROM 5 for both $E000 and $F000, so the reset vectors read
-    // the $E000 page.
-    map.mirror(0xF000, 0xE000, 0x1000);
+    match decode {
+        // The $8000 page repeats through $9000-$FFFF for the reset vectors.
+        Decode::SpaceDuel => {
+            for page in 0..7u16 {
+                map.mirror(0x9000 + page * 0x1000, 0x8000, 0x1000);
+            }
+        }
+        // R1 selects ROM 5 for both $E000 and $F000, so the reset vectors
+        // read the $E000 page.
+        Decode::GravitarBlackWidow => {
+            map.mirror(0xF000, 0xE000, 0x1000);
+        }
+    }
     map
 }
 
@@ -194,8 +226,8 @@ pub(crate) enum Select {
     None,
 }
 
-/// R2's decode of a CPU address, from A15-A11. The PROM's contents are in
-/// the `decode_matches_the_r2_prom` test.
+/// R2's decode of a CPU address on the Gravitar/Black Widow PCB, from
+/// A15-A11. The PROM's contents are in the `decode_matches_the_r2_prom` test.
 pub(crate) fn decode(addr: u16) -> Select {
     match addr >> 11 {
         0x00 => Select::Ram,
@@ -213,8 +245,8 @@ pub(crate) fn decode(addr: u16) -> Select {
 // ROM loading
 // ---------------------------------------------------------------------------
 
-/// One revision's ROMs: the vector ROMs at L7, M/N7, N/P7 and R7 (CPU
-/// $2800-$5FFF) and the program ROMs at D1 to M1 (CPU $9000-$EFFF).
+/// One revision's ROMs: the vector ROM region from CPU $2800 and the program
+/// ROM region, each sized for its PCB's map.
 pub struct ConversionRomConfig {
     pub(crate) vector: &'static RomRegion,
     pub(crate) program: &'static RomRegion,
@@ -299,17 +331,20 @@ pub struct AtariColorVectorConversionsBoard {
     pub(crate) latch: u8,
 
     /// M9's switch inputs as the buffer sees them, active low: COIN R, COIN L,
-    /// COIN AUX, SLAM and SELF-TEST on bits 0-4. Bit 5, `/SA`, is a test point
-    /// and reads high; bits 6-7 are generated.
+    /// COIN AUX, SLAM and SELF-TEST on bits 0-4. Bit 5 is `/SA`, a test point
+    /// that reads high, on Gravitar and Black Widow, and the DIAG STEP switch
+    /// on Space Duel. Bits 6-7 are generated.
     #[save(id = 7)]
     pub(crate) in0: u8,
-    /// L9's control inputs, bits 0-4, active low. Bits 5-7 are the option
-    /// jumpers.
+    /// L9's control pins D0-D4, active low; D5-D7 are the option jumpers. A
+    /// buffer at $8000 on Gravitar and Black Widow, an LS251 mux read through
+    /// its inverting W output at $0900-$0907 on Space Duel.
     #[save(id = 8)]
-    pub(crate) in1: u8,
-    /// N9's control inputs, bits 0-6, active low. Bit 7 is the cabinet.
+    pub(crate) l9: u8,
+    /// N9's control pins D0-D6, active low; D7 is the cabinet. A buffer at
+    /// $8800, or the second LS251 beside L9.
     #[save(id = 9)]
-    pub(crate) in2: u8,
+    pub(crate) n9: u8,
     /// Switch bank D4, read through C/D3's ALLPOT; on = 1. Board
     /// configuration, so not saved.
     #[save_skip]
@@ -320,9 +355,12 @@ pub struct AtariColorVectorConversionsBoard {
     /// P10/11 switches 2-4 as `OPTION 0-2`, 1 = open. No manual assigns them.
     #[save_skip]
     pub(crate) options: u8,
-    /// `CABINET 1`, bit 7 of IN2: 0x80 with the harness jumper absent.
+    /// The cabinet line on N9's D7: 0x80 with the harness jumper absent.
     #[save_skip]
     pub(crate) cabinet: u8,
+    /// Which PCB's decode the board answers with. Fixed by the game.
+    #[save_skip]
+    decode: Decode,
 
     /// POKEY C/D3 at $6000 and B3 at $6800, both at 1.512 MHz.
     #[save(id = 10)]
@@ -362,7 +400,7 @@ pub struct AtariColorVectorConversionsBoard {
 }
 
 impl AtariColorVectorConversionsBoard {
-    pub(crate) fn new(timing: &TimingConfig, audio: &AudioParts) -> Self {
+    pub(crate) fn new(decode: Decode, timing: &TimingConfig, audio: &AudioParts) -> Self {
         let rate = phosphor_core::audio::host_sample_rate();
         let mut pokey_cd3 = Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate);
         pokey_cd3.set_output_load(POKEY_LOAD);
@@ -370,7 +408,7 @@ impl AtariColorVectorConversionsBoard {
         pokey_b3.set_output_load(POKEY_LOAD);
         let b3_weight = (R52_OHMS / audio.r46_ohms) as f32;
         Self {
-            map: build_map(),
+            map: build_map(decode),
             avg: Avg::with_variant(
                 AvgVariant::SpaceDuel,
                 timing.display_width as i32,
@@ -382,12 +420,13 @@ impl AtariColorVectorConversionsBoard {
             watchdog_count: 0,
             latch: 0,
             in0: 0x3F,
-            in1: 0x1F,
-            in2: 0x7F,
+            l9: 0x1F,
+            n9: 0x7F,
             dsw_d4: 0x00,
             dsw_b4: 0x00,
             options: 0x07,
             cabinet: 0x80,
+            decode,
             pokey_cd3,
             pokey_b3,
             earom: Er2055::new(),
@@ -428,15 +467,20 @@ impl AtariColorVectorConversionsBoard {
         self.irq_count >= IRQ_COUNT
     }
 
-    /// The RAM address N/P1 sees: B6 exclusive-ORs A10 with BANK SEL.
+    /// The RAM address the chip sees. On the Gravitar/Black Widow PCB, B6
+    /// exclusive-ORs A10 with BANK SEL; Space Duel's 1K has no bank.
     fn ram_address(&self, addr: u16) -> u16 {
-        addr ^ (u16::from(self.latch & 0x04 != 0) << 10)
+        match self.decode {
+            Decode::GravitarBlackWidow => addr ^ (u16::from(self.latch & 0x04 != 0) << 10),
+            Decode::SpaceDuel => addr,
+        }
     }
 
-    /// `/INVERT X` and `/INVERT Y`, R9's D6 and D7: each inverts its axis
-    /// while its bit is clear. Sheet 3A draws the bars and sheet 4A says
-    /// active high; the program settles it by writing both bits set from its
-    /// second frame in an upright cabinet (see the schematic transcription).
+    /// INVERT X and INVERT Y, R9's D6 and D7: each axis is inverted while its
+    /// bit is clear. Every label says 1 = invert, but both Black Widow's and
+    /// Space Duel's programs write the bits set in an upright cabinet, so the
+    /// sense flips in a stage after the latch that was not traced (see the
+    /// schematic transcription).
     fn apply_inverts(&mut self) {
         self.avg
             .set_flip(self.latch & 0x40 == 0, self.latch & 0x80 == 0);
@@ -472,8 +516,8 @@ impl AtariColorVectorConversionsBoard {
 
     /// AVG GO: restart the generator, dropping whatever it drew since the
     /// last frame boundary.
-    fn trigger_avg(&mut self) {
-        self.trace_write(0x8840, Some("AVG"), Some("vector generator start"));
+    fn trigger_avg(&mut self, addr: u16) {
+        self.trace_write(addr, Some("AVG"), Some("vector generator start"));
         self.avg.go();
         self.avg.take_display_list();
     }
@@ -612,6 +656,165 @@ impl AtariColorVectorConversionsBoard {
 // The CPU's bus
 // ---------------------------------------------------------------------------
 
+/// The write strobes both PCBs have, at different addresses.
+#[derive(Clone, Copy)]
+enum Strobe {
+    Latch,
+    AvgGo,
+    AvgReset,
+    IntAck,
+    EaromControl,
+    EaromWrite,
+    WatchdogClear,
+}
+
+impl AtariColorVectorConversionsBoard {
+    /// L9's pins, with the option jumpers on D5-D7.
+    fn l9_pins(&self) -> u8 {
+        (self.options << 5) | (self.l9 & 0x1F)
+    }
+
+    /// N9's pins, with the cabinet line on D7.
+    fn n9_pins(&self) -> u8 {
+        self.cabinet | (self.n9 & 0x7F)
+    }
+
+    /// POKEY C/D3; its ALLPOT is wired to switch bank D4.
+    fn read_cd3(&mut self, addr: u16) -> u8 {
+        match addr & 0x0F {
+            0x08 => self.dsw_d4,
+            reg => self.pokey_cd3.read(reg),
+        }
+    }
+
+    /// POKEY B3; its ALLPOT is wired to switch bank B4.
+    fn read_b3(&mut self, addr: u16) -> u8 {
+        match addr & 0x0F {
+            0x08 => self.dsw_b4,
+            reg => self.pokey_b3.read(reg),
+        }
+    }
+
+    /// The memories, by region, where neither decode has a device.
+    fn read_memory(&mut self, addr: u16) -> u8 {
+        match self.map.page(addr).region_id {
+            ConversionRegion::RAM => self.map.read_backing(self.ram_address(addr)),
+            ConversionRegion::VECTOR_RAM
+            | ConversionRegion::VECTOR_ROM
+            | ConversionRegion::PROGRAM_ROM => self.map.read_backing(addr),
+            _ => 0,
+        }
+    }
+
+    fn write_memory(&mut self, addr: u16, data: u8) {
+        match self.map.page(addr).region_id {
+            ConversionRegion::RAM => {
+                let a = self.ram_address(addr);
+                self.map.write_backing(a, data);
+            }
+            ConversionRegion::VECTOR_RAM => self.map.write_backing(addr, data),
+            _ => {}
+        }
+    }
+
+    fn strobe(&mut self, strobe: Strobe, addr: u16, data: u8) {
+        match strobe {
+            Strobe::Latch => {
+                self.trace_write(addr, None, Some("output latch"));
+                self.latch = data;
+                self.apply_inverts();
+            }
+            Strobe::AvgGo => self.trigger_avg(addr),
+            Strobe::AvgReset => {
+                self.trace_write(addr, Some("AVG"), Some("vector generator reset"));
+                self.avg.reset();
+            }
+            Strobe::IntAck => self.irq_count = 0,
+            // K2 latches DB3-DB0: CK = DB0, C2 = DB1, C1 = /DB2, CS1 = DB3.
+            Strobe::EaromControl => self.earom.write_control(
+                data & 0x01 != 0,
+                data & 0x08 != 0,
+                data & 0x04 == 0,
+                data & 0x02 != 0,
+            ),
+            // The address latch takes AB5-AB0 and the data latch the byte.
+            Strobe::EaromWrite => self.earom.latch(addr & 0x3F, data),
+            Strobe::WatchdogClear => self.watchdog_count = 0,
+        }
+    }
+
+    /// The Gravitar/Black Widow PCB: R2 selects the block.
+    fn read_gravitar_black_widow(&mut self, addr: u16) -> u8 {
+        match decode(addr) {
+            Select::Io0 => self.read_cd3(addr),
+            Select::Io1 => self.read_b3(addr),
+            Select::EaromRead => self.earom.read_latched(),
+            Select::Sinp1 => self.in0(),
+            Select::Sinp2 => self.l9_pins(),
+            Select::Io => self.n9_pins(),
+            Select::Ram | Select::None => self.read_memory(addr),
+        }
+    }
+
+    fn write_gravitar_black_widow(&mut self, addr: u16, data: u8) {
+        match decode(addr) {
+            Select::Io0 => self.pokey_cd3.write(addr & 0x0F, data),
+            Select::Io1 => self.pokey_b3.write(addr & 0x0F, data),
+            // P3, an LS138 on A8-A6; A9 and A10 are not decoded.
+            Select::Io => {
+                let strobe = match (addr >> 6) & 7 {
+                    0 => Strobe::Latch,
+                    1 => Strobe::AvgGo,
+                    2 => Strobe::AvgReset,
+                    3 => Strobe::IntAck,
+                    4 => Strobe::EaromControl,
+                    5 => Strobe::EaromWrite,
+                    6 => Strobe::WatchdogClear,
+                    _ => return,
+                };
+                self.strobe(strobe, addr, data);
+            }
+            Select::Ram | Select::None => self.write_memory(addr, data),
+            Select::EaromRead | Select::Sinp1 | Select::Sinp2 => {}
+        }
+    }
+
+    /// Space Duel's PCB, at the addresses its CAT-box memory map lists.
+    fn read_space_duel(&mut self, addr: u16) -> u8 {
+        match addr {
+            0x0800 => self.in0(),
+            // N9 and L9 are LS251s on AB2-AB0; their inverting W outputs
+            // drive DB7 and DB6, so a grounded (pressed) pin reads 1.
+            0x0900..=0x0907 => {
+                let k = addr & 7;
+                let n9 = (!self.n9_pins() >> k) & 1;
+                let l9 = (!self.l9_pins() >> k) & 1;
+                (n9 << 7) | (l9 << 6)
+            }
+            0x0A00 => self.earom.read_latched(),
+            0x1000..=0x13FF => self.read_cd3(addr),
+            0x1400..=0x17FF => self.read_b3(addr),
+            _ => self.read_memory(addr),
+        }
+    }
+
+    fn write_space_duel(&mut self, addr: u16, data: u8) {
+        let strobe = match addr {
+            0x0C00 => Strobe::Latch,
+            0x0C80 => Strobe::AvgGo,
+            0x0D00 => Strobe::WatchdogClear,
+            0x0D80 => Strobe::AvgReset,
+            0x0E00 => Strobe::IntAck,
+            0x0E80 => Strobe::EaromControl,
+            0x0F00..=0x0F3F => Strobe::EaromWrite,
+            0x1000..=0x13FF => return self.pokey_cd3.write(addr & 0x0F, data),
+            0x1400..=0x17FF => return self.pokey_b3.write(addr & 0x0F, data),
+            _ => return self.write_memory(addr, data),
+        };
+        self.strobe(strobe, addr, data);
+    }
+}
+
 impl Bus for AtariColorVectorConversionsBoard {
     type Address = u16;
     type Data = u8;
@@ -621,26 +824,9 @@ impl Bus for AtariColorVectorConversionsBoard {
     }
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        let data = match decode(addr) {
-            Select::Ram => self.map.read_backing(self.ram_address(addr)),
-            Select::Io0 => match addr & 0x0F {
-                0x08 => self.dsw_d4,
-                reg => self.pokey_cd3.read(reg),
-            },
-            Select::Io1 => match addr & 0x0F {
-                0x08 => self.dsw_b4,
-                reg => self.pokey_b3.read(reg),
-            },
-            Select::EaromRead => self.earom.read_latched(),
-            Select::Sinp1 => self.in0(),
-            Select::Sinp2 => (self.options << 5) | (self.in1 & 0x1F),
-            Select::Io => self.cabinet | (self.in2 & 0x7F),
-            Select::None => match self.map.page(addr).region_id {
-                ConversionRegion::VECTOR_RAM
-                | ConversionRegion::VECTOR_ROM
-                | ConversionRegion::PROGRAM_ROM => self.map.read_backing(addr),
-                _ => 0,
-            },
+        let data = match self.decode {
+            Decode::GravitarBlackWidow => self.read_gravitar_black_widow(addr),
+            Decode::SpaceDuel => self.read_space_duel(addr),
         };
         self.map.watch_read(0, master, addr, data);
         data
@@ -648,44 +834,9 @@ impl Bus for AtariColorVectorConversionsBoard {
 
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         self.map.watch_write(0, master, addr, data);
-        match decode(addr) {
-            Select::Ram => {
-                let a = self.ram_address(addr);
-                self.map.write_backing(a, data);
-            }
-            Select::Io0 => self.pokey_cd3.write(addr & 0x0F, data),
-            Select::Io1 => self.pokey_b3.write(addr & 0x0F, data),
-            // P3, an LS138 on A8-A6; A9 and A10 are not decoded.
-            Select::Io => match (addr >> 6) & 7 {
-                0 => {
-                    self.trace_write(addr, None, Some("output latch"));
-                    self.latch = data;
-                    self.apply_inverts();
-                }
-                1 => self.trigger_avg(),
-                2 => {
-                    self.trace_write(addr, Some("AVG"), Some("vector generator reset"));
-                    self.avg.reset();
-                }
-                3 => self.irq_count = 0,
-                // K2 latches DB3-DB0: CK = DB0, C2 = DB1, C1 = /DB2, CS1 = DB3.
-                4 => self.earom.write_control(
-                    data & 0x01 != 0,
-                    data & 0x08 != 0,
-                    data & 0x04 == 0,
-                    data & 0x02 != 0,
-                ),
-                // P2 latches AB5-AB0 and J2 the data.
-                5 => self.earom.latch(addr & 0x3F, data),
-                6 => self.watchdog_count = 0,
-                _ => {}
-            },
-            Select::None => {
-                if self.map.page(addr).region_id == ConversionRegion::VECTOR_RAM {
-                    self.map.write_backing(addr, data);
-                }
-            }
-            Select::EaromRead | Select::Sinp1 | Select::Sinp2 => {}
+        match self.decode {
+            Decode::GravitarBlackWidow => self.write_gravitar_black_widow(addr, data),
+            Decode::SpaceDuel => self.write_space_duel(addr, data),
         }
     }
 
@@ -709,7 +860,7 @@ mod tests {
     };
 
     fn board() -> AtariColorVectorConversionsBoard {
-        AtariColorVectorConversionsBoard::new(&TIMING, &PARTS)
+        AtariColorVectorConversionsBoard::new(Decode::GravitarBlackWidow, &TIMING, &PARTS)
     }
 
     fn read(b: &mut AtariColorVectorConversionsBoard, addr: u16) -> u8 {
@@ -859,10 +1010,10 @@ mod tests {
         assert_eq!(in0 & 0x80, 0x80, "3 kHz clock high");
         assert_eq!(read(&mut b, 0x7FFF), in0);
 
-        b.in1 = 0x1E;
+        b.l9 = 0x1E;
         assert_eq!(read(&mut b, 0x8000), 0xFE, "options open over the controls");
         assert_eq!(read(&mut b, 0x87FF), 0xFE);
-        b.in2 = 0x5F;
+        b.n9 = 0x5F;
         assert_eq!(read(&mut b, 0x8800), 0xDF, "cabinet open over the controls");
         assert_eq!(read(&mut b, 0x8FFF), 0xDF);
     }
@@ -914,6 +1065,7 @@ mod tests {
         assert!((bw.b3_weight - 0.177).abs() < 0.001);
         assert!((bw.mix_scale * (1.0 + 10.0 * bw.b3_weight) - 1.0).abs() < 1e-6);
         let gv = AtariColorVectorConversionsBoard::new(
+            Decode::GravitarBlackWidow,
             &TIMING,
             &AudioParts {
                 c27_farads: 1e-9,

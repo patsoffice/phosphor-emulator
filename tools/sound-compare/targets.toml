@@ -1357,21 +1357,29 @@ id = "spaceduel-output"
 machines = ["spaceduel"]
 status = "partial"
 notes = """
-EXAMINED. SP-181 sheet 6A read and transcribed at
-docs/schematics/space-duel-audio-output.md (phosphor-emulator-djlf).
+EXAMINED. SP-181 sheet 5B read and transcribed at
+docs/schematics/space-duel-audio-output.md (phosphor-emulator-djlf), and
+corrected for phosphor-emulator-a6so. The model is the shared board's
+mix_audio in machines/src/atari_color_vector_conversions.rs.
 
-MODELED: each POKEY works into a 1k virtual ground. C/D3 (POKEY 1) passes
-its 723 Hz first stage and 18.5 Hz coupling to the mixer at 1; B3 (POKEY 2)
-passes its 1.59 kHz first stage, 7.2 Hz coupling, and the -10 and -1 stages
-at 159 Hz to the mixer at 0.33. The mixer low-passes the sum at 482 Hz. The
-two unity inverters are omitted (no frequency effect) and every device on
-both chips scales to 1.0. Ear-checked by ear against live play (djlf).
+MODELED: Gravitar's chain, value for value. Each POKEY works into a 1k
+virtual ground on +5 V. C/D3 ($1000) passes C32 0.22 uF's 723 Hz pole across
+R50 and C31/R48's 185 Hz coupling to the summing amplifier at -1. B3 ($1400)
+passes C30/R44's 7.2 Hz coupling, the gain-of-10 stage with C27 0.001 uF's
+159 Hz pole, and the unity stage with C28's 159 Hz pole, to the summing
+amplifier at R52/R45 = 3.9/10. Both chains add in phase. The mix is scaled
+so both chains' in-band peaks fit at once.
 
-NOT MODELED: LM324 finite gain-bandwidth and clipping; the C34/C133 shunt
-poles (no AC effect in the ideal virtual-ground model).
+The first model (djlf) had a 1.59 kHz first-stage pole on B3 and a 482 Hz
+pole after the mixer, both from supply decoupling capacitors (C29, C33) read
+as feedback; an 18.5 Hz coupling from R48 read as 39k; and B3 at 0.33 from
+the output inverter's R51 read as the mixer's feedback. Its ear check was
+against that model, not hardware.
 
-NOT ESTABLISHED: everything past J19 pins 11/12 (sheet 2B not read), so mono
-is an assumption, not a reading; C33's value past 0.1 at moderate confidence;
+NOT MODELED: LM324 finite gain-bandwidth and clipping; C34 and C133 (they
+sit on the virtual-ground nodes and do nothing in the band).
+
+NOT ESTABLISHED: everything past J19 pins 11/12, so mono is an assumption;
 the POKEYs' source impedances; and any comparison against hardware or the
 reference."""
 

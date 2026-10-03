@@ -23,7 +23,7 @@
 
 use crate::atari_avg;
 use crate::atari_color_vector_conversions::{
-    AtariColorVectorConversionsBoard, AudioParts, ConversionRomConfig, timing,
+    AtariColorVectorConversionsBoard, AudioParts, ConversionRomConfig, Decode, timing,
 };
 use crate::rom_loader::{RomLoadError, RomRegion, RomSet};
 use crate::{choice, option, set_bit_active_low};
@@ -192,7 +192,8 @@ pub struct GravitarSystem {
 
 impl GravitarSystem {
     pub fn new() -> Self {
-        let mut board = AtariColorVectorConversionsBoard::new(&TIMING, &AUDIO);
+        let mut board =
+            AtariColorVectorConversionsBoard::new(Decode::GravitarBlackWidow, &TIMING, &AUDIO);
         board.dsw_d4 = DSW_D4_DEFAULT;
         board.dsw_b4 = DSW_B4_DEFAULT;
         Self {
@@ -414,19 +415,19 @@ impl InputConfigurable for GravitarSystem {
                 INPUT_COIN_AUX => set_bit_active_low(&mut b.in0, 2, pressed),
                 INPUT_SERVICE => set_bit_active_low(&mut b.in0, 4, pressed),
                 // L9 at $8000: player 1.
-                INPUT_P1_SHIELD => set_bit_active_low(&mut b.in1, 0, pressed),
-                INPUT_P1_FIRE => set_bit_active_low(&mut b.in1, 1, pressed),
-                INPUT_P1_RIGHT => set_bit_active_low(&mut b.in1, 2, pressed),
-                INPUT_P1_LEFT => set_bit_active_low(&mut b.in1, 3, pressed),
-                INPUT_P1_THRUST => set_bit_active_low(&mut b.in1, 4, pressed),
+                INPUT_P1_SHIELD => set_bit_active_low(&mut b.l9, 0, pressed),
+                INPUT_P1_FIRE => set_bit_active_low(&mut b.l9, 1, pressed),
+                INPUT_P1_RIGHT => set_bit_active_low(&mut b.l9, 2, pressed),
+                INPUT_P1_LEFT => set_bit_active_low(&mut b.l9, 3, pressed),
+                INPUT_P1_THRUST => set_bit_active_low(&mut b.l9, 4, pressed),
                 // N9 at $8800: player 2 and the starts.
-                INPUT_P2_SHIELD => set_bit_active_low(&mut b.in2, 0, pressed),
-                INPUT_P2_FIRE => set_bit_active_low(&mut b.in2, 1, pressed),
-                INPUT_P2_RIGHT => set_bit_active_low(&mut b.in2, 2, pressed),
-                INPUT_P2_LEFT => set_bit_active_low(&mut b.in2, 3, pressed),
-                INPUT_P2_THRUST => set_bit_active_low(&mut b.in2, 4, pressed),
-                INPUT_P1_START => set_bit_active_low(&mut b.in2, 5, pressed),
-                INPUT_P2_START => set_bit_active_low(&mut b.in2, 6, pressed),
+                INPUT_P2_SHIELD => set_bit_active_low(&mut b.n9, 0, pressed),
+                INPUT_P2_FIRE => set_bit_active_low(&mut b.n9, 1, pressed),
+                INPUT_P2_RIGHT => set_bit_active_low(&mut b.n9, 2, pressed),
+                INPUT_P2_LEFT => set_bit_active_low(&mut b.n9, 3, pressed),
+                INPUT_P2_THRUST => set_bit_active_low(&mut b.n9, 4, pressed),
+                INPUT_P1_START => set_bit_active_low(&mut b.n9, 5, pressed),
+                INPUT_P2_START => set_bit_active_low(&mut b.n9, 6, pressed),
                 _ => {}
             },
             InputEvent::Relative { .. } => {}

@@ -393,12 +393,12 @@ vectors = "sha256:6daae5882e519ca5ced25e07f6aed9520c44c3588fede699f4295ada8056cd
 [[frame]]
 machine = "spaceduel"
 id = "gameplay"
-frames = 4181
-shows = "A recorded game in flight: COMBINED SCORE 5340 in yellow with reserve ships beside it, the green player ship firing a yellow shot at a red enemy amid cyan stars and saucers over black. The vector display list is pinned beside the raster frame, so this guards the generator's colors and the player controls under a real session: input lands on 404 of the movie's 4181 frames."
-movie = "movies/spaceduel-1790823704.phmi"
+frames = 4661
+shows = "A recorded game between waves: COMBINED SCORE 6560 in yellow with two green and two red reserve ships beside it, and a single blue cross at the left edge, over black. Pins scoring and both players' reserves under a real session (519 input records over 4661 frames), and the vector display list beside the raster frame. Recorded after the IRQ became SP-181's J4 counter, which asserts twelve 3 kHz edges after each acknowledge; the previous recording, made under a free-running 246 Hz clock, played a different game once replayed on the counter (restoring only the old clock reproduced its old hash exactly), so it was retired rather than repinned."
+movie = "movies/spaceduel-1790995310.phmi"
 size = [727, 538]
-frame = "sha256:fd686690c6d2eccce3c5ad5f572d03a44d9d63f90c3d7367cacfaab2fe4d78db"
-vectors = "sha256:55ad4018e918ea9d21fb2961b58decf6ab92e144e9092ae972544c66f0bbd4bb"
+frame = "sha256:d4afc57de8be616890fd88bc0fc0a2d9d1c299b0c49611375ad264fd53fc40ab"
+vectors = "sha256:35dc8dee67391d20a7b78b94e8a1eb9e5fe63aa982c248bcef5753fcaaca8251"
 
 [[frame]]
 machine = "starwars"
