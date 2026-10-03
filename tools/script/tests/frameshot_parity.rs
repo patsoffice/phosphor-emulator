@@ -77,7 +77,7 @@ fn scripted_render_matches_frameshot() {
     // render with the same central-orientation step disasm uses.
     let (rw, rh, reference) = {
         let mut harness =
-            Harness::build(MACHINE, path, None, None, &[], &[]).expect("harness boot");
+            Harness::build(MACHINE, path, None, None, None, &[], &[]).expect("harness boot");
         for _ in 0..FRAMES {
             harness.run_frame();
         }

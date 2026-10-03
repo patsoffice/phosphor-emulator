@@ -31,7 +31,9 @@ use phosphor_machines::gfx_registry;
 use phosphor_machines::registry;
 
 use phosphor_harness::movie::{Movie, MovieRecord, hex};
-use phosphor_harness::{Harness, hash_frame, hash_vectors, load_rom_set, render_oriented};
+use phosphor_harness::{
+    Harness, hash_frame, hash_vectors, load_revision_set, load_rom_set, render_oriented,
+};
 
 mod audiodiff;
 mod dumpsave;
@@ -765,7 +767,7 @@ fn run_frameshot(
     dip: Option<&str>,
     path: &str,
 ) -> Result<String, String> {
-    let mut harness = Harness::build(machine, path, nvram, coin_at, &[], &[])?;
+    let mut harness = Harness::build(machine, path, None, nvram, coin_at, &[], &[])?;
     // Before the first frame, so a switch that only takes effect at boot (a
     // self-test toggle, say) is already set when the machine looks at it.
     if let Some(spec) = dip {
@@ -1412,12 +1414,10 @@ fn run_machine(
 
     let path = path.ok_or("a ROM path is required to disassemble a region")?;
 
-    // The machine registry knows the MAME ZIP names to look for in a rompath dir.
-    let rom_names: Vec<&str> = registry::find(machine)
-        .map(|e| e.archive_names())
-        .unwrap_or_default();
-
-    let set = load_rom_set(path, &rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    // Regions name the default revision's members, so only its dump assembles.
+    let entry = registry::find(machine).ok_or_else(|| format!("unknown machine '{machine}'"))?;
+    let set =
+        load_revision_set(entry, path, 0).map_err(|e| format!("loading ROM set {path}: {e}"))?;
     let data = (r.load)(&set).map_err(|e| format!("assembling region '{region}': {e}"))?;
     disassemble(CpuArg::from(r.cpu), &data, r.org, range)
 }
@@ -1478,12 +1478,10 @@ fn run_gfxview(
 
     let path = path.ok_or("a ROM path is required to decode a region")?;
 
-    // The machine registry knows the MAME ZIP names to look for in a rompath dir.
-    let rom_names: Vec<&str> = registry::find(machine)
-        .map(|e| e.archive_names())
-        .unwrap_or_default();
-
-    let set = load_rom_set(path, &rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    // Regions name the default revision's members, so only its dump assembles.
+    let entry = registry::find(machine).ok_or_else(|| format!("unknown machine '{machine}'"))?;
+    let set =
+        load_revision_set(entry, path, 0).map_err(|e| format!("loading ROM set {path}: {e}"))?;
     let bytes = (r.load)(&set).map_err(|e| format!("assembling gfx region '{region}': {e}"))?;
 
     let cache = decode_gfx(&bytes, 0, r.count as usize, r.layout);

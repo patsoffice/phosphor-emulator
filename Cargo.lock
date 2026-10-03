@@ -926,6 +926,7 @@ name = "phosphor-harness"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "log",
  "phosphor-core",
  "phosphor-machines",
  "png",

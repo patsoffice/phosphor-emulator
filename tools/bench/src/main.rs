@@ -210,7 +210,7 @@ fn bench_machine(name: &str, roms: &Path, args: &Args) -> Result<MachineResult, 
     };
 
     for _ in 0..args.reps {
-        let mut harness = Harness::build(name, roms, None, None, &[], &[])?;
+        let mut harness = Harness::build(name, roms, None, None, None, &[], &[])?;
         if let Some(m) = &movie {
             // Bound per repetition, because a player carries its own position
             // and every rep has to replay the same frames from the same start.

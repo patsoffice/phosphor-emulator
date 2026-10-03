@@ -425,7 +425,15 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
         None => Vec::new(),
     };
 
-    let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs, &motion_specs)?;
+    let mut harness = Harness::build(
+        machine,
+        path,
+        None,
+        nvram,
+        coin_at,
+        &press_specs,
+        &motion_specs,
+    )?;
     apply_dip_specs(&mut harness, &dip_specs)?;
     if let Some(p) = entropy_file {
         let values = parse_entropy_file(p)?;
@@ -2522,7 +2530,8 @@ mod tests {
         ];
 
         for (machine, warmup) in cases {
-            let mut reference = Harness::build(machine, path, None, None, &[], &[]).expect("boot");
+            let mut reference =
+                Harness::build(machine, path, None, None, None, &[], &[]).expect("boot");
             for _ in 0..warmup {
                 reference.run_frame();
             }
@@ -2542,7 +2551,8 @@ mod tests {
                 warmup + ADVANCE
             );
 
-            let mut subject = Harness::build(machine, path, None, None, &[], &[]).expect("boot");
+            let mut subject =
+                Harness::build(machine, path, None, None, None, &[], &[]).expect("boot");
             for _ in 0..warmup {
                 subject.run_frame();
             }

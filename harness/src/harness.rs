@@ -16,99 +16,12 @@ use std::path::Path;
 
 use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
-use phosphor_machines::rom_loader::{RomLoadError, RomSet};
 
-use crate::load_rom_set;
-use crate::movie::{Movie, MovieError, MoviePlayer, rom_digest};
+use crate::movie::{Movie, MovieError, MoviePlayer};
+use crate::resolve::{RomSource, resolve};
 
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
-
-/// Build `entry` from `set`, trying each revision in declaration order and
-/// keeping the last error. Commit 2 folds this loop into the shared resolver;
-/// until then it keeps the build sites below asking the same question the
-/// same way.
-fn create_first_accepting(
-    entry: &registry::MachineEntry,
-    set: &RomSet,
-) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
-    let mut last_err = None;
-    for rev in 0..entry.revisions.len() {
-        match (entry.create)(set, rev) {
-            Ok(machine) => return Ok(machine),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.expect("an entry always declares a revision"))
-}
-
-/// Load the first dump in `entry.archive_names()` that this machine can actually be
-/// built from, and hand back both the set and the built machine.
-///
-/// **The machine is the judge, not the filesystem.** `load_rom_set` pointed at a
-/// directory returns the first name with an archive present, which is not the
-/// same question as which archive satisfies the machine's ROM entries. Donkey
-/// Kong Jr. is the case that found this: it declares `["dkongjr", "dkongjr2"]`,
-/// its entries name the members of the *dkongjr2* dump (`0`, `1`, `2`, `8`, `9`,
-/// `10`, `v_7c.bin`, …), and a collection holding both archives handed it
-/// `dkongjr.zip`, whose members are named `djr1-c-2e.2e` and friends. Nothing
-/// matched, construction failed, and every ROM-gated suite reported the machine
-/// as having no ROM set at all while a working dump sat beside it.
-///
-/// Six machines declare more than one name, so this is not one game's problem;
-/// it is decided by which archives a given collection happens to hold.
-///
-/// The first candidate's error is the one reported, because it is the dump the
-/// old behaviour would have chosen and so the one a reader is most likely asking
-/// about. Trying a candidate costs decompressing it, which is why this stops at
-/// the first success rather than scoring them all.
-fn load_set_the_machine_accepts(
-    entry: &registry::MachineEntry,
-    path: &str,
-) -> Result<(RomSet, Box<dyn FrontendMachine>), String> {
-    // Pointed straight at an archive there is nothing to choose between.
-    let single = path.to_ascii_lowercase().ends_with(".zip") || entry.archive_names().len() < 2;
-    if single {
-        let set = load_rom_set(path, &entry.archive_names())
-            .map_err(|e| format!("loading ROM set {path}: {e}"))?;
-        let machine = create_first_accepting(entry, &set)
-            .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
-        return Ok((set, machine));
-    }
-
-    let mut first_error = None;
-    for name in entry.archive_names() {
-        if !Path::new(path).join(format!("{name}.zip")).exists() {
-            continue;
-        }
-        let set = match load_rom_set(path, std::slice::from_ref(&name)) {
-            Ok(set) => set,
-            Err(e) => {
-                first_error.get_or_insert(format!("loading ROM set {name}.zip: {e}"));
-                continue;
-            }
-        };
-        match create_first_accepting(entry, &set) {
-            Ok(machine) => return Ok((set, machine)),
-            Err(e) => {
-                first_error.get_or_insert(format!("creating machine '{}': {e}", entry.name));
-            }
-        }
-    }
-
-    // No candidate archive worked. Fall back so a loose-file directory, which
-    // names no archive at all, still resolves the way it always has.
-    match first_error {
-        Some(e) => Err(e),
-        None => {
-            let set = load_rom_set(path, &entry.archive_names())
-                .map_err(|e| format!("loading ROM set {path}: {e}"))?;
-            let machine = create_first_accepting(entry, &set)
-                .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
-            Ok((set, machine))
-        }
-    }
-}
 
 /// A requested input pulse: hold `control` (by stable name) down for `hold`
 /// frames starting at frame `at`.
@@ -148,6 +61,10 @@ pub struct Harness {
     movie: Option<MoviePlayer>,
     /// Number of frames run so far (also the index of the next frame).
     frame: usize,
+    /// Where the machine's ROMs came from, when this harness booted them
+    /// itself. `None` for [`from_machine`](Self::from_machine), which wraps
+    /// a box someone else built.
+    source: Option<RomSource>,
 }
 
 /// A resolved input pulse: press `id` at frame `at`, release at `release`.
@@ -182,9 +99,14 @@ impl Harness {
     /// ROM load → create → reset → optional NVRAM load → resolve scripted
     /// inputs (`--coin-at` is sugar for a `coin` press; `presses` are the
     /// generic `--press` pulses) against the machine's control table.
+    ///
+    /// `rom_set` pins one ROM set or alias (see [`resolve`](crate::resolve));
+    /// `None` boots the default revision, falling back to the next present
+    /// one with a log line when the default cannot load.
     pub fn build(
         machine: &str,
         path: &str,
+        rom_set: Option<&str>,
         nvram: Option<&Path>,
         coin_at: Option<usize>,
         presses: &[PressSpec],
@@ -198,7 +120,8 @@ impl Harness {
             )
         })?;
 
-        let (_set, mut machine_box) = load_set_the_machine_accepts(entry, path)?;
+        let resolved = resolve(entry, path, rom_set)?;
+        let mut machine_box = resolved.machine;
 
         machine_box.reset();
 
@@ -252,6 +175,7 @@ impl Harness {
             motions: scheduled_motions,
             movie: None,
             frame: 0,
+            source: Some(resolved.source),
         })
     }
 
@@ -289,7 +213,8 @@ impl Harness {
 
         phosphor_core::audio::set_host_sample_rate(movie.header.host_sample_rate);
 
-        let (set, mut machine_box) = load_set_the_machine_accepts(entry, roms_path)?;
+        let resolved = resolve(entry, roms_path, None)?;
+        let mut machine_box = resolved.machine;
 
         // A movie replayed against a different dump boots fine and then diverges
         // silently, so this check is the difference between a clear error and a
@@ -302,7 +227,7 @@ impl Harness {
         // order is what makes that diagnosable. Pointed straight at an archive
         // it consults no names at all, and saying it "tried" any would be a
         // fabrication.
-        let actual = rom_digest(&set);
+        let actual = resolved.source.digest;
         if actual != movie.header.rom_digest {
             let chose = if roms_path.to_ascii_lowercase().ends_with(".zip") {
                 String::new()
@@ -313,13 +238,14 @@ impl Harness {
                 )
             };
             return Err(format!(
-                "{}: movie expects {}, this build computes {} for '{name}'{chose}. \
+                "{}: movie expects {}, this build computes {} for '{name}' revision '{}'{chose}. \
                  This digest covers the member files of the dump that was loaded, so a \
                  mismatch means the bytes differ: a different revision of the set, or \
                  a different archive of the same game.",
                 MovieError::RomMismatch,
                 crate::movie::hex(&movie.header.rom_digest),
                 crate::movie::hex(&actual),
+                resolved.source.set(),
             ));
         }
 
@@ -341,12 +267,20 @@ impl Harness {
             motions: Vec::new(),
             movie: Some(player),
             frame: 0,
+            source: Some(resolved.source),
         })
     }
 
     /// The bound movie, if this harness is replaying one.
     pub fn movie(&self) -> Option<&MoviePlayer> {
         self.movie.as_ref()
+    }
+
+    /// Where this harness's ROMs came from, when it booted them itself (see
+    /// [`RomSource`](crate::RomSource)). `None` for machines wrapped via
+    /// [`from_machine`](Self::from_machine).
+    pub fn rom_source(&self) -> Option<&RomSource> {
+        self.source.as_ref()
     }
 
     /// Schedule sustained relative motion on an already-resolved control.
@@ -467,6 +401,7 @@ impl Harness {
             motions: Vec::new(),
             movie: None,
             frame: 0,
+            source: None,
         }
     }
 

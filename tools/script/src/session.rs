@@ -25,9 +25,8 @@ use phosphor_core::core::machine::{
     DipSwitchBank, FrontendMachine, InputEvent, InputId, Orientation,
 };
 use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
-use phosphor_harness::movie::{Movie, rom_digest};
-use phosphor_harness::{Harness, load_rom_set};
-use phosphor_machines::registry;
+use phosphor_harness::Harness;
+use phosphor_harness::movie::Movie;
 
 /// A booted machine plus the read-first inspection state layered on top of it.
 pub struct DebugSession {
@@ -51,20 +50,14 @@ pub struct DebugSession {
     hang: Option<HangDetector>,
     /// Hang reports collected while running frames.
     hang_reports: Vec<HangReport>,
-    /// Where this session's ROMs came from, when it was opened by name. `None`
-    /// for a session wrapping an already-booted machine (the in-frontend
-    /// console), which has no path to re-derive a ROM digest from.
-    rom_path: Option<String>,
 }
 
 impl DebugSession {
     /// Boot `machine_name` from the ROM set at `rom_path` (via the shared
     /// [`Harness`]) and index its input controls.
     pub fn open(machine_name: &str, rom_path: &str) -> Result<Self, String> {
-        let harness = Harness::build(machine_name, rom_path, None, None, &[], &[])?;
-        let mut session = Self::wrap(harness);
-        session.rom_path = Some(rom_path.to_string());
-        Ok(session)
+        let harness = Harness::build(machine_name, rom_path, None, None, None, &[], &[])?;
+        Ok(Self::wrap(harness))
     }
 
     /// Wrap a booted [`Harness`], building the stable-name → `InputId` index.
@@ -84,7 +77,6 @@ impl DebugSession {
             audio: None,
             hang: None,
             hang_reports: Vec::new(),
-            rom_path: None,
         }
     }
 
@@ -179,30 +171,33 @@ impl DebugSession {
     /// Two checks before anything is reset. A movie for another machine would
     /// bind against a control table it was never recorded against; a movie for
     /// this machine but a different ROM dump would bind fine and then silently
-    /// diverge, which is the whole reason the digest exists. The digest check is
-    /// skipped only when the session wraps a machine someone else booted, since
-    /// there is then no ROM path to re-derive it from.
+    /// diverge, which is the whole reason the digest exists. Both checks read
+    /// the harness's own record of what it booted; a session wrapping a box
+    /// someone else built has no such record, so the machine check falls back
+    /// to the machine id there and the digest check is skipped.
     pub fn load_movie(&mut self, path: &str) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("reading movie {path}: {e}"))?;
         let movie = Movie::decode(&bytes).map_err(|e| format!("reading movie {path}: {e}"))?;
 
-        let id = self.harness.machine().machine_id().to_string();
+        // The session's own registry name, not `machine_id()`: those are two
+        // different namespaces (Missile Command registers as "missile" and
+        // reports "missile_command"), and the movie records the former.
+        let id = match self.harness.rom_source() {
+            Some(source) => source.entry.name.to_string(),
+            None => self.harness.machine().machine_id().to_string(),
+        };
         if movie.header.machine != id {
             return Err(format!(
                 "movie {path} was recorded for '{}', but this session is running '{id}'",
                 movie.header.machine
             ));
         }
-        if let Some(rp) = self.rom_path.clone()
-            && let Some(entry) = registry::find(&id)
+        if let Some(source) = self.harness.rom_source()
+            && source.digest != movie.header.rom_digest
         {
-            let set = load_rom_set(&rp, &entry.archive_names())
-                .map_err(|e| format!("loading ROM set {rp}: {e}"))?;
-            if rom_digest(&set) != movie.header.rom_digest {
-                return Err(format!(
-                    "movie {path} was recorded against a different ROM set than {rp}"
-                ));
-            }
+            return Err(format!(
+                "movie {path} was recorded against a different ROM set than this session booted"
+            ));
         }
 
         self.harness.reset();

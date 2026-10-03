@@ -109,6 +109,10 @@ struct Entry {
     /// An entry's PNG is `{machine}.png` without an id and `{machine}-{id}.png`
     /// with one, so adding ids to new entries renames nothing that exists.
     id: Option<String>,
+    /// ROM revision this pin runs: a MAME set name or alias. `None` is the
+    /// machine's default revision. The PNG slug gains the set whenever this
+    /// is `Some`, so a revision pin never collides with the default one.
+    rom_set: Option<String>,
     /// Frames from reset before the frame is sampled.
     frames: usize,
     /// What the pinned frame depicts, in prose. Mandatory: the pin is only
@@ -143,13 +147,34 @@ struct Entry {
 }
 
 impl Entry {
-    /// How this entry is named on disk and in failure messages: the machine on
-    /// its own, or the machine and its id.
+    /// How this entry is named on disk and in failure messages: the machine,
+    /// plus its id and pinned ROM set when it has them.
     fn slug(&self) -> String {
-        match &self.id {
+        let mut slug = match &self.id {
             Some(id) => format!("{}-{}", self.machine, id),
             None => self.machine.clone(),
+        };
+        if let Some(set) = &self.rom_set {
+            slug.push('-');
+            slug.push_str(set);
         }
+        slug
+    }
+}
+
+/// Revision index an entry pins: its `rom_set`, or the default. An unknown
+/// set is a panic, not a skip: the pin file is the test's input, and a typo
+/// that silently dropped the pin would be a vacuous pass.
+fn pinned_revision(entry: &Entry, reg: &registry::MachineEntry) -> usize {
+    match &entry.rom_set {
+        None => 0,
+        Some(set) => reg.find_revision(set).unwrap_or_else(|| {
+            panic!(
+                "{}: unknown `rom_set = {set:?}`; known sets: {}",
+                reg.name,
+                reg.archive_names().join(", ")
+            )
+        }),
     }
 }
 
@@ -160,7 +185,19 @@ fn load_entries() -> Vec<Entry> {
     let path = frames_toml();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    parse_entries(&text, &path.display().to_string())
+    let entries = parse_entries(&text, &path.display().to_string());
+    for e in &entries {
+        if e.rom_set.is_some() {
+            let reg = registry::find(&e.machine).unwrap_or_else(|| {
+                panic!(
+                    "{} is pinned in frames.toml but is not registered",
+                    e.machine
+                )
+            });
+            pinned_revision(e, reg);
+        }
+    }
+    entries
 }
 
 /// Parse `frames.toml` text. Split from [`load_entries`] so the writer/parser
@@ -280,6 +317,11 @@ fn parse_entries(text: &str, origin: &str) -> Vec<Entry> {
                     );
                     id
                 }),
+                rom_set: t.get("rom_set").map(|v| {
+                    v.as_str()
+                        .unwrap_or_else(|| panic!("{machine}: `rom_set` is not a string"))
+                        .to_string()
+                }),
                 machine,
                 frames,
                 press,
@@ -376,6 +418,9 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
         if let Some(id) = &e.id {
             let _ = writeln!(out, "id = {}", quote(id));
         }
+        if let Some(set) = &e.rom_set {
+            let _ = writeln!(out, "rom_set = {}", quote(set));
+        }
         let _ = writeln!(out, "frames = {}", e.frames);
         let _ = writeln!(out, "shows = {}", quote(&e.shows));
         if !e.press.is_empty() {
@@ -418,6 +463,10 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
 /// unreproducible, not that this collection is short a ROM.
 fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
     if let Some(mv) = &entry.movie {
+        assert!(
+            entry.rom_set.is_none(),
+            "{name}: `movie` with `rom_set` is not supported yet"
+        );
         // A movie carries its own ROM digest, DIP bytes, NVRAM and sample rate.
         // Accepting `press` or `nvram` alongside would leave two sources of
         // truth for the starting conditions and no way to tell which won.
@@ -475,9 +524,13 @@ fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
         );
         p
     });
+    let reg = registry::find(name)
+        .unwrap_or_else(|| panic!("{name} is pinned in frames.toml but is not registered"));
+    let rev = pinned_revision(entry, reg);
     Harness::build(
         name,
         dir.to_str().unwrap(),
+        Some(reg.revisions[rev].set()),
         nvram.as_deref(),
         None,
         &presses,
@@ -512,12 +565,17 @@ fn capture(dir: &Path, entry: &Entry) -> Option<Capture> {
     let name = entry.machine.as_str();
     let reg = registry::find(name)
         .unwrap_or_else(|| panic!("{name} is pinned in frames.toml but is not registered"));
-    if !reg
-        .archive_names()
+    let rev = pinned_revision(entry, reg);
+    if !reg.revisions[rev]
+        .names
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
     {
-        eprintln!("skipping {name}: no ROM set in {}", dir.display());
+        eprintln!(
+            "skipping {name}: no ROM set for revision '{}' in {}",
+            reg.revisions[rev].set(),
+            dir.display()
+        );
         return None;
     }
 
@@ -650,6 +708,7 @@ fn every_pinned_machine_still_draws_its_frame() {
                 machine,
                 // A discovered machine gets the primary pin, never an id.
                 id: None,
+                rom_set: None,
                 frames: DEFAULT_FRAMES,
                 shows: TODO_SHOWS.to_string(),
                 press: Vec::new(),
@@ -986,6 +1045,7 @@ fn a_movie_entry_round_trips_through_frames_toml() {
     let entries = vec![Entry {
         machine: "marble".into(),
         id: Some("gameplay".into()),
+        rom_set: None,
         frames: 6000,
         shows: "Level 1, ball on the second ramp".into(),
         press: Vec::new(),
@@ -1015,6 +1075,36 @@ fn a_movie_entry_round_trips_through_frames_toml() {
     assert_eq!(back[0].slug(), "marble-gameplay");
 }
 
+/// `rom_set` is human-authored, so it round-trips like `movie` and `id`,
+/// and it joins the PNG slug so a revision pin never collides with the
+/// default one.
+#[test]
+fn a_rom_set_entry_round_trips_and_slugs() {
+    let entries = vec![Entry {
+        machine: "marble".into(),
+        id: None,
+        rom_set: Some("proto".into()),
+        frames: 1800,
+        shows: "Prototype attract mode".into(),
+        press: Vec::new(),
+        movie: None,
+        nvram: None,
+        size: (336, 240),
+        frame: "sha256:abc".into(),
+        vectors: None,
+    }];
+    let text = render_frames_toml(&entries, &[]);
+    assert!(
+        text.contains("rom_set = \"proto\""),
+        "the writer dropped `rom_set`:\n{text}"
+    );
+
+    let back = parse_entries(&text, "<round trip>");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].rom_set.as_deref(), Some("proto"));
+    assert_eq!(back[0].slug(), "marble-proto");
+}
+
 /// One machine may carry several pins, distinguished by `id`, and they must
 /// land on different reference PNGs.
 ///
@@ -1027,6 +1117,7 @@ fn a_machine_can_carry_both_an_attract_pin_and_a_gameplay_pin() {
     let mk = |id: Option<&str>| Entry {
         machine: "marble".into(),
         id: id.map(str::to_string),
+        rom_set: None,
         frames: 1800,
         shows: "whatever this frame shows, described at length for the guard".into(),
         press: Vec::new(),
@@ -1102,11 +1193,13 @@ fn a_movie_entry_replays_and_is_reproducible() {
     let roms = dir.to_str().unwrap();
 
     const FRAMES: usize = 400;
-    let set =
-        phosphor_harness::load_rom_set(roms, &entry_meta.archive_names()).expect("load_rom_set");
-    let digest = phosphor_harness::movie::rom_digest(&set);
-
-    let mut h = Harness::build(name, roms, None, None, &[], &[]).expect("build");
+    let mut h = Harness::build(name, roms, None, None, None, &[], &[]).expect("build");
+    // The digest of the set this harness actually booted: recomputing it from
+    // the first archive present would pin the movie to a dump it never ran.
+    let digest = h
+        .rom_source()
+        .expect("a built harness records its ROM source")
+        .digest;
     let controls = h.machine().input_controls();
     let dip: Vec<u8> = (0..h.machine().dip_banks().len())
         .map(|b| h.machine().dip_bank_value(b))
@@ -1136,6 +1229,7 @@ fn a_movie_entry_replays_and_is_reproducible() {
     let with_movie = Entry {
         machine: name.to_string(),
         id: None,
+        rom_set: None,
         frames: FRAMES,
         shows: "mechanism test".into(),
         press: Vec::new(),
@@ -1149,6 +1243,7 @@ fn a_movie_entry_replays_and_is_reproducible() {
         movie: None,
         machine: name.to_string(),
         id: None,
+        rom_set: None,
         frames: FRAMES,
         shows: "mechanism test".into(),
         press: Vec::new(),

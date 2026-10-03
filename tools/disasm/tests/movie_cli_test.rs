@@ -217,7 +217,7 @@ fn record_against_roms(dir: &Path) -> Option<(String, PathBuf)> {
     let set = load_rom_set(roms, &entry.archive_names()).ok()?;
     let digest = rom_digest(&set);
 
-    let mut h = Harness::build(entry.name, roms, None, None, &[], &[]).ok()?;
+    let mut h = Harness::build(entry.name, roms, None, None, None, &[], &[]).ok()?;
     let controls = h.machine().input_controls();
     let dip: Vec<u8> = (0..h.machine().dip_banks().len())
         .map(|b| h.machine().dip_bank_value(b))

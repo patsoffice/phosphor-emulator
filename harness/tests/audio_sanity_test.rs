@@ -352,14 +352,14 @@ fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
             Err(e) => {
                 eprintln!("{machine}: movie unusable ({e}); falling back to boot");
                 (
-                    Harness::build(machine, roms, None, None, &[], &[]).ok()?,
+                    Harness::build(machine, roms, None, None, None, &[], &[]).ok()?,
                     Fixture::Boot,
                     FRAMES,
                 )
             }
         },
         None => (
-            Harness::build(machine, roms, None, None, &[], &[]).ok()?,
+            Harness::build(machine, roms, None, None, None, &[], &[]).ok()?,
             Fixture::Boot,
             FRAMES,
         ),

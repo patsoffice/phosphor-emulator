@@ -179,7 +179,40 @@ fn main() {
         sdl
     });
 
-    let (mut machine, rom_digest) = create_from_first_rom_set(entry, &rom_path);
+    // Surface the most common failure, a ROM path that doesn't exist on disk,
+    // with a clear, dedicated message before resolving. Without this, a missing
+    // directory only shows up as a generic error buried under cargo's own
+    // output, which is easy to miss.
+    if !std::path::Path::new(&rom_path).exists() {
+        eprintln!("ROM path not found: {rom_path}");
+        eprintln!(
+            "  Expected a ROM directory or .zip for '{}' here.",
+            entry.name
+        );
+        eprintln!(
+            "  Pass a path explicitly:  phosphor {} /path/to/roms",
+            entry.name
+        );
+        if let Some(dir) = config::config_dir() {
+            eprintln!("  or fix rom_path in {}", dir.join("config.toml").display());
+        }
+        std::process::exit(1);
+    }
+
+    let resolved = match phosphor_harness::resolve(entry, &rom_path, None) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Could not load {machine_name} from {rom_path}: {e}");
+            eprintln!(
+                "  Tried ROM set names: {}",
+                entry.archive_names().join(", ")
+            );
+            std::process::exit(1);
+        }
+    };
+    let mut machine = resolved.machine;
+    let rom_digest = resolved.source.digest;
+    let nvram_group = resolved.source.nvram_group();
 
     // GFX viewer: display the machine's decoded charset/sprite sheets.
     if cli.gfxview {
@@ -203,7 +236,7 @@ fn main() {
     }
 
     // Load battery-backed NVRAM from disk (if available)
-    let nvram_path = nvram_path_for(&config, per_game.nvram_path.as_deref(), &machine_name);
+    let nvram_path = nvram_path_for(&config, per_game.nvram_path.as_deref(), nvram_group);
     if let Ok(data) = std::fs::read(&nvram_path) {
         machine.load_nvram(&data);
     }
@@ -296,7 +329,14 @@ fn main() {
         cli.record_wav.as_deref(),
         cli.movie.as_deref(),
         cli.record.as_deref(),
-        &|| create_from_first_rom_set(entry, &rom_path).0,
+        &|| {
+            phosphor_harness::resolve(entry, &rom_path, None)
+                .map(|r| r.machine)
+                .unwrap_or_else(|e| {
+                    eprintln!("Could not rebuild {machine_name} from {rom_path}: {e}");
+                    std::process::exit(1);
+                })
+        },
         &mut state,
     );
 
@@ -373,18 +413,20 @@ fn save_path_for(
     dir.join(format!("{machine_name}.sav"))
 }
 
-/// Resolve the NVRAM directory: per-game override > global config > default.
+/// Resolve the NVRAM path: per-game override > global config > default for
+/// the directory, and the booted revision's NVRAM group (usually the machine)
+/// for the file.
 fn nvram_path_for(
     config: &config::Config,
     per_game: Option<&str>,
-    machine_name: &str,
+    group: &str,
 ) -> std::path::PathBuf {
     let dir = per_game
         .map(std::path::PathBuf::from)
         .or_else(|| config.nvram_path.as_ref().map(std::path::PathBuf::from))
         .unwrap_or_else(|| default_data_dir("nvram"));
     ensure_dir(&dir);
-    dir.join(format!("{machine_name}.nvram"))
+    dir.join(format!("{group}.nvram"))
 }
 
 fn screenshot_dir() -> std::path::PathBuf {
@@ -397,75 +439,6 @@ fn screenshot_dir() -> std::path::PathBuf {
 /// itself, so a session that never records leaves no directory behind.
 fn movie_dir() -> std::path::PathBuf {
     default_data_dir("movies")
-}
-
-/// Try each ROM set name in order, returning the first machine that
-/// initialises successfully. This ensures that ROM loading *and* machine
-/// creation (which validates CRC32s, sizes, and ROM_CONTINUE layouts) both
-/// succeed before we commit to a ROM set.
-fn create_from_first_rom_set(
-    entry: &phosphor_machines::registry::MachineEntry,
-    path: &str,
-) -> (
-    Box<dyn phosphor_core::core::machine::FrontendMachine>,
-    [u8; 32],
-) {
-    // Surface the most common failure — a ROM path that doesn't exist on disk —
-    // with a clear, dedicated message before we even try each ROM name. Without
-    // this, a missing directory only shows up as a generic "I/O error: ROM path
-    // not found" buried under cargo's own output, which is easy to miss.
-    if !std::path::Path::new(path).exists() {
-        eprintln!("ROM path not found: {path}");
-        eprintln!(
-            "  Expected a ROM directory or .zip for '{}' here.",
-            entry.name
-        );
-        eprintln!(
-            "  Pass a path explicitly:  phosphor {} /path/to/roms",
-            entry.name
-        );
-        if let Some(dir) = config::config_dir() {
-            eprintln!("  or fix rom_path in {}", dir.join("config.toml").display());
-        }
-        std::process::exit(1);
-    }
-
-    let mut last_err = None;
-    for name in entry.archive_names() {
-        let rom_set = match phosphor_harness::load_rom_set(path, &[name]) {
-            Ok(set) => set,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
-            }
-        };
-        for rev in 0..entry.revisions.len() {
-            match (entry.create)(&rom_set, rev) {
-                // Digest the set the machine was actually built from, so a captured
-                // movie can refuse to replay against a different dump.
-                Ok(machine) => {
-                    let digest = phosphor_harness::movie::rom_digest(&rom_set);
-                    return (machine, digest);
-                }
-                Err(e) => last_err = Some(e),
-            }
-        }
-    }
-    let err = last_err.unwrap_or_else(|| {
-        phosphor_machines::rom_loader::RomLoadError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no ROM names configured",
-        ))
-    });
-    eprintln!(
-        "Failed to load ROMs for '{}' from {path}: {err}",
-        entry.name
-    );
-    eprintln!(
-        "  Tried ROM set names: {}",
-        entry.archive_names().join(", ")
-    );
-    std::process::exit(1);
 }
 
 /// Pick the largest integer scale that keeps the window under 1200 pixels
