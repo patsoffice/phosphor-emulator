@@ -111,10 +111,10 @@ fn vector_v1() -> VectorMachineV1 {
 /// with no error at all.
 #[test]
 fn a_component_that_grew_fails_against_its_own_name() {
-    let data = save_machine(&vector_v1(), "vector");
+    let data = save_machine(&vector_v1(), "vector", "");
 
     let mut out = VectorMachineGrown::default();
-    let err = load_machine(&mut out, "vector", &data).unwrap_err();
+    let err = load_machine(&mut out, "vector", "", &data).unwrap_err();
 
     let msg = err.to_string();
     assert!(msg.contains("VectorMachineGrown.avg"), "{msg}");
@@ -135,10 +135,10 @@ fn a_component_that_shrank_fails_against_its_own_name() {
         },
         dac: Dac { level: 0x7F },
     };
-    let data = save_machine(&grown, "vector");
+    let data = save_machine(&grown, "vector", "");
 
     let mut out = VectorMachineV1::default();
-    let err = load_machine(&mut out, "vector", &data).unwrap_err();
+    let err = load_machine(&mut out, "vector", "", &data).unwrap_err();
 
     let msg = err.to_string();
     assert!(msg.contains("VectorMachineV1.avg"), "{msg}");
@@ -150,10 +150,10 @@ fn a_component_that_shrank_fails_against_its_own_name() {
 /// than which byte offset disagreed.
 #[test]
 fn a_component_version_bump_names_the_component() {
-    let data = save_machine(&vector_v1(), "vector");
+    let data = save_machine(&vector_v1(), "vector", "");
 
     let mut out = VectorMachineBumped::default();
-    let err = load_machine(&mut out, "vector", &data).unwrap_err();
+    let err = load_machine(&mut out, "vector", "", &data).unwrap_err();
 
     assert_eq!(
         err.to_string(),
@@ -175,9 +175,9 @@ fn a_component_inserted_in_the_middle_is_detected() {
         dac: Dac,
     }
 
-    let data = save_machine(&vector_v1(), "vector");
+    let data = save_machine(&vector_v1(), "vector", "");
     let mut out = WithPia::default();
-    let err = load_machine(&mut out, "vector", &data).unwrap_err();
+    let err = load_machine(&mut out, "vector", "", &data).unwrap_err();
 
     let msg = err.to_string();
     assert!(msg.contains("WithPia."), "{msg}");
@@ -204,9 +204,9 @@ fn swapping_two_identically_shaped_components_is_not_detected() {
         dac: Dac,
     }
 
-    let data = save_machine(&vector_v1(), "vector");
+    let data = save_machine(&vector_v1(), "vector", "");
     let mut out = Swapped::default();
-    load_machine(&mut out, "vector", &data).unwrap();
+    load_machine(&mut out, "vector", "", &data).unwrap();
 
     // The CPU's program counter came back as the AVG's, and vice versa.
     assert_eq!(out.avg.pc, 0x1234);
@@ -223,11 +223,13 @@ fn swapping_two_identically_shaped_components_is_not_detected() {
 /// those. A component change now bumps its own `#[save_version]` and leaves
 /// this alone, so only machines containing it lose their saves.
 ///
-/// If this test is in your way, the question to answer is whether the *file
-/// envelope* changed. If only a component did, the fix is in that component.
+/// Version 14 added the header revision tag and left the floor at 13, so it
+/// invalidated nothing: v13 files simply carry no revision. If this test is in
+/// your way, the question to answer is whether the *file envelope* changed. If
+/// only a component did, the fix is in that component.
 #[test]
 fn the_envelope_version_is_pinned() {
-    assert_eq!(SAVE_VERSION, 13);
+    assert_eq!(SAVE_VERSION, 14);
     assert_eq!(MIN_SUPPORTED_SAVE_VERSION, 13);
 }
 
@@ -240,10 +242,10 @@ fn the_body_of_a_machine_is_a_pinned_byte_sequence() {
         ram: [0xAA, 0xBB, 0xCC, 0xDD],
         dac: Dac { level: 0x7F },
     };
-    let file = save_machine(&machine, "raster");
+    let file = save_machine(&machine, "raster", "");
 
-    // header: magic | file_version | id_len | id, trailer: crc32.
-    let header_len = 4 + 4 + 4 + "raster".len();
+    // header: magic | file_version | id_len | id | rev_len | rev, trailer: crc32.
+    let header_len = 4 + 4 + 4 + "raster".len() + 4;
     let body = &file[header_len..file.len() - 4];
 
     #[rustfmt::skip]
@@ -268,9 +270,9 @@ fn the_body_of_a_machine_is_a_pinned_byte_sequence() {
 
 #[test]
 fn a_machine_round_trips_through_the_whole_envelope() {
-    let data = save_machine(&vector_v1(), "vector");
+    let data = save_machine(&vector_v1(), "vector", "");
     let mut out = VectorMachineV1::default();
-    load_machine(&mut out, "vector", &data).unwrap();
+    load_machine(&mut out, "vector", "", &data).unwrap();
     assert_eq!(
         (out.cpu.pc, out.avg.pc, out.dac.level),
         (0x1234, 0x5678, 0x7F)
@@ -302,11 +304,11 @@ fn an_array_of_components_is_framed_once() {
 
 #[test]
 fn a_truncated_file_is_rejected_rather_than_half_loaded() {
-    let mut data = save_machine(&vector_v1(), "vector");
+    let mut data = save_machine(&vector_v1(), "vector", "");
     data.truncate(data.len() - 6);
 
     let mut out = VectorMachineV1::default();
-    let err = load_machine(&mut out, "vector", &data).unwrap_err();
+    let err = load_machine(&mut out, "vector", "", &data).unwrap_err();
     assert!(
         matches!(err, SaveError::InvalidFormat(_) | SaveError::UnexpectedEnd),
         "{err}"

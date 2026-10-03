@@ -65,6 +65,8 @@ pub enum SaveError {
     InvalidFormat(String),
     /// Save file was created by a different machine.
     MachineMismatch { expected: String, found: String },
+    /// Save file was taken on a different ROM revision of the same machine.
+    RevisionMismatch { expected: String, found: String },
     /// A failure inside a named component chunk. Nests, so the message reads as
     /// a path from the machine down to the component that actually failed.
     Component {
@@ -91,6 +93,12 @@ impl std::fmt::Display for SaveError {
             SaveError::MachineMismatch { expected, found } => {
                 write!(f, "machine mismatch: expected {expected}, found {found}")
             }
+            SaveError::RevisionMismatch { expected, found } => {
+                write!(
+                    f,
+                    "revision mismatch: machine booted '{expected}', save is from '{found}'"
+                )
+            }
             SaveError::Component { path, source } => write!(f, "{path}: {source}"),
         }
     }
@@ -110,12 +118,15 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// machine on disk, including machines that do not contain the changed part.
 ///
 /// Bumped to 13 for chunk framing (`phosphor-emulator-tlv-save-state-hc61`
-/// Stage A). This is the last global invalidation: from here on a component
-/// change bumps that component's `#[save_version]`, the envelope stays at 13,
-/// and only machines that actually contain the component lose their saves. No
-/// component versions were bumped for this change, because no component body
-/// changed; the floor below rejects every older file outright.
-pub const SAVE_VERSION: u32 = 13;
+/// Stage A). From 13 on a component change bumps that component's
+/// `#[save_version]` and only machines that actually contain the component
+/// lose their saves.
+///
+/// Bumped to 14 for the header revision tag: a save records which ROM set it
+/// was taken on, and a machine booted from another revision refuses it. This
+/// bump invalidates nothing: version 13 files stay readable (see the floor
+/// below) and simply carry no revision, so they load under any.
+pub const SAVE_VERSION: u32 = 14;
 
 /// Oldest envelope this build can read.
 ///
@@ -754,17 +765,32 @@ impl ChunkTrace {
 
 // -- Header helpers ----------------------------------------------------------
 
-/// Write the save-file header (magic + version + machine id).
-pub fn write_header(w: &mut StateWriter, machine_id: &str) {
+/// Write the save-file header (magic + version + machine id + revision).
+///
+/// `revision` is the ROM set the save is taken on, or `""` when the machine
+/// names none (single-revision machines and bare builds).
+pub fn write_header(w: &mut StateWriter, machine_id: &str, revision: &str) {
     w.data.extend_from_slice(SAVE_MAGIC);
     w.write_u32_le(SAVE_VERSION);
     let id_bytes = machine_id.as_bytes();
     w.write_u32_le(id_bytes.len() as u32);
     w.data.extend_from_slice(id_bytes);
+    let rev_bytes = revision.as_bytes();
+    w.write_u32_le(rev_bytes.len() as u32);
+    w.data.extend_from_slice(rev_bytes);
 }
 
 /// Validate the header and return a reader positioned after it.
-pub fn read_header<'a>(data: &'a [u8], expected_id: &str) -> Result<StateReader<'a>, SaveError> {
+///
+/// A save taken on another revision of the same machine is refused, since the
+/// game code it resumes differs from the code in this machine's ROMs. Version
+/// 13 files carry no revision tag and load under any revision, as do saves
+/// whose tag is empty: an unknown revision cannot mismatch.
+pub fn read_header<'a>(
+    data: &'a [u8],
+    expected_id: &str,
+    expected_revision: &str,
+) -> Result<StateReader<'a>, SaveError> {
     let mut r = StateReader::new(data);
 
     let magic = r.take(4)?;
@@ -796,14 +822,34 @@ pub fn read_header<'a>(data: &'a [u8], expected_id: &str) -> Result<StateReader<
         });
     }
 
+    // The revision tag arrived with envelope 14; older files end here.
+    let found_revision = if version >= 14 {
+        let rev_len = r.read_u32_le()? as usize;
+        let rev_bytes = r.take(rev_len)?;
+        std::str::from_utf8(rev_bytes)
+            .map_err(|_| SaveError::InvalidFormat("non-UTF8 revision".into()))?
+    } else {
+        ""
+    };
+
+    if !found_revision.is_empty()
+        && !expected_revision.is_empty()
+        && found_revision != expected_revision
+    {
+        return Err(SaveError::RevisionMismatch {
+            expected: expected_revision.to_string(),
+            found: found_revision.to_string(),
+        });
+    }
+
     Ok(r)
 }
 
 /// Serialize a `Saveable` struct with the standard machine header and a
 /// trailing CRC-32 over everything before it, magic included.
-pub fn save_machine(saveable: &impl Saveable, machine_id: &str) -> Vec<u8> {
+pub fn save_machine(saveable: &impl Saveable, machine_id: &str, revision: &str) -> Vec<u8> {
     let mut w = StateWriter::new();
-    write_header(&mut w, machine_id);
+    write_header(&mut w, machine_id, revision);
     saveable.save_state(&mut w);
     let mut data = w.into_vec();
     let sum = crc32(&data);
@@ -839,10 +885,11 @@ fn verify_crc(data: &[u8]) -> Result<&[u8], SaveError> {
 pub fn load_machine(
     saveable: &mut impl Saveable,
     machine_id: &str,
+    revision: &str,
     data: &[u8],
 ) -> Result<(), SaveError> {
     let body = verify_crc(data)?;
-    let mut r = read_header(body, machine_id)?;
+    let mut r = read_header(body, machine_id, revision)?;
     saveable.load_state(&mut r)?;
     finish(&r)
 }
@@ -859,17 +906,22 @@ pub fn load_machine(
 pub fn load_machine_traced<'a>(
     saveable: &mut impl Saveable,
     machine_id: &str,
+    revision: &str,
     data: &'a [u8],
     trace: &'a std::cell::RefCell<ChunkTrace>,
 ) -> Result<(), SaveError> {
     let (body, _crc) = split_trailer(data)?;
     // Re-validate the header, then rebuild a traced reader over the same body.
-    read_header(body, machine_id)?;
+    read_header(body, machine_id, revision)?;
     let mut r = StateReader::with_trace(body, trace);
     r.skip(4)?; // magic
-    r.read_u32_le()?; // file version
+    let version = r.read_u32_le()?;
     let id_len = r.read_u32_le()?;
     r.skip(id_len)?;
+    if version >= 14 {
+        let rev_len = r.read_u32_le()?;
+        r.skip(rev_len)?;
+    }
     saveable.load_state(&mut r)?;
     finish(&r)
 }
@@ -959,28 +1011,61 @@ mod tests {
     #[test]
     fn header_round_trip() {
         let mut w = StateWriter::new();
-        write_header(&mut w, "joust");
+        write_header(&mut w, "joust", "joust1");
         w.write_u8(0xFF);
 
         let data = w.into_vec();
-        let mut r = read_header(&data, "joust").unwrap();
+        let mut r = read_header(&data, "joust", "joust1").unwrap();
         assert_eq!(r.read_u8().unwrap(), 0xFF);
     }
 
     #[test]
     fn header_machine_mismatch() {
         let mut w = StateWriter::new();
-        write_header(&mut w, "joust");
+        write_header(&mut w, "joust", "");
         let data = w.into_vec();
 
-        let err = read_header(&data, "pacman").unwrap_err();
+        let err = read_header(&data, "pacman", "").unwrap_err();
         assert!(matches!(err, SaveError::MachineMismatch { .. }));
+    }
+
+    #[test]
+    fn header_revision_mismatch() {
+        let mut w = StateWriter::new();
+        write_header(&mut w, "joust", "joust1");
+        let data = w.into_vec();
+
+        let err = read_header(&data, "joust", "joust2").unwrap_err();
+        assert!(
+            matches!(err, SaveError::RevisionMismatch { .. }),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("joust1") && err.to_string().contains("joust2"),
+            "the message should name both revisions: {err}"
+        );
+    }
+
+    #[test]
+    fn header_empty_revision_matches_anything() {
+        // Single-revision machines tag "" and expect ""; a save whose tag is
+        // empty cannot mismatch, whichever side the emptiness is on.
+        let mut w = StateWriter::new();
+        write_header(&mut w, "joust", "");
+        let data = w.into_vec();
+        assert!(read_header(&data, "joust", "joust1").is_ok());
+        assert!(read_header(&data, "joust", "").is_ok());
+
+        let mut w = StateWriter::new();
+        write_header(&mut w, "joust", "joust1");
+        let data = w.into_vec();
+        assert!(read_header(&data, "joust", "").is_ok());
     }
 
     #[test]
     fn header_bad_magic() {
         let data = b"BAD!\x02\x00\x00\x00\x05\x00\x00\x00joust";
-        let err = read_header(data, "joust").unwrap_err();
+        let err = read_header(data, "joust", "").unwrap_err();
         assert!(matches!(err, SaveError::InvalidFormat(_)));
     }
 
@@ -999,7 +1084,7 @@ mod tests {
     #[test]
     fn crc_catches_a_flipped_bit_anywhere() {
         let mut w = StateWriter::new();
-        write_header(&mut w, "joust");
+        write_header(&mut w, "joust", "");
         w.write_bytes(&[0x11; 64]);
         let mut data = w.into_vec();
         let sum = crc32(&data);
@@ -1030,7 +1115,7 @@ mod tests {
     #[test]
     fn a_pre_chunk_file_is_rejected_by_the_version_floor() {
         let data = header_with_version(MIN_SUPPORTED_SAVE_VERSION - 1, "joust");
-        let err = read_header(&data, "joust").unwrap_err();
+        let err = read_header(&data, "joust", "").unwrap_err();
         assert!(
             err.to_string().contains("predates chunk framing"),
             "unexpected message: {err}"
@@ -1040,11 +1125,21 @@ mod tests {
     #[test]
     fn a_newer_file_is_rejected_as_newer() {
         let data = header_with_version(SAVE_VERSION + 1, "joust");
-        let err = read_header(&data, "joust").unwrap_err();
+        let err = read_header(&data, "joust", "").unwrap_err();
         assert!(
             err.to_string().contains("newer than this build"),
             "unexpected message: {err}"
         );
+    }
+
+    #[test]
+    fn a_v13_file_loads_under_any_revision() {
+        // The revision tag arrived with envelope 14; a 13 header ends after
+        // the machine id, and `header_with_version` builds exactly that shape.
+        let mut data = header_with_version(MIN_SUPPORTED_SAVE_VERSION, "joust");
+        data.push(0xFF);
+        let mut r = read_header(&data, "joust", "whatever").unwrap();
+        assert_eq!(r.read_u8().unwrap(), 0xFF);
     }
 
     // -- Chunk framing ------------------------------------------------------
@@ -1286,18 +1381,18 @@ mod tests {
 
     #[test]
     fn save_machine_round_trips_through_the_crc_trailer() {
-        let data = save_machine(&Marker(0x1234_5678), "joust");
+        let data = save_machine(&Marker(0x1234_5678), "joust", "");
         let mut out = Marker(0);
-        load_machine(&mut out, "joust", &data).unwrap();
+        load_machine(&mut out, "joust", "", &data).unwrap();
         assert_eq!(out.0, 0x1234_5678);
     }
 
     #[test]
     fn load_machine_rejects_a_corrupt_file() {
-        let mut data = save_machine(&Marker(1), "joust");
+        let mut data = save_machine(&Marker(1), "joust", "");
         let last = data.len() - 8;
         data[last] ^= 0xFF;
-        let err = load_machine(&mut Marker(0), "joust", &data).unwrap_err();
+        let err = load_machine(&mut Marker(0), "joust", "", &data).unwrap_err();
         assert!(
             err.to_string().contains("checksum mismatch"),
             "unexpected message: {err}"
@@ -1320,8 +1415,8 @@ mod tests {
                 Ok(())
             }
         }
-        let data = save_machine(&Short, "joust");
-        let err = load_machine(&mut Short, "joust", &data).unwrap_err();
+        let data = save_machine(&Short, "joust", "");
+        let err = load_machine(&mut Short, "joust", "", &data).unwrap_err();
         assert!(
             err.to_string().contains("4 bytes left after machine state"),
             "unexpected message: {err}"
@@ -1351,9 +1446,9 @@ mod tests {
             }
         }
 
-        let data = save_machine(&Machine, "joust");
+        let data = save_machine(&Machine, "joust", "");
         let trace = std::cell::RefCell::new(ChunkTrace::new());
-        load_machine_traced(&mut Machine, "joust", &data, &trace).unwrap();
+        load_machine_traced(&mut Machine, "joust", "", &data, &trace).unwrap();
 
         let trace = trace.borrow();
         let seen: Vec<_> = trace
@@ -1371,7 +1466,8 @@ mod tests {
             ]
         );
         // Offsets are absolute, so a hex dump of the file lands on the header.
-        let header_len = SAVE_MAGIC.len() + 4 + 4 + "joust".len();
+        // Magic + version + id length + id + revision length + revision ("").
+        let header_len = SAVE_MAGIC.len() + 4 + 4 + "joust".len() + 4;
         assert_eq!(trace.events()[0].offset, header_len);
     }
 }

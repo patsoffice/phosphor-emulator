@@ -148,11 +148,16 @@ All multi-byte integers stay little-endian.
 ```text
 file      := header | chunk* | u32 crc32_ieee_le
 header    := magic:4 b"PHOS" | file_version:u32 | machine_id: u32 len + utf8 bytes
+             | revision: u32 len + utf8 bytes                      # v14 and later
 chunk     := tag:u16 | len:u32 | payload:len bytes
 ```
 
 * `file_version` replaces exact equality with `if file_version > CURRENT { … }`.
   Envelope changes bump it; component changes do not.
+* `revision` is the ROM set the save was taken on (`""` when the machine names
+  none). It arrived with envelope 14; v13 headers end after `machine_id` and
+  load under any revision. A v14 save whose tag names another revision than
+  the booted machine is refused.
 * **CRC covers `header || chunk*`, magic included.** (Rev 1 said "header+chunks"
   in one place and "not including magic" in another; resolved in favour of
   covering everything before the CRC field, which is the simpler rule.)

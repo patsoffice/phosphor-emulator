@@ -734,9 +734,9 @@ fn a_mixed_machine_round_trips_through_the_envelope() {
         dac: Positional { level: 3 },
         clock: 0x0102_0304_0506_0708,
     };
-    let data = save_machine(&machine, "test");
+    let data = save_machine(&machine, "test", "");
 
     let mut out = Machine::default();
-    phosphor_core::core::save_state::load_machine(&mut out, "test", &data).unwrap();
+    phosphor_core::core::save_state::load_machine(&mut out, "test", "", &data).unwrap();
     assert_eq!(out, machine);
 }

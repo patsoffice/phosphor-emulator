@@ -21,7 +21,8 @@ mod common;
 use std::path::Path;
 
 use phosphor_core::core::machine::FrontendMachine;
-use phosphor_harness::{load_rom_set, roms_dir};
+use phosphor_core::core::save_state::SaveError;
+use phosphor_harness::{Harness, load_rom_set, roms_dir};
 use phosphor_machines::registry;
 
 /// Frames of attract mode before the snapshot, so the machine is past its
@@ -211,6 +212,82 @@ fn a_snapshot_of_a_running_game_determines_everything_that_follows_it() {
         !checked.is_empty(),
         "the ROM directory {} exists but holds no registered machine's set — \
          this test would otherwise pass having checked nothing",
+        dir.display()
+    );
+}
+
+/// A snapshot records the revision it was taken on, and a machine booted from
+/// another revision refuses it rather than resuming foreign game code. The
+/// same snapshot still loads on its own revision.
+#[test]
+fn a_snapshot_from_one_revision_refuses_on_another() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let dir_str = dir.to_str().unwrap();
+
+    // Registry-driven: the first machine with two bootable revisions carries
+    // the check, so a partial collection still runs it when it can.
+    for entry in registry::all() {
+        let present: Vec<usize> = entry
+            .revisions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.names
+                    .iter()
+                    .any(|n| dir.join(format!("{n}.zip")).exists())
+            })
+            .map(|(rev, _)| rev)
+            .collect();
+        if present.len() < 2 {
+            continue;
+        }
+        let (a, b) = (present[0], present[1]);
+        let set_a = entry.revisions[a].set();
+        let set_b = entry.revisions[b].set();
+
+        // A present archive that does not boot is a collection problem, not a
+        // refusal to test: skip to the next machine, as `booted` does.
+        let Ok(mut ha) = Harness::build(entry.name, dir_str, Some(set_a), None, None, &[], &[])
+        else {
+            continue;
+        };
+        let Ok(mut hb) = Harness::build(entry.name, dir_str, Some(set_b), None, None, &[], &[])
+        else {
+            continue;
+        };
+
+        let snapshot = ha
+            .machine_mut()
+            .save_state()
+            .unwrap_or_else(|| panic!("{}: save_state() returned None", entry.name));
+        let err = hb
+            .machine_mut()
+            .load_state(&snapshot)
+            .expect_err("a foreign-revision snapshot should refuse to load");
+        assert!(
+            matches!(err, SaveError::RevisionMismatch { .. }),
+            "unexpected error: {err}"
+        );
+
+        // Same revision still loads: a second instance, so no state lingers
+        // from the save.
+        let mut ha2 = Harness::build(entry.name, dir_str, Some(set_a), None, None, &[], &[])
+            .expect("ROMs booted a moment ago");
+        ha2.machine_mut()
+            .load_state(&snapshot)
+            .expect("same-revision load");
+
+        eprintln!(
+            "checked cross-revision refusal on {} [{set_a} vs {set_b}]",
+            entry.name
+        );
+        return;
+    }
+    eprintln!(
+        "skipping: no machine has two bootable revisions in {}",
         dir.display()
     );
 }

@@ -378,6 +378,7 @@ macro_rules! machine_save_state {
             Some(phosphor_core::core::save_state::save_machine(
                 self,
                 self.machine_id(),
+                self.revision(),
             ))
         }
         fn load_state(
@@ -385,7 +386,8 @@ macro_rules! machine_save_state {
             data: &[u8],
         ) -> Result<(), phosphor_core::core::save_state::SaveError> {
             let id = self.machine_id().to_string();
-            phosphor_core::core::save_state::load_machine(self, &id, data)
+            let revision = self.revision().to_string();
+            phosphor_core::core::save_state::load_machine(self, &id, &revision, data)
         }
         fn load_state_traced(
             &mut self,
@@ -393,7 +395,8 @@ macro_rules! machine_save_state {
             trace: &std::cell::RefCell<phosphor_core::core::save_state::ChunkTrace>,
         ) -> Result<(), phosphor_core::core::save_state::SaveError> {
             let id = self.machine_id().to_string();
-            phosphor_core::core::save_state::load_machine_traced(self, &id, data, trace)
+            let revision = self.revision().to_string();
+            phosphor_core::core::save_state::load_machine_traced(self, &id, &revision, data, trace)
         }
     };
 }
