@@ -1,6 +1,7 @@
 //! Atari Black Widow (1983), registered as `blackwidow` (ROM set `bwidow`).
 //!
-//! The board is [`crate::atari_bwidow`], shared with Gravitar; this file is
+//! The board is [`crate::atari_color_vector_conversions`], shared with
+//! Gravitar (Black Widow was sold as a conversion of it); this file is
 //! what is Black Widow's own: its ROMs, its twin joysticks, its switch tables
 //! and the four audio part values that differ from Gravitar's.
 //!
@@ -18,7 +19,9 @@
 //! here (`phosphor-emulator-quwu.6`).
 
 use crate::atari_avg;
-use crate::atari_bwidow::{AudioParts, BwidowBoard, BwidowRomConfig, timing};
+use crate::atari_color_vector_conversions::{
+    AtariColorVectorConversionsBoard, AudioParts, ConversionRomConfig, timing,
+};
 use crate::rom_loader::{RomLoadError, RomRegion, RomSet};
 use crate::{choice, option, set_bit_active_low};
 use phosphor_core::audio::SampleRing;
@@ -58,12 +61,12 @@ static PROGRAM_ROM: RomRegion = RomRegion {
 };
 
 /// Black Widow, the production release.
-pub static BWIDOW_CONFIG: BwidowRomConfig = BwidowRomConfig {
+pub static BWIDOW_CONFIG: ConversionRomConfig = ConversionRomConfig {
     vector: &VECTOR_ROM,
     program: &PROGRAM_ROM,
 };
 
-const ALL_CONFIGS: &[&BwidowRomConfig] = &[&BWIDOW_CONFIG];
+const ALL_CONFIGS: &[&ConversionRomConfig] = &[&BWIDOW_CONFIG];
 
 // ---------------------------------------------------------------------------
 // The machine
@@ -87,14 +90,14 @@ pub struct BlackWidowSystem {
     cpu: M6502,
     #[debug_bus]
     #[save(id = 2)]
-    board: BwidowBoard,
+    board: AtariColorVectorConversionsBoard,
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
 }
 
 impl BlackWidowSystem {
     pub fn new() -> Self {
-        let mut board = BwidowBoard::new(&TIMING, &AUDIO);
+        let mut board = AtariColorVectorConversionsBoard::new(&TIMING, &AUDIO);
         board.dsw_d4 = DSW_D4_DEFAULT;
         board.dsw_b4 = DSW_B4_DEFAULT;
         Self {
@@ -111,7 +114,7 @@ impl BlackWidowSystem {
     fn load_roms(
         &mut self,
         rom_set: &RomSet,
-        config: &BwidowRomConfig,
+        config: &ConversionRomConfig,
     ) -> Result<(), RomLoadError> {
         self.board.load_roms(rom_set, config)
     }

@@ -723,7 +723,7 @@ pub mod astdelux_sound;
 pub mod asteroids;
 pub mod asteroids_sound;
 pub mod atari_avg;
-pub mod atari_bwidow;
+pub mod atari_color_vector_conversions;
 pub mod atari_dvg;
 pub mod atari_jsa;
 pub mod atari_regulator_audio;

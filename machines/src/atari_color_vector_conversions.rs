@@ -1,4 +1,16 @@
-//! The Atari board Black Widow (1983) and Gravitar (1982) share.
+//! Atari's color vector conversion class: Space Duel (1982), Gravitar (1982)
+//! and Black Widow (1983).
+//!
+//! The three are one hardware family, each built on its predecessor, and
+//! Black Widow was sold partly as a conversion kit for Gravitar boards
+//! (`Gravitar/Black Widow Retrofit`, TM-232). They share the 6502, the base
+//! AVG, two POKEYs reading switch banks through ALLPOT, the ER2055 behind its
+//! K2 control latch, and one audio topology with different part values.
+//!
+//! Gravitar and Black Widow run on one PCB, which is what this file models
+//! today. Space Duel's PCB (SP-181) decodes differently and still lives in
+//! `spaceduel.rs`; moving it here as a second decode is
+//! `phosphor-emulator-a6so`.
 //!
 //! # Schematics
 //!
@@ -114,7 +126,7 @@ const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
-pub(crate) enum BwidowRegion {
+pub(crate) enum ConversionRegion {
     Ram = 1,
     VectorRam = 2,
     VectorRom = 3,
@@ -125,29 +137,29 @@ pub(crate) enum BwidowRegion {
 fn build_map() -> AddressSpace16 {
     let mut map = AddressSpace16::new();
     map.region(
-        BwidowRegion::Ram,
+        ConversionRegion::Ram,
         "RAM",
         0x0000,
         0x0800,
         AccessKind::ReadWrite,
     )
     .region(
-        BwidowRegion::VectorRam,
+        ConversionRegion::VectorRam,
         "Vector RAM",
         0x2000,
         0x0800,
         AccessKind::ReadWrite,
     )
     .region(
-        BwidowRegion::VectorRom,
+        ConversionRegion::VectorRom,
         "Vector ROM",
         0x2800,
         0x3800,
         AccessKind::ReadOnly,
     )
-    .region(BwidowRegion::Io, "I/O", 0x6000, 0x3000, AccessKind::Io)
+    .region(ConversionRegion::Io, "I/O", 0x6000, 0x3000, AccessKind::Io)
     .region(
-        BwidowRegion::ProgramRom,
+        ConversionRegion::ProgramRom,
         "Program ROM",
         0x9000,
         0x6000,
@@ -203,7 +215,7 @@ pub(crate) fn decode(addr: u16) -> Select {
 
 /// One revision's ROMs: the vector ROMs at L7, M/N7, N/P7 and R7 (CPU
 /// $2800-$5FFF) and the program ROMs at D1 to M1 (CPU $9000-$EFFF).
-pub struct BwidowRomConfig {
+pub struct ConversionRomConfig {
     pub(crate) vector: &'static RomRegion,
     pub(crate) program: &'static RomRegion,
 }
@@ -261,7 +273,7 @@ fn corner(ohms: f64, farads: f64) -> f32 {
 #[derive(BusDebug, DebugTrace, Saveable)]
 #[save_version(1)]
 #[save_tlv]
-pub struct BwidowBoard {
+pub struct AtariColorVectorConversionsBoard {
     #[debug_map(cpu = 0)]
     #[save(id = 1)]
     pub(crate) map: AddressSpace16,
@@ -349,7 +361,7 @@ pub struct BwidowBoard {
     debug_trace: DebugTraceBuffer,
 }
 
-impl BwidowBoard {
+impl AtariColorVectorConversionsBoard {
     pub(crate) fn new(timing: &TimingConfig, audio: &AudioParts) -> Self {
         let rate = phosphor_core::audio::host_sample_rate();
         let mut pokey_cd3 = Pokey::with_clock(MASTER_CLOCK_HZ / 8, rate);
@@ -401,12 +413,12 @@ impl BwidowBoard {
     pub(crate) fn load_roms(
         &mut self,
         rom_set: &crate::rom_loader::RomSet,
-        config: &BwidowRomConfig,
+        config: &ConversionRomConfig,
     ) -> Result<(), crate::rom_loader::RomLoadError> {
         self.map
-            .load_region(BwidowRegion::ProgramRom, &config.program.load(rom_set)?);
+            .load_region(ConversionRegion::ProgramRom, &config.program.load(rom_set)?);
         self.map
-            .load_region(BwidowRegion::VectorRom, &config.vector.load(rom_set)?);
+            .load_region(ConversionRegion::VectorRom, &config.vector.load(rom_set)?);
         self.avg.load_state_prom(&AVG_PROM.load(rom_set)?);
         Ok(())
     }
@@ -469,8 +481,8 @@ impl BwidowBoard {
     /// Run the vector generator for one CPU cycle's worth of its own clock.
     fn step_avg(&mut self) {
         let mem = VectorMemory::split(
-            self.map.region_data(BwidowRegion::VectorRam),
-            self.map.region_data(BwidowRegion::VectorRom),
+            self.map.region_data(ConversionRegion::VectorRam),
+            self.map.region_data(ConversionRegion::VectorRom),
             0x0800,
         );
         if self.avg.step(AVG_CYCLES_PER_CPU_CYCLE, &mem, &[]) {
@@ -600,7 +612,7 @@ impl BwidowBoard {
 // The CPU's bus
 // ---------------------------------------------------------------------------
 
-impl Bus for BwidowBoard {
+impl Bus for AtariColorVectorConversionsBoard {
     type Address = u16;
     type Data = u8;
 
@@ -624,9 +636,9 @@ impl Bus for BwidowBoard {
             Select::Sinp2 => (self.options << 5) | (self.in1 & 0x1F),
             Select::Io => self.cabinet | (self.in2 & 0x7F),
             Select::None => match self.map.page(addr).region_id {
-                BwidowRegion::VECTOR_RAM | BwidowRegion::VECTOR_ROM | BwidowRegion::PROGRAM_ROM => {
-                    self.map.read_backing(addr)
-                }
+                ConversionRegion::VECTOR_RAM
+                | ConversionRegion::VECTOR_ROM
+                | ConversionRegion::PROGRAM_ROM => self.map.read_backing(addr),
                 _ => 0,
             },
         };
@@ -669,7 +681,7 @@ impl Bus for BwidowBoard {
                 _ => {}
             },
             Select::None => {
-                if self.map.page(addr).region_id == BwidowRegion::VECTOR_RAM {
+                if self.map.page(addr).region_id == ConversionRegion::VECTOR_RAM {
                     self.map.write_backing(addr, data);
                 }
             }
@@ -696,15 +708,15 @@ mod tests {
         c34_farads: None,
     };
 
-    fn board() -> BwidowBoard {
-        BwidowBoard::new(&TIMING, &PARTS)
+    fn board() -> AtariColorVectorConversionsBoard {
+        AtariColorVectorConversionsBoard::new(&TIMING, &PARTS)
     }
 
-    fn read(b: &mut BwidowBoard, addr: u16) -> u8 {
+    fn read(b: &mut AtariColorVectorConversionsBoard, addr: u16) -> u8 {
         b.read(BusMaster::Cpu(0), addr)
     }
 
-    fn write(b: &mut BwidowBoard, addr: u16, data: u8) {
+    fn write(b: &mut AtariColorVectorConversionsBoard, addr: u16, data: u8) {
         b.write(BusMaster::Cpu(0), addr, data)
     }
 
@@ -889,7 +901,7 @@ mod tests {
         write(&mut b, 0x0800, 0x12);
         assert_eq!(read(&mut b, 0x0800), 0x00);
         assert_eq!(read(&mut b, 0x0000), 0x00, "not aliased into RAM");
-        b.map.region_data_mut(BwidowRegion::ProgramRom)[0x5FFC] = 0x34;
+        b.map.region_data_mut(ConversionRegion::ProgramRom)[0x5FFC] = 0x34;
         assert_eq!(read(&mut b, 0xEFFC), 0x34);
         assert_eq!(read(&mut b, 0xFFFC), 0x34);
     }
@@ -901,7 +913,7 @@ mod tests {
         let bw = board();
         assert!((bw.b3_weight - 0.177).abs() < 0.001);
         assert!((bw.mix_scale * (1.0 + 10.0 * bw.b3_weight) - 1.0).abs() < 1e-6);
-        let gv = BwidowBoard::new(
+        let gv = AtariColorVectorConversionsBoard::new(
             &TIMING,
             &AudioParts {
                 c27_farads: 1e-9,

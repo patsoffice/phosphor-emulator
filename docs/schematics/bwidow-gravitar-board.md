@@ -2,8 +2,9 @@
 
 What Atari's Black Widow and Gravitar main PCBs do around their 6502, read for
 `phosphor-emulator-quwu.1`, part of adding both games (`phosphor-emulator-quwu`).
-The model is `machines/src/atari_bwidow.rs`, with the per-game halves in
-`machines/src/bwidow.rs` and `machines/src/gravitar.rs`.
+The model is `machines/src/atari_color_vector_conversions.rs`, the board
+module for Atari's color vector conversion class, with the per-game halves in
+`machines/src/blackwidow.rs` and `machines/src/gravitar.rs`.
 
 The finding in one line: **the two games are one board, and five things on it
 are not what the reference driver models.** The IRQ is a counter that restarts

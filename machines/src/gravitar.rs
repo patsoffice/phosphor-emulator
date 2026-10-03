@@ -1,7 +1,8 @@
 //! Atari Gravitar (1982), versions 3, 2 and 1 and the later Lunar Battle
 //! prototype, all on the one board.
 //!
-//! The board is [`crate::atari_bwidow`], shared with Black Widow; this file
+//! The board is [`crate::atari_color_vector_conversions`], shared with Black
+//! Widow; this file
 //! is what is Gravitar's own: its ROMs, its controls, its switch tables and
 //! the four audio part values that differ from Black Widow's.
 //!
@@ -21,7 +22,9 @@
 //! memory map and is not carried here (`phosphor-emulator-quwu.6`).
 
 use crate::atari_avg;
-use crate::atari_bwidow::{AudioParts, BwidowBoard, BwidowRomConfig, timing};
+use crate::atari_color_vector_conversions::{
+    AtariColorVectorConversionsBoard, AudioParts, ConversionRomConfig, timing,
+};
 use crate::rom_loader::{RomLoadError, RomRegion, RomSet};
 use crate::{choice, option, set_bit_active_low};
 use phosphor_core::audio::SampleRing;
@@ -129,31 +132,31 @@ static PROGRAM_LUNARBAT: RomRegion = RomRegion {
 };
 
 /// Gravitar, version 3.
-pub static GRAVITAR_CONFIG: BwidowRomConfig = BwidowRomConfig {
+pub static GRAVITAR_CONFIG: ConversionRomConfig = ConversionRomConfig {
     vector: &VECTOR_V3,
     program: &PROGRAM_V3,
 };
 
 /// Gravitar, version 2.
-pub static GRAVITAR2_CONFIG: BwidowRomConfig = BwidowRomConfig {
+pub static GRAVITAR2_CONFIG: ConversionRomConfig = ConversionRomConfig {
     vector: &VECTOR_V2,
     program: &PROGRAM_V2,
 };
 
 /// Gravitar, version 1.
-pub static GRAVITAR1_CONFIG: BwidowRomConfig = BwidowRomConfig {
+pub static GRAVITAR1_CONFIG: ConversionRomConfig = ConversionRomConfig {
     vector: &VECTOR_V1,
     program: &PROGRAM_V1,
 };
 
 /// Lunar Battle, the later prototype.
-pub static LUNARBAT_CONFIG: BwidowRomConfig = BwidowRomConfig {
+pub static LUNARBAT_CONFIG: ConversionRomConfig = ConversionRomConfig {
     vector: &VECTOR_LUNARBAT,
     program: &PROGRAM_LUNARBAT,
 };
 
 /// Newest revision first: a set matches the first config whose files it has.
-const ALL_CONFIGS: &[&BwidowRomConfig] = &[
+const ALL_CONFIGS: &[&ConversionRomConfig] = &[
     &GRAVITAR_CONFIG,
     &GRAVITAR2_CONFIG,
     &GRAVITAR1_CONFIG,
@@ -182,14 +185,14 @@ pub struct GravitarSystem {
     cpu: M6502,
     #[debug_bus]
     #[save(id = 2)]
-    board: BwidowBoard,
+    board: AtariColorVectorConversionsBoard,
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
 }
 
 impl GravitarSystem {
     pub fn new() -> Self {
-        let mut board = BwidowBoard::new(&TIMING, &AUDIO);
+        let mut board = AtariColorVectorConversionsBoard::new(&TIMING, &AUDIO);
         board.dsw_d4 = DSW_D4_DEFAULT;
         board.dsw_b4 = DSW_B4_DEFAULT;
         Self {
@@ -206,7 +209,7 @@ impl GravitarSystem {
     fn load_roms(
         &mut self,
         rom_set: &RomSet,
-        config: &BwidowRomConfig,
+        config: &ConversionRomConfig,
     ) -> Result<(), RomLoadError> {
         self.board.load_roms(rom_set, config)
     }

@@ -1382,7 +1382,8 @@ status = "partial"
 notes = """
 EXAMINED. SP-234 sheet 7A read and transcribed at
 docs/schematics/bwidow-gravitar-board.md (phosphor-emulator-quwu.1). The
-model is the shared board's mix_audio in machines/src/atari_bwidow.rs.
+model is the shared board's mix_audio in
+machines/src/atari_color_vector_conversions.rs.
 
 MODELED: each POKEY works into a 1k virtual ground on +5 V. C/D3 ($6000)
 passes C33/R49's 185 Hz coupling to the summing amplifier at -1, with no
@@ -1408,7 +1409,7 @@ notes = """
 EXAMINED. SP-206 sheet 5A read and transcribed at
 docs/schematics/bwidow-gravitar-board.md (phosphor-emulator-quwu.1), the
 same topology as Black Widow's with four parts different. The model is the
-shared board's mix_audio in machines/src/atari_bwidow.rs.
+shared board's mix_audio in machines/src/atari_color_vector_conversions.rs.
 
 MODELED: each POKEY works into a 1k virtual ground on +5 V. C/D3 ($6000)
 passes C34 0.22 uF's 723 Hz pole across R51 and C33/R49's 185 Hz coupling to
