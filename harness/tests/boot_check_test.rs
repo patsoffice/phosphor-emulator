@@ -14,8 +14,8 @@
 //! # Gating
 //!
 //! No ROM directory (`PHOSPHOR_ROMS`, else `~/ws/mame-runtime/roms`) → every
-//! test here skips, so CI stays green without ROMs. A machine whose own ROM
-//! set is missing from an otherwise-present directory skips individually, so a
+//! test here skips, so CI stays green without ROMs. A revision whose archives
+//! are missing from an otherwise-present directory skips individually, so a
 //! partial collection still runs what it can.
 //!
 //! [`roms_dir`]: phosphor_harness::roms_dir
@@ -66,34 +66,45 @@ fn rom_set(dir: &Path, machine: &str) -> Option<RomSet> {
     }
 }
 
-/// Boot a registered machine from `dir`, or `None` if this collection cannot
-/// supply its ROMs.
-fn boot(dir: &Path, machine: &str) -> Option<Harness> {
+/// Boot revision `rev` of a registered machine from `dir`, or `None` if this
+/// collection cannot supply its ROMs.
+///
+/// Strict: the revision boots from its first archive present on disk, in
+/// preference order, so an alias-only collection still boots. Every resolve
+/// failure reads as a skip, as in [`rom_set`]: past a successful boot, the
+/// machine's own behavior is asserted normally.
+fn boot_revision(dir: &Path, machine: &str, rev: usize) -> Option<Harness> {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
-    let set = rom_set(dir, machine)?;
-    let mut last_err = None;
-    let mut built = None;
-    for rev in 0..entry.revisions.len() {
-        match (entry.create)(&set, rev) {
-            Ok(m) => {
-                built = Some(m);
-                break;
-            }
-            Err(e) => last_err = Some(e),
+    let revision = &entry.revisions[rev];
+    let Some(name) = revision
+        .names
+        .iter()
+        .find(|n| dir.join(format!("{n}.zip")).exists())
+    else {
+        eprintln!(
+            "skipping {} [{}]: no archive ({}) in {}",
+            machine,
+            revision.set(),
+            revision.names.join(", "),
+            dir.display()
+        );
+        return None;
+    };
+    match Harness::build(
+        machine,
+        dir.to_str().unwrap(),
+        Some(name),
+        None,
+        None,
+        &[],
+        &[],
+    ) {
+        Ok(harness) => Some(harness),
+        Err(e) => {
+            eprintln!("skipping {} [{}]: {e}", machine, revision.set());
+            None
         }
     }
-    let mut built = match built {
-        Some(m) => m,
-        None => {
-            eprintln!(
-                "skipping {machine}: {}",
-                last_err.expect("an entry always declares a revision")
-            );
-            return None;
-        }
-    };
-    built.reset();
-    Some(Harness::from_machine(built))
 }
 
 /// Every CPU's program counter, in the order the debug bus reports them.
@@ -126,8 +137,8 @@ const BOOT_BUDGET: usize = 3000;
 // Registry-driven
 // ---------------------------------------------------------------------------
 
-/// Every machine whose ROMs are present must run its CPU and put something on
-/// screen.
+/// Every revision whose ROMs are present must run its CPU and put something
+/// on screen.
 ///
 /// This is the registry-driven half: a newly registered machine is covered as
 /// soon as its ROM set is in the directory, with no edit here. It is a coarse
@@ -141,50 +152,50 @@ fn every_machine_with_roms_boots_and_draws() {
     let mut checked = Vec::new();
     let mut skipped = Vec::new();
     for entry in registry::all() {
-        let Some(mut harness) = boot(&dir, entry.name) else {
-            skipped.push(entry.name);
-            continue;
-        };
+        for rev in 0..entry.revisions.len() {
+            let label = format!("{} [{}]", entry.name, entry.revisions[rev].set());
+            let Some(mut harness) = boot_revision(&dir, entry.name, rev) else {
+                skipped.push(label);
+                continue;
+            };
 
-        let reset_pcs = program_counters(harness.machine());
-        let mut drew_at = None;
-        for frame in 1..=BOOT_BUDGET {
-            harness.run_frame();
-            if is_drawing(harness.machine()) {
-                drew_at = Some(frame);
-                break;
+            let reset_pcs = program_counters(harness.machine());
+            let mut drew_at = None;
+            for frame in 1..=BOOT_BUDGET {
+                harness.run_frame();
+                if is_drawing(harness.machine()) {
+                    drew_at = Some(frame);
+                    break;
+                }
             }
+            assert!(
+                drew_at.is_some(),
+                "{label}: drew nothing in {BOOT_BUDGET} frames: it never reached its \
+                 attract mode"
+            );
+
+            let pcs = program_counters(harness.machine());
+            assert!(
+                !pcs.is_empty(),
+                "{label}: exposes no CPUs through its debug bus, so this test cannot \
+                 tell a booted machine from a wedged one"
+            );
+            // Per machine rather than per CPU: a second CPU legitimately sits at
+            // its reset vector until the main CPU releases it (Xevious holds its
+            // sub and sound Z80s that way, which its own check below covers).
+            assert!(
+                pcs.iter().zip(&reset_pcs).any(|(now, reset)| now != reset),
+                "{label}: no CPU left its reset PC in {} frames ({reset_pcs:02X?} -> \
+                 {pcs:02X?})",
+                drew_at.unwrap()
+            );
+
+            checked.push(label);
         }
-        assert!(
-            drew_at.is_some(),
-            "{}: drew nothing in {BOOT_BUDGET} frames — it never reached its \
-             attract mode",
-            entry.name
-        );
-
-        let pcs = program_counters(harness.machine());
-        assert!(
-            !pcs.is_empty(),
-            "{}: exposes no CPUs through its debug bus, so this test cannot \
-             tell a booted machine from a wedged one",
-            entry.name
-        );
-        // Per machine rather than per CPU: a second CPU legitimately sits at
-        // its reset vector until the main CPU releases it (Xevious holds its
-        // sub and sound Z80s that way, which its own check below covers).
-        assert!(
-            pcs.iter().zip(&reset_pcs).any(|(now, reset)| now != reset),
-            "{}: no CPU left its reset PC in {} frames ({reset_pcs:02X?} -> \
-             {pcs:02X?})",
-            entry.name,
-            drew_at.unwrap()
-        );
-
-        checked.push(entry.name);
     }
 
     eprintln!(
-        "booted {} machine(s); skipped {} with no ROM set: {skipped:?}",
+        "booted {} revision(s); skipped {} with no ROM set: {skipped:?}",
         checked.len(),
         skipped.len()
     );
@@ -210,38 +221,42 @@ const VECTOR_TAIL: usize = 60;
 /// vector generator is drawing it. A list that collapses mid-window means the
 /// boot got partway and stalled — which a single end-of-run sample would miss.
 fn assert_vector_display_is_live(dir: &Path, machine: &str) {
-    let Some(mut harness) = boot(dir, machine) else {
-        return;
-    };
+    let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
+    for rev in 0..entry.revisions.len() {
+        let label = format!("{} [{}]", machine, entry.revisions[rev].set());
+        let Some(mut harness) = boot_revision(dir, machine, rev) else {
+            continue;
+        };
 
-    let mut tail = Vec::with_capacity(VECTOR_TAIL);
-    for frame in 0..VECTOR_FRAMES {
-        harness.run_frame();
-        if VECTOR_FRAMES - frame <= VECTOR_TAIL {
-            let n = harness
-                .machine()
-                .vector_display_list()
-                .map_or(0, |l| l.len());
-            tail.push(n);
+        let mut tail = Vec::with_capacity(VECTOR_TAIL);
+        for frame in 0..VECTOR_FRAMES {
+            harness.run_frame();
+            if VECTOR_FRAMES - frame <= VECTOR_TAIL {
+                let n = harness
+                    .machine()
+                    .vector_display_list()
+                    .map_or(0, |l| l.len());
+                tail.push(n);
+            }
         }
+
+        let min = tail.iter().copied().min().unwrap_or(0);
+        assert!(
+            min > 0,
+            "{label}: the vector display list was empty on at least one of the \
+             last {VECTOR_TAIL} frames (per-frame counts: min {min}, max {})",
+            tail.iter().copied().max().unwrap_or(0)
+        );
+
+        // A live list also has to be drawing something, not just carrying
+        // zero-intensity moves.
+        let vectors = harness.machine().vector_display_list().unwrap_or(&[]);
+        assert!(
+            vectors.iter().any(|v| v.intensity > 0),
+            "{label}: {} vectors on the final frame but none is lit",
+            vectors.len()
+        );
     }
-
-    let min = tail.iter().copied().min().unwrap_or(0);
-    assert!(
-        min > 0,
-        "{machine}: the vector display list was empty on at least one of the \
-         last {VECTOR_TAIL} frames (per-frame counts: min {min}, max {})",
-        tail.iter().copied().max().unwrap_or(0)
-    );
-
-    // A live list also has to be drawing something, not just carrying
-    // zero-intensity moves.
-    let vectors = harness.machine().vector_display_list().unwrap_or(&[]);
-    assert!(
-        vectors.iter().any(|v| v.intensity > 0),
-        "{machine}: {} vectors on the final frame but none is lit",
-        vectors.len()
-    );
 }
 
 #[test]
@@ -491,29 +506,34 @@ fn the_galaxian_family_draws_a_populated_frame() {
     let Some(dir) = roms() else { return };
 
     for machine in ["galaxian", "mooncrst", "pisces", "uniwars"] {
-        let Some(mut harness) = boot(&dir, machine) else {
-            continue;
-        };
-        // ~3 seconds: past the RAM check and into the attract intro.
-        for _ in 0..180 {
-            harness.run_frame();
+        let entry =
+            registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
+        for rev in 0..entry.revisions.len() {
+            let label = format!("{} [{}]", machine, entry.revisions[rev].set());
+            let Some(mut harness) = boot_revision(&dir, machine, rev) else {
+                continue;
+            };
+            // ~3 seconds: past the RAM check and into the attract intro.
+            for _ in 0..180 {
+                harness.run_frame();
+            }
+
+            let (w, h) = harness.machine().display_size();
+            let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
+            harness.machine().render_frame(&mut buf);
+
+            let lit = buf.chunks(3).filter(|p| p != &[0, 0, 0]).count();
+            let total = (w as usize) * (h as usize);
+            assert!(
+                lit > 0,
+                "{label}: the frame is entirely black after 180 frames"
+            );
+            // A frame that is *entirely* lit is as wrong as an empty one: it means
+            // the tilemap decoded to a solid colour rather than to glyphs.
+            assert!(
+                lit < total,
+                "{label}: every one of {total} pixels is lit after 180 frames"
+            );
         }
-
-        let (w, h) = harness.machine().display_size();
-        let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
-        harness.machine().render_frame(&mut buf);
-
-        let lit = buf.chunks(3).filter(|p| p != &[0, 0, 0]).count();
-        let total = (w as usize) * (h as usize);
-        assert!(
-            lit > 0,
-            "{machine}: the frame is entirely black after 180 frames"
-        );
-        // A frame that is *entirely* lit is as wrong as an empty one: it means
-        // the tilemap decoded to a solid colour rather than to glyphs.
-        assert!(
-            lit < total,
-            "{machine}: every one of {total} pixels is lit after 180 frames"
-        );
     }
 }
