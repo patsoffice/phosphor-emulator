@@ -23,6 +23,8 @@ phosphor-script run <script.rhai>       # no pre-bound m; the script calls open(
 With `--machine <name> <rompath>`, a machine is booted and pre-bound as the
 global `m`. Without them, the script opens its own machine(s) via `open(...)` —
 which also lets one script open several machines for in-repo A/B comparisons.
+`--rom-set <name>` boots one revision of the pre-bound machine instead of the
+default, matching the three-argument `open`.
 
 ```bash
 # Snapshot galaga after 3100 frames (writes out.png in the current directory)
@@ -84,6 +86,7 @@ method maps 1:1 onto a `DebugSession` accessor. The one remaining gap is
 | Rhai | Description |
 |---|---|
 | `open(machine_name, rom_path)` | Boot a machine and return a `Machine` handle. Throws on failure. |
+| `open(machine_name, rom_path, rom_set)` | Boot one ROM revision of a machine (strict: no fallback). The set names are the machine's declared revisions; see `phosphor <machine> --list`. |
 
 ### `Machine` methods (`m`)
 

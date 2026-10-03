@@ -33,6 +33,12 @@ struct Cli {
     /// Path to ROM file or directory (overrides config.toml rom_path)
     rom_path: Option<String>,
 
+    /// ROM revision to boot: a set name from this machine's declared revisions
+    /// (see `phosphor <machine> --list`). Defaults to the first declared
+    /// revision. One launch only; most revisions share one NVRAM file.
+    #[arg(long, value_name = "NAME")]
+    rom_set: Option<String>,
+
     /// Window scale factor
     #[arg(long)]
     scale: Option<u32>,
@@ -111,15 +117,50 @@ struct Cli {
     gfx_region: Option<String>,
 }
 
+/// Render one machine's declared ROM revisions: default first and marked, with
+/// alias names and any NVRAM group that differs from the machine name. Every
+/// set name printed here is a valid `--rom-set` value.
+fn list_revisions(entry: &phosphor_machines::registry::MachineEntry) -> String {
+    let mut out = format!("{} ROM sets (default first):\n", entry.name);
+    for (i, rev) in entry.revisions.iter().enumerate() {
+        out.push_str(&format!("  {}", rev.set()));
+        let mut notes = Vec::new();
+        if i == 0 {
+            notes.push("default".to_string());
+        }
+        if !rev.aliases().is_empty() {
+            notes.push(format!("aliases: {}", rev.aliases().join(", ")));
+        }
+        if let Some(group) = rev.nvram_group {
+            notes.push(format!("nvram: {group}"));
+        }
+        if !notes.is_empty() {
+            out.push_str(&format!(" ({})", notes.join("; ")));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn main() {
     let cli = Cli::parse();
     // Before config::load(), which warns through the logger on a bad file.
     logging::init();
     let config = config::load();
 
+    // `phosphor --list` names the machines; `phosphor <machine> --list` names
+    // that machine's ROM revisions, which is what `--rom-set` chooses from.
     if cli.list {
-        for entry in registry::all() {
-            println!("{}", entry.name);
+        if let Some(machine_name) = &cli.machine {
+            let entry = registry::find(machine_name).unwrap_or_else(|| {
+                eprintln!("Unknown machine: {machine_name}");
+                std::process::exit(1);
+            });
+            print!("{}", list_revisions(entry));
+        } else {
+            for entry in registry::all() {
+                println!("{}", entry.name);
+            }
         }
         return;
     }
@@ -199,14 +240,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    let resolved = match phosphor_harness::resolve(entry, &rom_path, None) {
+    let resolved = match phosphor_harness::resolve(entry, &rom_path, cli.rom_set.as_deref()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Could not load {machine_name} from {rom_path}: {e}");
-            eprintln!(
-                "  Tried ROM set names: {}",
-                entry.archive_names().join(", ")
-            );
+            // The explicit-choice error already names the set and the path;
+            // only the default-order failure needs the tried list restated.
+            if cli.rom_set.is_none() {
+                eprintln!(
+                    "  Tried ROM set names: {}",
+                    entry.archive_names().join(", ")
+                );
+            }
             std::process::exit(1);
         }
     };
@@ -239,6 +284,17 @@ fn main() {
     let nvram_path = nvram_path_for(&config, per_game.nvram_path.as_deref(), nvram_group);
     if let Ok(data) = std::fs::read(&nvram_path) {
         machine.load_nvram(&data);
+    }
+
+    // Confirm an explicit --rom-set: which set booted and which NVRAM file it
+    // uses. Default boots stay quiet; the fallback warn covers surprises.
+    if cli.rom_set.is_some() {
+        log::info!(
+            "'{}' booted from ROM set '{}' (NVRAM {})",
+            entry.name,
+            resolved.source.set(),
+            nvram_path.display()
+        );
     }
 
     let (native_w, native_h) = machine.display_size();
@@ -330,7 +386,7 @@ fn main() {
         cli.movie.as_deref(),
         cli.record.as_deref(),
         &|| {
-            phosphor_harness::resolve(entry, &rom_path, None)
+            phosphor_harness::resolve(entry, &rom_path, cli.rom_set.as_deref())
                 .map(|r| r.machine)
                 .unwrap_or_else(|e| {
                     eprintln!("Could not rebuild {machine_name} from {rom_path}: {e}");

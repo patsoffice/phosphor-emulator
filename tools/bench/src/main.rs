@@ -84,6 +84,11 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     roms: Option<String>,
 
+    /// ROM revision to benchmark: a set name from each machine's declared
+    /// revisions. Defaults to the first declared revision.
+    #[arg(long, value_name = "NAME")]
+    rom_set: Option<String>,
+
     /// Frames to measure per repetition.
     #[arg(long, default_value_t = 600)]
     frames: u64,
@@ -210,7 +215,8 @@ fn bench_machine(name: &str, roms: &Path, args: &Args) -> Result<MachineResult, 
     };
 
     for _ in 0..args.reps {
-        let mut harness = Harness::build(name, roms, None, None, None, &[], &[])?;
+        let mut harness =
+            Harness::build(name, roms, args.rom_set.as_deref(), None, None, &[], &[])?;
         if let Some(m) = &movie {
             // Bound per repetition, because a player carries its own position
             // and every rep has to replay the same frames from the same start.
@@ -327,11 +333,15 @@ fn main() {
     }
 
     println!(
-        "{} frames x {} reps, {} warmup, roms {}\n",
+        "{} frames x {} reps, {} warmup, roms {}{}\n",
         args.frames,
         args.reps,
         args.warmup,
-        roms.display()
+        roms.display(),
+        args.rom_set
+            .as_deref()
+            .map(|s| format!(", rom set {s}"))
+            .unwrap_or_default(),
     );
     println!(
         "{:<12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8}",

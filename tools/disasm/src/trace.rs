@@ -72,6 +72,9 @@ pub struct TraceOptions<'a> {
     pub machine: &'a str,
     /// ROM set: a `.zip` archive or a directory of loose ROM files.
     pub path: &'a str,
+    /// `--rom-set`: a set name from the machine's declared revisions, or
+    /// `None` for the default (first declared) revision.
+    pub rom_set: Option<&'a str>,
 
     /// Number of frames to run, from reset.
     pub frames: usize,
@@ -366,6 +369,7 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
     let TraceOptions {
         machine,
         path,
+        rom_set,
         frames,
         from_frame,
         coin_at,
@@ -428,7 +432,7 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
     let mut harness = Harness::build(
         machine,
         path,
-        None,
+        rom_set,
         nvram,
         coin_at,
         &press_specs,

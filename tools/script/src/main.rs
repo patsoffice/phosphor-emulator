@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use rhai::Scope;
 
-use phosphor_script::{build_engine, open_machine};
+use phosphor_script::{build_engine, open_machine, open_machine_set};
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +42,10 @@ enum Command {
         /// the positional form; use this when the positional would be ambiguous.
         #[arg(long = "rompath", value_name = "PATH")]
         rompath_flag: Option<String>,
+        /// ROM revision for the pre-bound machine: a set name from its
+        /// declared revisions. Defaults to the first declared revision.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         /// Without `-e`: `<script.rhai|-> [rompath]`. With `-e`: `[rompath]`.
         #[arg(value_name = "ARGS")]
         args: Vec<String>,
@@ -71,11 +75,18 @@ fn run_command(cmd: Command) -> Result<String, String> {
             eval,
             machine,
             rompath_flag,
+            rom_set,
             args,
         } => {
             let run = resolve_run(eval, rompath_flag, args)?;
             let (label, source) = read_source(&run.source)?;
-            run_script(&label, &source, machine.as_deref(), run.rompath.as_deref())
+            run_script(
+                &label,
+                &source,
+                machine.as_deref(),
+                run.rompath.as_deref(),
+                rom_set.as_deref(),
+            )
         }
     }
 }
@@ -191,13 +202,18 @@ fn run_script(
     source: &str,
     machine: Option<&str>,
     rompath: Option<&str>,
+    rom_set: Option<&str>,
 ) -> Result<String, String> {
     let engine = build_engine();
     let mut scope = Scope::new();
 
     match (machine, rompath) {
         (Some(name), Some(path)) => {
-            scope.push("m", open_machine(name, path)?);
+            let m = match rom_set {
+                Some(set) => open_machine_set(name, path, set)?,
+                None => open_machine(name, path)?,
+            };
+            scope.push("m", m);
         }
         (None, None) => {}
         _ => {

@@ -2,9 +2,10 @@
 //!
 //! Registers the `Machine` custom type, the per-method bindings onto the
 //! read-first [`crate::session::DebugSession`] surface, the global
-//! `open(machine_name, rom_path) -> Machine` function, the `print`/`debug`
-//! output hooks, and the runaway guards (`set_max_operations` /
-//! `set_max_call_levels`).
+//! `open(machine_name, rom_path) -> Machine` function plus its three-argument
+//! `open(machine_name, rom_path, rom_set)` revision overload, the
+//! `print`/`debug` output hooks, and the runaway guards (`set_max_operations`
+//! / `set_max_call_levels`).
 //!
 //! Rhai's default engine exposes no ambient time or RNG, and this module adds
 //! none — the emulator has no wall-clock or RNG in its tick path and replay
@@ -46,6 +47,16 @@ pub fn open_machine(machine_name: &str, rom_path: &str) -> Result<Machine, Strin
     DebugSession::open(machine_name, rom_path).map(|s| Rc::new(RefCell::new(s)))
 }
 
+/// Open one revision into a script-visible [`Machine`] handle: the Rust
+/// counterpart of the script's three-argument `open(machine, path, rom_set)`.
+pub fn open_machine_set(
+    machine_name: &str,
+    rom_path: &str,
+    rom_set: &str,
+) -> Result<Machine, String> {
+    DebugSession::open_set(machine_name, rom_path, rom_set).map(|s| Rc::new(RefCell::new(s)))
+}
+
 /// Build a Rhai [`Engine`] with the v1 machine bindings, stdout `print`/`debug`
 /// hooks, and the runaway guards.
 pub fn build_engine() -> Engine {
@@ -71,6 +82,13 @@ fn register_machine(engine: &mut Engine) {
         "open",
         |name: &str, path: &str| -> Result<Machine, Box<EvalAltResult>> {
             open_machine(name, path).map_err(|e| e.into())
+        },
+    );
+    // Revision overload: open one specific ROM set of the machine.
+    engine.register_fn(
+        "open",
+        |name: &str, path: &str, rom_set: &str| -> Result<Machine, Box<EvalAltResult>> {
+            open_machine_set(name, path, rom_set).map_err(|e| e.into())
         },
     );
 
@@ -495,6 +513,20 @@ mod tests {
         let mut scope = Scope::new();
         scope.push("m", m.clone());
         (build_engine(), scope, m)
+    }
+
+    #[test]
+    fn open_with_unknown_rom_set_errors_naming_what_the_machine_accepts() {
+        // The strict resolver rejects the name before touching the disk, so
+        // no ROMs are needed.
+        let engine = build_engine();
+        let Err(err) = engine.eval::<Machine>("open(\"galaga\", \"/nonexistent\", \"not-a-set\")")
+        else {
+            panic!("unknown rom_set should fail");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("not-a-set"), "{msg}");
+        assert!(msg.contains("known sets:"), "{msg}");
     }
 
     #[test]

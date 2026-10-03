@@ -60,6 +60,14 @@ impl DebugSession {
         Ok(Self::wrap(harness))
     }
 
+    /// Boot one revision: `rom_set` is a set name from the machine's declared
+    /// revisions, resolved strictly (no fallback). See
+    /// [`Harness::build`](phosphor_harness::Harness::build).
+    pub fn open_set(machine_name: &str, rom_path: &str, rom_set: &str) -> Result<Self, String> {
+        let harness = Harness::build(machine_name, rom_path, Some(rom_set), None, None, &[], &[])?;
+        Ok(Self::wrap(harness))
+    }
+
     /// Wrap a booted [`Harness`], building the stable-name → `InputId` index.
     pub(crate) fn wrap(mut harness: Harness) -> Self {
         let input_ids = harness

@@ -20,5 +20,5 @@ pub mod session;
 #[cfg(test)]
 mod test_support;
 
-pub use rhai_api::{Machine, build_engine, open_machine};
+pub use rhai_api::{Machine, build_engine, open_machine, open_machine_set};
 pub use session::DebugSession;

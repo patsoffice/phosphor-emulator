@@ -127,6 +127,11 @@ enum Command {
         /// Region to disassemble (e.g. `sound`). Omit to list available regions.
         #[arg(long)]
         region: Option<String>,
+        /// ROM revision to read: a set name from the machine's declared
+        /// revisions (`disasm machines` lists the sets). Defaults to the first
+        /// declared revision.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         #[command(flatten)]
         range: RangeArgs,
         /// ROM set: a `.zip` archive or a directory of loose ROM files
@@ -141,6 +146,11 @@ enum Command {
         /// Region to decode (e.g. `sprites`). Omit to list available regions.
         #[arg(long)]
         region: Option<String>,
+        /// ROM revision to read: a set name from the machine's declared
+        /// revisions (`disasm machines` lists the sets). Defaults to the first
+        /// declared revision.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         /// Elements per row in the output sheet.
         #[arg(long, default_value_t = 16)]
         cols: usize,
@@ -161,6 +171,11 @@ enum Command {
         /// Machine CLI name (e.g. `mrdo`).
         #[arg(long)]
         machine: String,
+        /// ROM revision to boot: a set name from the machine's declared
+        /// revisions (`disasm machines` lists the sets). Defaults to the first
+        /// declared revision.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         /// Number of frames to run (from reset) before capturing.
         #[arg(long, default_value_t = 0)]
         frames: usize,
@@ -203,6 +218,11 @@ enum Command {
         /// Machine CLI name (e.g. `joust`).
         #[arg(long)]
         machine: String,
+        /// ROM revision to boot: a set name from the machine's declared
+        /// revisions (`disasm machines` lists the sets). Defaults to the first
+        /// declared revision.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         /// Number of frames to run (from reset).
         #[arg(long, default_value_t = 0)]
         frames: usize,
@@ -575,12 +595,20 @@ fn run_command(cmd: Command) -> Result<String, String> {
         Command::Machine {
             machine,
             region,
+            rom_set,
             range,
             path,
-        } => run_machine(&machine, region.as_deref(), &range, path.as_deref()),
+        } => run_machine(
+            &machine,
+            region.as_deref(),
+            &range,
+            path.as_deref(),
+            rom_set.as_deref(),
+        ),
         Command::Gfxview {
             machine,
             region,
+            rom_set,
             cols,
             scale,
             out,
@@ -592,9 +620,11 @@ fn run_command(cmd: Command) -> Result<String, String> {
             scale,
             out.as_deref(),
             path.as_deref(),
+            rom_set.as_deref(),
         ),
         Command::Frameshot {
             machine,
+            rom_set,
             frames,
             out,
             compare,
@@ -606,6 +636,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             path,
         } => run_frameshot(
             &machine,
+            rom_set.as_deref(),
             frames,
             out.as_deref(),
             compare.as_deref(),
@@ -618,6 +649,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
         ),
         Command::Trace {
             machine,
+            rom_set,
             frames,
             from_frame,
             coin_at,
@@ -637,6 +669,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             out,
             path,
         } => trace::run_trace(trace::TraceOptions {
+            rom_set: rom_set.as_deref(),
             frames,
             from_frame,
             coin_at,
@@ -740,7 +773,10 @@ fn run_command(cmd: Command) -> Result<String, String> {
 fn list_machines() -> String {
     let mut entries = registry::all();
     entries.sort_by_key(|e| e.name);
-    let mut out = format!("{} registered machines:\n", entries.len());
+    let mut out = format!(
+        "{} registered machines (first ROM set listed is the default):\n",
+        entries.len()
+    );
     for e in entries {
         out.push_str(&format!(
             "  {:<12} roms: {}\n",
@@ -757,6 +793,7 @@ fn list_machines() -> String {
 #[allow(clippy::too_many_arguments)]
 fn run_frameshot(
     machine: &str,
+    rom_set: Option<&str>,
     frames: usize,
     out: Option<&Path>,
     compare: Option<&Path>,
@@ -767,7 +804,7 @@ fn run_frameshot(
     dip: Option<&str>,
     path: &str,
 ) -> Result<String, String> {
-    let mut harness = Harness::build(machine, path, None, nvram, coin_at, &[], &[])?;
+    let mut harness = Harness::build(machine, path, rom_set, nvram, coin_at, &[], &[])?;
     // Before the first frame, so a switch that only takes effect at boot (a
     // self-test toggle, say) is already set when the machine looks at it.
     if let Some(spec) = dip {
@@ -1391,6 +1428,7 @@ fn run_machine(
     region: Option<&str>,
     range: &RangeArgs,
     path: Option<&str>,
+    rom_set: Option<&str>,
 ) -> Result<String, String> {
     // With no --region, list what's available (no ROM files required).
     let Some(region) = region else {
@@ -1414,12 +1452,33 @@ fn run_machine(
 
     let path = path.ok_or("a ROM path is required to disassemble a region")?;
 
-    // Regions name the default revision's members, so only its dump assembles.
+    // Regions name member files, which may differ between revisions: a set
+    // whose dump lacks the region's members fails at assembly below.
     let entry = registry::find(machine).ok_or_else(|| format!("unknown machine '{machine}'"))?;
+    let rev = revision_index(entry, machine, rom_set)?;
     let set =
-        load_revision_set(entry, path, 0).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+        load_revision_set(entry, path, rev).map_err(|e| format!("loading ROM set {path}: {e}"))?;
     let data = (r.load)(&set).map_err(|e| format!("assembling region '{region}': {e}"))?;
     disassemble(CpuArg::from(r.cpu), &data, r.org, range)
+}
+
+/// Revision index for a `--rom-set` choice: the named revision, or the default
+/// when none was given. An unknown name errors listing what the machine
+/// accepts, mirroring the boot path's explicit-choice error.
+fn revision_index(
+    entry: &registry::MachineEntry,
+    machine: &str,
+    rom_set: Option<&str>,
+) -> Result<usize, String> {
+    match rom_set {
+        Some(name) => entry.find_revision(name).ok_or_else(|| {
+            format!(
+                "unknown ROM set '{name}' for machine '{machine}'; known sets: {}",
+                entry.archive_names().join(", ")
+            )
+        }),
+        None => Ok(0),
+    }
 }
 
 /// Render the available disasm regions for `machine`, with CPU/origin/size.
@@ -1455,6 +1514,7 @@ fn run_gfxview(
     scale: usize,
     out: Option<&Path>,
     path: Option<&str>,
+    rom_set: Option<&str>,
 ) -> Result<String, String> {
     // With no --region, list what's available (no ROM files required).
     let Some(region) = region else {
@@ -1478,10 +1538,12 @@ fn run_gfxview(
 
     let path = path.ok_or("a ROM path is required to decode a region")?;
 
-    // Regions name the default revision's members, so only its dump assembles.
+    // Regions name member files, which may differ between revisions: a set
+    // whose dump lacks the region's members fails at assembly below.
     let entry = registry::find(machine).ok_or_else(|| format!("unknown machine '{machine}'"))?;
+    let rev = revision_index(entry, machine, rom_set)?;
     let set =
-        load_revision_set(entry, path, 0).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+        load_revision_set(entry, path, rev).map_err(|e| format!("loading ROM set {path}: {e}"))?;
     let bytes = (r.load)(&set).map_err(|e| format!("assembling gfx region '{region}': {e}"))?;
 
     let cache = decode_gfx(&bytes, 0, r.count as usize, r.layout);
@@ -1637,6 +1699,19 @@ mod tests {
     /// The whole ROM, no range/count limits.
     fn all<T: Disassemble>(data: &[u8], org: u32) -> String {
         run::<T>(data, org, org, None, None)
+    }
+
+    #[test]
+    fn revision_index_defaults_to_zero_and_rejects_unknown_sets() {
+        let entry = registry::find("mariobros").expect("mariobros is registered");
+        assert_eq!(
+            revision_index(entry, "mariobros", None).unwrap(),
+            0,
+            "no --rom-set means the default revision"
+        );
+        let err = revision_index(entry, "mariobros", Some("not-a-set")).unwrap_err();
+        assert!(err.contains("not-a-set"), "{err}");
+        assert!(err.contains("known sets:"), "{err}");
     }
 
     #[test]
@@ -1806,6 +1881,7 @@ mod tests {
                 end: None,
                 count: None,
             },
+            None,
             None,
         )
         .unwrap();
@@ -1982,7 +2058,7 @@ mod tests {
     #[test]
     fn gfxview_unknown_machine_lists_nothing() {
         // No --region → listing path; unknown machine has no gfx regions.
-        let out = run_gfxview("does-not-exist", None, 16, 1, None, None).unwrap();
+        let out = run_gfxview("does-not-exist", None, 16, 1, None, None, None).unwrap();
         assert!(out.contains("no gfx regions registered"), "{out}");
         assert_eq!(list_gfx_regions("does-not-exist"), out);
     }
@@ -1990,7 +2066,8 @@ mod tests {
     #[test]
     fn gfxview_unknown_region_errors_helpfully() {
         // Decoding an unregistered region fails before any ROM is required.
-        let err = run_gfxview("does-not-exist", Some("sprites"), 16, 1, None, None).unwrap_err();
+        let err =
+            run_gfxview("does-not-exist", Some("sprites"), 16, 1, None, None, None).unwrap_err();
         assert!(err.contains("no gfx regions registered"), "{err}");
     }
 }
