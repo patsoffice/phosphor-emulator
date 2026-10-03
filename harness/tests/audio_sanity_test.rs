@@ -267,7 +267,7 @@ fn roms() -> Option<PathBuf> {
 fn rom_set_present(dir: &Path, machine: &str) -> bool {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
     entry
-        .rom_names
+        .archive_names()
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
 }

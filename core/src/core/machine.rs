@@ -811,6 +811,16 @@ pub trait MachineCore {
         ""
     }
 
+    /// Which ROM revision this machine loaded, as a MAME set name
+    /// (e.g., "galagao").
+    ///
+    /// Empty for single-revision machines: with one loader and one set
+    /// there is nothing to distinguish. Multi-revision machines override
+    /// this to report the set their loader accepted.
+    fn revision(&self) -> &str {
+        ""
+    }
+
     /// Decoded tile/sprite GFX sheets for the interactive viewer (`--gfxview`).
     ///
     /// Tile-based machines override this to expose the caches they already

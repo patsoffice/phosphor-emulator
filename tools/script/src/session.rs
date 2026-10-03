@@ -196,7 +196,7 @@ impl DebugSession {
         if let Some(rp) = self.rom_path.clone()
             && let Some(entry) = registry::find(&id)
         {
-            let set = load_rom_set(&rp, entry.rom_names)
+            let set = load_rom_set(&rp, &entry.archive_names())
                 .map_err(|e| format!("loading ROM set {rp}: {e}"))?;
             if rom_digest(&set) != movie.header.rom_digest {
                 return Err(format!(

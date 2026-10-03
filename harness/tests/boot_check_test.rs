@@ -50,14 +50,14 @@ fn roms() -> Option<PathBuf> {
 fn rom_set(dir: &Path, machine: &str) -> Option<RomSet> {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
     if !entry
-        .rom_names
+        .archive_names()
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
     {
         eprintln!("skipping {machine}: no ROM set in {}", dir.display());
         return None;
     }
-    match load_rom_set(dir.to_str().unwrap(), entry.rom_names) {
+    match load_rom_set(dir.to_str().unwrap(), &entry.archive_names()) {
         Ok(set) => Some(set),
         Err(e) => {
             eprintln!("skipping {machine}: {e}");
@@ -71,10 +71,24 @@ fn rom_set(dir: &Path, machine: &str) -> Option<RomSet> {
 fn boot(dir: &Path, machine: &str) -> Option<Harness> {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
     let set = rom_set(dir, machine)?;
-    let mut built = match (entry.create)(&set) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("skipping {machine}: {e}");
+    let mut last_err = None;
+    let mut built = None;
+    for rev in 0..entry.revisions.len() {
+        match (entry.create)(&set, rev) {
+            Ok(m) => {
+                built = Some(m);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let mut built = match built {
+        Some(m) => m,
+        None => {
+            eprintln!(
+                "skipping {machine}: {}",
+                last_err.expect("an entry always declares a revision")
+            );
             return None;
         }
     };

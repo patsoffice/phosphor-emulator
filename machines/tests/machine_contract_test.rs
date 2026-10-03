@@ -84,13 +84,10 @@ fn cli_names_are_unique_and_resolvable() {
             entry.name
         );
         assert!(
-            !entry.rom_names.is_empty(),
-            "{}: no ROM set names — the frontend has nothing to look up",
+            !entry.revisions.is_empty(),
+            "{}: no ROM revisions: the frontend has nothing to look up",
             entry.name
         );
-        for rom in entry.rom_names {
-            assert!(!rom.is_empty(), "{}: empty ROM set name", entry.name);
-        }
     }
 }
 
@@ -300,6 +297,56 @@ fn bare_machines_tick_and_reset_without_panicking() {
         }
         sys.reset();
         sys.run_frame();
+    }
+}
+
+/// Revision tables are well-formed: every revision names at least its set,
+/// no archive name repeats anywhere on the entry, `find_revision` resolves
+/// each one back, and a blank build for revision `i` reports its set on
+/// multi-revision machines (the empty default on single-revision ones).
+#[test]
+fn revisions_are_well_formed() {
+    for entry in registry::all() {
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, rev) in entry.revisions.iter().enumerate() {
+            assert!(
+                !rev.names.is_empty(),
+                "{} revision {i}: no archive names: the frontend has nothing to look up",
+                entry.name
+            );
+            for name in rev.names {
+                assert!(
+                    !name.is_empty(),
+                    "{} revision {i}: empty archive name",
+                    entry.name
+                );
+                assert!(
+                    !seen.contains(name),
+                    "{}: archive name {name:?} appears twice: `find_revision` could not tell them apart",
+                    entry.name
+                );
+                seen.push(name);
+                assert_eq!(
+                    entry.find_revision(name),
+                    Some(i),
+                    "{}: `find_revision({name:?})` did not round-trip",
+                    entry.name
+                );
+            }
+            let bare = (entry.create_bare_revision)(i);
+            let expected = if entry.revisions.len() > 1 {
+                rev.set()
+            } else {
+                ""
+            };
+            assert_eq!(
+                bare.revision(),
+                expected,
+                "{} revision {i}: a blank build reports {:?}, not its revision",
+                entry.name,
+                bare.revision(),
+            );
+        }
     }
 }
 

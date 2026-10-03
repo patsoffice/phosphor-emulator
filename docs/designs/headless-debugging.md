@@ -95,8 +95,8 @@ Verified code points:
     site with no extra plumbing.
 - `tools/disasm/src/main.rs`
   - `run_frameshot(...)`: the existing headless harness —
-    `registry::find` → `load_rom_set(path, entry.rom_names)` →
-    `(entry.create)(&set)` → `reset()` → optional `load_nvram` → per-frame coin
+    `registry::find` → `load_rom_set(path, &entry.archive_names())` →
+    `(entry.create)(&set, rev)` → `reset()` → optional `load_nvram` → per-frame coin
     scripting → `run_frame()` loop. **The new subcommand reuses this verbatim.**
 
 The load-bearing observation: **the CLI already has every primitive to produce

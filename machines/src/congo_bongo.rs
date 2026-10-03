@@ -1371,7 +1371,8 @@ mod tests {
     #[test]
     fn registered_in_machine_and_disasm_registries() {
         let entry = crate::registry::find("congobongo").expect("machine registered");
-        assert_eq!(entry.rom_names, &["congo", "congobongo"]);
+        assert_eq!(entry.revisions.len(), 1);
+        assert_eq!(entry.revisions[0].names, &["congo", "congobongo"]);
 
         let regions = crate::disasm_registry::regions_for("congobongo");
         assert_eq!(

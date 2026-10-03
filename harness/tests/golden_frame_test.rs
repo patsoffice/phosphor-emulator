@@ -513,7 +513,7 @@ fn capture(dir: &Path, entry: &Entry) -> Option<Capture> {
     let reg = registry::find(name)
         .unwrap_or_else(|| panic!("{name} is pinned in frames.toml but is not registered"));
     if !reg
-        .rom_names
+        .archive_names()
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
     {
@@ -1091,7 +1091,7 @@ fn a_movie_entry_replays_and_is_reproducible() {
     // supply, driving a control hard enough to move the picture.
     let all = registry::all();
     let Some(entry_meta) = all.iter().find(|e| {
-        e.rom_names
+        e.archive_names()
             .iter()
             .any(|n| dir.join(format!("{n}.zip")).exists())
     }) else {
@@ -1102,7 +1102,8 @@ fn a_movie_entry_replays_and_is_reproducible() {
     let roms = dir.to_str().unwrap();
 
     const FRAMES: usize = 400;
-    let set = phosphor_harness::load_rom_set(roms, entry_meta.rom_names).expect("load_rom_set");
+    let set =
+        phosphor_harness::load_rom_set(roms, &entry_meta.archive_names()).expect("load_rom_set");
     let digest = phosphor_harness::movie::rom_digest(&set);
 
     let mut h = Harness::build(name, roms, None, None, &[], &[]).expect("build");

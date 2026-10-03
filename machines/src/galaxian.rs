@@ -1337,7 +1337,8 @@ mod tests {
     fn machine_is_registered() {
         let entry = crate::registry::find("galaxian").expect("galaxian registered");
         assert_eq!(entry.name, "galaxian");
-        assert_eq!(entry.rom_names, &["galaxian"]);
+        assert_eq!(entry.revisions.len(), 1);
+        assert_eq!(entry.revisions[0].names, &["galaxian"]);
     }
 
     #[test]

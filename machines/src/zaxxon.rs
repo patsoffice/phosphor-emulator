@@ -1091,7 +1091,8 @@ mod tests {
     #[test]
     fn registered_in_machine_and_disasm_registries() {
         let entry = crate::registry::find("zaxxon").expect("machine registered");
-        assert_eq!(entry.rom_names, &["zaxxon"]);
+        assert_eq!(entry.revisions.len(), 1);
+        assert_eq!(entry.revisions[0].names, &["zaxxon"]);
 
         let main = crate::disasm_registry::find("zaxxon", "main").unwrap();
         assert_eq!((main.cpu, main.org, main.size), (DisasmCpu::Z80, 0, 0x6000));

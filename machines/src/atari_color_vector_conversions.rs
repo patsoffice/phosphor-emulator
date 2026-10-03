@@ -248,6 +248,8 @@ pub(crate) fn decode(addr: u16) -> Select {
 /// One revision's ROMs: the vector ROM region from CPU $2800 and the program
 /// ROM region, each sized for its PCB's map.
 pub struct ConversionRomConfig {
+    /// MAME set name this config loads (e.g., "gravitar2").
+    pub(crate) set: &'static str,
     pub(crate) vector: &'static RomRegion,
     pub(crate) program: &'static RomRegion,
 }

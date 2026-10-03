@@ -16,7 +16,7 @@ use std::path::Path;
 
 use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
-use phosphor_machines::rom_loader::RomSet;
+use phosphor_machines::rom_loader::{RomLoadError, RomSet};
 
 use crate::load_rom_set;
 use crate::movie::{Movie, MovieError, MoviePlayer, rom_digest};
@@ -24,7 +24,25 @@ use crate::movie::{Movie, MovieError, MoviePlayer, rom_digest};
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
 
-/// Load the first dump in `entry.rom_names` that this machine can actually be
+/// Build `entry` from `set`, trying each revision in declaration order and
+/// keeping the last error. Commit 2 folds this loop into the shared resolver;
+/// until then it keeps the build sites below asking the same question the
+/// same way.
+fn create_first_accepting(
+    entry: &registry::MachineEntry,
+    set: &RomSet,
+) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
+    let mut last_err = None;
+    for rev in 0..entry.revisions.len() {
+        match (entry.create)(set, rev) {
+            Ok(machine) => return Ok(machine),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("an entry always declares a revision"))
+}
+
+/// Load the first dump in `entry.archive_names()` that this machine can actually be
 /// built from, and hand back both the set and the built machine.
 ///
 /// **The machine is the judge, not the filesystem.** `load_rom_set` pointed at a
@@ -49,28 +67,28 @@ fn load_set_the_machine_accepts(
     path: &str,
 ) -> Result<(RomSet, Box<dyn FrontendMachine>), String> {
     // Pointed straight at an archive there is nothing to choose between.
-    let single = path.to_ascii_lowercase().ends_with(".zip") || entry.rom_names.len() < 2;
+    let single = path.to_ascii_lowercase().ends_with(".zip") || entry.archive_names().len() < 2;
     if single {
-        let set = load_rom_set(path, entry.rom_names)
+        let set = load_rom_set(path, &entry.archive_names())
             .map_err(|e| format!("loading ROM set {path}: {e}"))?;
-        let machine =
-            (entry.create)(&set).map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
+        let machine = create_first_accepting(entry, &set)
+            .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
         return Ok((set, machine));
     }
 
     let mut first_error = None;
-    for name in entry.rom_names {
+    for name in entry.archive_names() {
         if !Path::new(path).join(format!("{name}.zip")).exists() {
             continue;
         }
-        let set = match load_rom_set(path, std::slice::from_ref(name)) {
+        let set = match load_rom_set(path, std::slice::from_ref(&name)) {
             Ok(set) => set,
             Err(e) => {
                 first_error.get_or_insert(format!("loading ROM set {name}.zip: {e}"));
                 continue;
             }
         };
-        match (entry.create)(&set) {
+        match create_first_accepting(entry, &set) {
             Ok(machine) => return Ok((set, machine)),
             Err(e) => {
                 first_error.get_or_insert(format!("creating machine '{}': {e}", entry.name));
@@ -83,9 +101,9 @@ fn load_set_the_machine_accepts(
     match first_error {
         Some(e) => Err(e),
         None => {
-            let set = load_rom_set(path, entry.rom_names)
+            let set = load_rom_set(path, &entry.archive_names())
                 .map_err(|e| format!("loading ROM set {path}: {e}"))?;
-            let machine = (entry.create)(&set)
+            let machine = create_first_accepting(entry, &set)
                 .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
             Ok((set, machine))
         }
@@ -278,7 +296,7 @@ impl Harness {
         // golden hash that moved for no visible reason.
         //
         // Report both digests and how this build chose its dump. Pointed at a
-        // directory, more than one of `rom_names` can have an archive there, so
+        // directory, more than one of `archive_names()` can have an archive there, so
         // a collection holding several dumps of a game can legitimately have
         // handed the recording and this replay different ones, and naming the
         // order is what makes that diagnosable. Pointed straight at an archive
@@ -291,7 +309,7 @@ impl Harness {
             } else {
                 format!(
                     " (of {}, the first in {roms_path} this machine accepted was used)",
-                    entry.rom_names.join(", ")
+                    entry.archive_names().join(", ")
                 )
             };
             return Err(format!(

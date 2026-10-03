@@ -46,10 +46,24 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut machine = match (entry.create)(&rom_set) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("create FAILED: {e:?}");
+    let mut last_err = None;
+    let mut machine = None;
+    for rev in 0..entry.revisions.len() {
+        match (entry.create)(&rom_set, rev) {
+            Ok(m) => {
+                machine = Some(m);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let mut machine = match machine {
+        Some(m) => m,
+        None => {
+            eprintln!(
+                "create FAILED: {:?}",
+                last_err.expect("an entry always declares a revision")
+            );
             std::process::exit(1);
         }
     };

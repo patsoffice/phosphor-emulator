@@ -208,13 +208,13 @@ fn movie_retarget_rejects_an_unknown_target_machine() {
 fn record_against_roms(dir: &Path) -> Option<(String, PathBuf)> {
     let all = registry::all();
     let entry = all.iter().find(|e| {
-        e.rom_names
+        e.archive_names()
             .iter()
             .any(|n| dir.join(format!("{n}.zip")).exists())
     })?;
 
     let roms = dir.to_str().unwrap();
-    let set = load_rom_set(roms, entry.rom_names).ok()?;
+    let set = load_rom_set(roms, &entry.archive_names()).ok()?;
     let digest = rom_digest(&set);
 
     let mut h = Harness::build(entry.name, roms, None, None, &[], &[]).ok()?;
@@ -315,7 +315,7 @@ fn replay_refuses_a_movie_recorded_against_other_roms() {
     };
     let all = registry::all();
     let Some(entry) = all.iter().find(|e| {
-        e.rom_names
+        e.archive_names()
             .iter()
             .any(|n| dir.join(format!("{n}.zip")).exists())
     }) else {
@@ -385,7 +385,7 @@ fn frameshot_audio_covers_the_whole_run_not_just_the_tail() {
     };
     let all = registry::all();
     let Some(entry) = all.iter().find(|e| {
-        e.rom_names
+        e.archive_names()
             .iter()
             .any(|n| dir.join(format!("{n}.zip")).exists())
     }) else {

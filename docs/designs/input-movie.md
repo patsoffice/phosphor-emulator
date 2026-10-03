@@ -215,7 +215,7 @@ Four header fields deserve their rationale:
   dump replayed against another must fail loudly rather than desync into a
   plausible-but-wrong frame hash. It hashes the **member files** of the loaded
   set: each name and body length-prefixed, walked in sorted name order because
-  a `RomSet` is a `HashMap`. It does *not* hash the registry's `rom_names`:
+  a `RomSet` is a `HashMap`. It does *not* hash the registry's archive names:
   those name the archive to open, not the dump inside it. Version 1 of this
   format hashed the name list by mistake, which both missed a wrong dump and
   rejected movies that had merely outlived a reordering of the list; version 2

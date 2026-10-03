@@ -94,12 +94,14 @@ static PROGRAM_V1: RomRegion = RomRegion {
 
 /// Space Duel, version 2.
 pub static SPACEDUEL_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "spacduel",
     vector: &VECTOR_ROM,
     program: &PROGRAM_V2,
 };
 
 /// Space Duel, version 1. The vector ROM is common to both.
 pub static SPACEDUEL1_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "spacduel1",
     vector: &VECTOR_ROM,
     program: &PROGRAM_V1,
 };
@@ -133,6 +135,11 @@ pub struct SpaceduelSystem {
     board: AtariColorVectorConversionsBoard,
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
+    /// MAME set name this machine loaded (e.g., "spacduel1"), reported by
+    /// `MachineCore::revision`. Loading a save restores state, never ROMs,
+    /// so this keeps its value across loads.
+    #[save_skip]
+    loaded_revision: &'static str,
 }
 
 impl SpaceduelSystem {
@@ -145,6 +152,7 @@ impl SpaceduelSystem {
             cpu: M6502::new(),
             board,
             audio_buffer: SampleRing::with_capacity(2048),
+            loaded_revision: "",
         }
     }
 
@@ -157,6 +165,10 @@ impl SpaceduelSystem {
         rom_set: &RomSet,
         config: &ConversionRomConfig,
     ) -> Result<(), RomLoadError> {
+        // Recorded before the first ROM read so a blank-set load still
+        // carries the attempted revision. `create` builds a fresh instance
+        // per attempt, so a failed attempt cannot poison a later success.
+        self.loaded_revision = config.set;
         self.board.load_roms(rom_set, config)
     }
 
@@ -430,6 +442,10 @@ crate::impl_board_debug_trace!(SpaceduelSystem, board);
 impl MachineCore for SpaceduelSystem {
     crate::machine_core_metadata!("spaceduel", TIMING, atari_avg::clock_tree);
 
+    fn revision(&self) -> &str {
+        self.loaded_revision
+    }
+
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.board.tick(&mut self.cpu);
@@ -598,12 +614,21 @@ crate::impl_dip_switches!(
 // Registry
 // ---------------------------------------------------------------------------
 
-// One board, two ROM revisions: the registry tries each config in
-// ALL_CONFIGS order and the first whose files the set has wins.
+// One board, two ROM revisions in preference order: each config is built
+// only when its revision is asked for.
 crate::register_machine!(
     SpaceduelSystem,
     "spaceduel",
-    &["spacduel", "spacduel1"],
+    &[
+        crate::registry::Revision {
+            names: &["spacduel"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["spacduel1"],
+            nvram_group: None
+        },
+    ],
     SPACEDUEL_CONTROLS,
     configs = ALL_CONFIGS
 );

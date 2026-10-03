@@ -94,9 +94,9 @@ struct Frame {
 /// graphics, capturing the frame at each picture phase.
 fn run_with_real_graphics(dir: &Path) -> Vec<Frame> {
     let entry = registry::find(MACHINE).unwrap_or_else(|| panic!("{MACHINE} is not registered"));
-    let set = load_rom_set(dir.to_str().unwrap(), entry.rom_names)
+    let set = load_rom_set(dir.to_str().unwrap(), &entry.archive_names())
         .unwrap_or_else(|e| panic!("loading the {MACHINE} ROM set from {}: {e}", dir.display()));
-    let mut m = (entry.create)(&set).unwrap_or_else(|e| panic!("building {MACHINE}: {e}"));
+    let mut m = (entry.create)(&set, 0).unwrap_or_else(|e| panic!("building {MACHINE}: {e}"));
 
     // The cartridge's own program is loaded and then written over, exactly as
     // the Lua script does to MAME's maincpu region. Only the first 8 KB moves;

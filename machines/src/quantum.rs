@@ -77,7 +77,7 @@ use phosphor_core::device::pokey::{Pokey, PokeyLoad};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::atari_dvg::rasterize_vectors;
-use crate::registry::MachineEntry;
+use crate::registry::{MachineEntry, Revision};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -1206,6 +1206,7 @@ impl phosphor_core::core::debug_trace::DebugTrace for QuantumSystem {}
 
 fn create_quantum(
     rom_set: &RomSet,
+    _rev: usize,
 ) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
     let mut sys = QuantumSystem::new();
     sys.load_rom_set(rom_set)?;
@@ -1218,10 +1219,17 @@ fn create_quantum_bare() -> Box<dyn phosphor_core::core::machine::FrontendMachin
     Box::new(sys)
 }
 
-// One registration covers all three ROM sets: the loader tries each ZIP in turn
-// and CRC-matches whichever chips are present (see `QUANTUM_PROGRAM_ROM`).
+fn create_quantum_bare_revision(
+    _rev: usize,
+) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+    create_quantum_bare()
+}
+
+// One revision with two aliases: the entries carry a CRC per dump (see
+// `QUANTUM_PROGRAM_ROM`), so the one loader accepts whichever chips are
+// present.
 inventory::submit! {
-MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantum, create_quantum_bare, QUANTUM_CONTROLS) }
+MachineEntry::new("quantum", &[Revision { names: &["quantum", "quantum1", "quantump"], nvram_group: None }], create_quantum, create_quantum_bare, create_quantum_bare_revision, QUANTUM_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

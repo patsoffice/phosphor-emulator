@@ -599,12 +599,15 @@ macro_rules! rom {
 /// `load_rom_set`. See [`registry::MachineEntry::create_bare`] for why the
 /// ROM-less one exists.
 ///
-/// The four arguments are the wrapper type, the CLI name, the ROM set names to
-/// try for ZIP lookup, and the machine's static control table. The control
-/// table has to be named explicitly — it is a separate const whose name tracks
-/// neither the type nor the CLI name (`CONGO_CONTROLS`, `DKONG_CONTROLS`), and
-/// it cannot be an associated const because `InputConfigurable` is a supertrait
-/// of the `dyn FrontendMachine` the registry stores.
+/// The four arguments are the wrapper type, the CLI name, the ROM identity,
+/// and the machine's static control table. The ROM identity is the set names
+/// to try for ZIP lookup for single-loader machines, or an explicit revision
+/// list (`&[Revision { ... }]`, one per config) when `configs =` is present.
+/// The control table has to be named explicitly: it is a separate const
+/// whose name tracks neither the type nor the CLI name (`CONGO_CONTROLS`,
+/// `DKONG_CONTROLS`), and it cannot be an associated const because
+/// `InputConfigurable` is a supertrait of the `dyn FrontendMachine` the
+/// registry stores.
 ///
 /// # Usage
 /// ```ignore
@@ -615,26 +618,32 @@ macro_rules! rom {
 ///     new = PiscesSystem::new(&PISCES), "pisces", &["pisces"], GALAXIAN_CONTROLS
 /// );
 ///
-/// // Machines whose ROM set varies by revision: each config is tried in turn
-/// // and the first that loads wins.
+/// // Machines whose ROM set varies by revision: one config per revision,
+/// // paired by position, each built only when asked for.
 /// crate::register_machine!(
-///     GalagaSystem, "galaga", &["galaga", "galagao", "galagamw"],
+///     GalagaSystem, "galaga", &[ /* one Revision per config */ ],
 ///     namco_galaga::NAMCO_GALAGA_CONTROLS, configs = ALL_CONFIGS
 /// );
 /// ```
 ///
-/// Machines whose factory does anything else — a constructor argument, a reset
-/// after load, a non-standard loader — keep their hand-written factory and
+/// Machines whose factory does anything else (a reset after load, a
+/// non-standard loader) keep their hand-written factory and
 /// `inventory::submit!`. Per `machines/CLAUDE.md`, macros generate obvious
 /// delegation only; machine-specific behavior stays visible in the machine file.
 macro_rules! register_machine {
     // Constructor takes an argument (hardware variant, ROM config); still just
-    // construct-then-`load_rom_set`.
+    // construct-then-`load_rom_set`, through the one loader every name shares.
     (new = $ctor:expr, $name:expr, $rom_names:expr, $controls:expr) => {
         ::inventory::submit! {
-            $crate::registry::MachineEntry::new($name, $rom_names, {
+            // One loader, so one revision: the first name is the set and the
+            // rest are its aliases.
+            $crate::registry::MachineEntry::new($name, &[ $crate::registry::Revision {
+                names: $rom_names,
+                nvram_group: None,
+            } ], {
                 fn create(
                     rom_set: &$crate::rom_loader::RomSet,
+                    _rev: usize,
                 ) -> Result<
                     Box<dyn phosphor_core::core::machine::FrontendMachine>,
                     $crate::rom_loader::RomLoadError,
@@ -651,6 +660,15 @@ macro_rules! register_machine {
                     Box::new(sys)
                 }
                 create_bare
+            }, {
+                fn create_bare_revision(
+                    _rev: usize,
+                ) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+                    let mut sys = $ctor;
+                    let _ = sys.load_rom_set(&$crate::rom_loader::RomSet::blank());
+                    Box::new(sys)
+                }
+                create_bare_revision
             }, $controls)
         }
     };
@@ -658,9 +676,15 @@ macro_rules! register_machine {
     // Standard: `Type::new()`, then `load_rom_set`.
     ($type:ty, $name:expr, $rom_names:expr, $controls:expr) => {
         ::inventory::submit! {
-            $crate::registry::MachineEntry::new($name, $rom_names, {
+            // One loader, so one revision: the first name is the set and the
+            // rest are its aliases.
+            $crate::registry::MachineEntry::new($name, &[ $crate::registry::Revision {
+                names: $rom_names,
+                nvram_group: None,
+            } ], {
                 fn create(
                     rom_set: &$crate::rom_loader::RomSet,
+                    _rev: usize,
                 ) -> Result<
                     Box<dyn phosphor_core::core::machine::FrontendMachine>,
                     $crate::rom_loader::RomLoadError,
@@ -677,41 +701,56 @@ macro_rules! register_machine {
                     Box::new(sys)
                 }
                 create_bare
+            }, {
+                fn create_bare_revision(
+                    _rev: usize,
+                ) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+                    let mut sys = <$type>::new();
+                    let _ = sys.load_rom_set(&$crate::rom_loader::RomSet::blank());
+                    Box::new(sys)
+                }
+                create_bare_revision
             }, $controls)
         }
     };
 
-    // ROM set varies by revision: try each config, first one that loads wins.
-    ($type:ty, $name:expr, $rom_names:expr, $controls:expr, configs = $configs:expr) => {
+    // ROM set varies by revision: one config per revision, paired by position.
+    // The caller spells the revision list explicitly so each config's set is
+    // visible next to it; the counts must agree or nothing compiles.
+    ($type:ty, $name:expr, $revisions:expr, $controls:expr, configs = $configs:expr) => {
+        const _: () = assert!(($revisions).len() == ($configs).len());
         ::inventory::submit! {
-            $crate::registry::MachineEntry::new($name, $rom_names, {
+            $crate::registry::MachineEntry::new($name, $revisions, {
                 fn create(
                     rom_set: &$crate::rom_loader::RomSet,
+                    rev: usize,
                 ) -> Result<
                     Box<dyn phosphor_core::core::machine::FrontendMachine>,
                     $crate::rom_loader::RomLoadError,
                 > {
-                    let mut last_err = None;
-                    for config in $configs {
-                        let mut sys = <$type>::new();
-                        match sys.load_roms(rom_set, config) {
-                            Ok(()) => return Ok(Box::new(sys)),
-                            Err(e) => last_err = Some(e),
-                        }
-                    }
-                    Err(last_err.unwrap())
+                    let mut sys = <$type>::new();
+                    sys.load_roms(rom_set, $configs[rev])?;
+                    Ok(Box::new(sys))
                 }
                 create
             }, {
                 fn create_bare() -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
                     let mut sys = <$type>::new();
-                    // Any config will do: a blank set has no revision to match.
-                    if let Some(config) = $configs.first() {
-                        let _ = sys.load_roms(&$crate::rom_loader::RomSet::blank(), config);
-                    }
+                    // The default revision: a blank set has no revision to
+                    // match, so the first declared config stands in.
+                    let _ = sys.load_roms(&$crate::rom_loader::RomSet::blank(), $configs[0]);
                     Box::new(sys)
                 }
                 create_bare
+            }, {
+                fn create_bare_revision(
+                    rev: usize,
+                ) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+                    let mut sys = <$type>::new();
+                    let _ = sys.load_roms(&$crate::rom_loader::RomSet::blank(), $configs[rev]);
+                    Box::new(sys)
+                }
+                create_bare_revision
             }, $controls)
         }
     };

@@ -436,6 +436,8 @@ static DIGDUGAT1_SUB_ROM: RomRegion = RomRegion {
 // ---------------------------------------------------------------------------
 
 struct DigDugRomConfig {
+    /// MAME set name this config loads (e.g., "digdug1").
+    set: &'static str,
     main_rom: &'static RomRegion,
     sub_rom: &'static RomRegion,
     sound_rom: &'static RomRegion,
@@ -448,6 +450,7 @@ struct DigDugRomConfig {
 }
 
 static DIGDUG_CONFIG: DigDugRomConfig = DigDugRomConfig {
+    set: "digdug",
     main_rom: &DIGDUG_MAIN_ROM,
     sub_rom: &DIGDUG_SUB_ROM,
     sound_rom: &DIGDUG_SOUND_ROM,
@@ -460,6 +463,7 @@ static DIGDUG_CONFIG: DigDugRomConfig = DigDugRomConfig {
 };
 
 static DIGDUG1_CONFIG: DigDugRomConfig = DigDugRomConfig {
+    set: "digdug1",
     main_rom: &DIGDUG1_MAIN_ROM,
     sub_rom: &DIGDUG1_SUB_ROM,
     sound_rom: &DIGDUG_SOUND_ROM, // shared
@@ -472,6 +476,7 @@ static DIGDUG1_CONFIG: DigDugRomConfig = DigDugRomConfig {
 };
 
 static DIGDUGAT_CONFIG: DigDugRomConfig = DigDugRomConfig {
+    set: "digdugat",
     main_rom: &DIGDUGAT_MAIN_ROM,
     sub_rom: &DIGDUGAT_SUB_ROM,
     sound_rom: &DIGDUGAT_SOUND_ROM,
@@ -484,6 +489,7 @@ static DIGDUGAT_CONFIG: DigDugRomConfig = DigDugRomConfig {
 };
 
 static DIGDUGAT1_CONFIG: DigDugRomConfig = DigDugRomConfig {
+    set: "digdugat1",
     main_rom: &DIGDUGAT1_MAIN_ROM,
     sub_rom: &DIGDUGAT1_SUB_ROM,
     sound_rom: &DIGDUGAT_SOUND_ROM, // shared with digdugat
@@ -555,6 +561,12 @@ pub struct DigDugSystem {
     // Frame buffer (288 × 224 native, indexed — rotated to RGB in render_frame)
     #[save_skip]
     native_buffer: Vec<u8>,
+
+    /// MAME set name this machine loaded (e.g., "digdug1"), reported by
+    /// `MachineCore::revision`. Loading a save restores state, never ROMs,
+    /// so this keeps its value across loads.
+    #[save_skip]
+    loaded_revision: &'static str,
 }
 
 impl DigDugSystem {
@@ -622,6 +634,8 @@ impl DigDugSystem {
             bg_lut: [0; 256],
 
             native_buffer: vec![0u8; 288 * 224],
+
+            loaded_revision: "",
         }
     }
 
@@ -634,6 +648,11 @@ impl DigDugSystem {
         rom_set: &RomSet,
         config: &DigDugRomConfig,
     ) -> Result<(), RomLoadError> {
+        // Recorded before the first ROM read so a blank-set load still
+        // carries the attempted revision. `create` builds a fresh instance
+        // per attempt, so a failed attempt cannot poison a later success.
+        self.loaded_revision = config.set;
+
         // Program ROMs
         self.board.load_main_rom(&config.main_rom.load(rom_set)?);
         self.board.load_sub_rom(&config.sub_rom.load(rom_set)?);
@@ -1385,6 +1404,10 @@ impl MachineDebug for DigDugSystem {
 impl MachineCore for DigDugSystem {
     crate::machine_core_metadata!("digdug", namco_galaga::TIMING, namco_galaga::clock_tree);
 
+    fn revision(&self) -> &str {
+        self.loaded_revision
+    }
+
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
         vec![
@@ -1763,7 +1786,24 @@ const ALL_CONFIGS: &[&DigDugRomConfig] = &[
 crate::register_machine!(
     DigDugSystem,
     "digdug",
-    &["digdug", "digdug1", "digdugat", "digdugat1"],
+    &[
+        crate::registry::Revision {
+            names: &["digdug"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["digdug1"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["digdugat"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["digdugat1"],
+            nvram_group: None
+        },
+    ],
     namco_galaga::NAMCO_GALAGA_CONTROLS,
     configs = ALL_CONFIGS
 );

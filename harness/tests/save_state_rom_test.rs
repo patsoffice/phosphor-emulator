@@ -58,22 +58,29 @@ fn drain_audio(sys: &mut dyn FrontendMachine) {
 /// ROMs (see `boot_check_test.rs` for why every load error is a skip).
 fn booted(dir: &Path, entry: &registry::MachineEntry) -> Option<Box<dyn FrontendMachine>> {
     if !entry
-        .rom_names
+        .archive_names()
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
     {
         return None;
     }
-    let set = load_rom_set(dir.to_str().unwrap(), entry.rom_names).ok()?;
-    let mut machine = match (entry.create)(&set) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("skipping {}: {e}", entry.name);
-            return None;
+    let set = load_rom_set(dir.to_str().unwrap(), &entry.archive_names()).ok()?;
+    let mut last_err = None;
+    for rev in 0..entry.revisions.len() {
+        match (entry.create)(&set, rev) {
+            Ok(mut machine) => {
+                machine.reset();
+                return Some(machine);
+            }
+            Err(e) => last_err = Some(e),
         }
-    };
-    machine.reset();
-    Some(machine)
+    }
+    eprintln!(
+        "skipping {}: {}",
+        entry.name,
+        last_err.expect("an entry always declares a revision")
+    );
+    None
 }
 
 fn restore_and_observe(

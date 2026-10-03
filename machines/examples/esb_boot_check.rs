@@ -56,7 +56,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut machine = match (entry.create)(&rom_set) {
+    let mut machine = match (entry.create)(&rom_set, 0) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("create FAILED: {e:?}");

@@ -743,7 +743,7 @@ fn list_machines() -> String {
         out.push_str(&format!(
             "  {:<12} roms: {}\n",
             e.name,
-            e.rom_names.join(", ")
+            e.archive_names().join(", ")
         ));
     }
     out
@@ -1414,7 +1414,7 @@ fn run_machine(
 
     // The machine registry knows the MAME ZIP names to look for in a rompath dir.
     let rom_names: Vec<&str> = registry::find(machine)
-        .map(|e| e.rom_names.to_vec())
+        .map(|e| e.archive_names())
         .unwrap_or_default();
 
     let set = load_rom_set(path, &rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;
@@ -1480,7 +1480,7 @@ fn run_gfxview(
 
     // The machine registry knows the MAME ZIP names to look for in a rompath dir.
     let rom_names: Vec<&str> = registry::find(machine)
-        .map(|e| e.rom_names.to_vec())
+        .map(|e| e.archive_names())
         .unwrap_or_default();
 
     let set = load_rom_set(path, &rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;

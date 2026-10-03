@@ -536,22 +536,29 @@ fn a_blank_set_digests_to_a_stable_value_of_its_own() {
 
 fn booted(dir: &Path, entry: &registry::MachineEntry) -> Option<Box<dyn FrontendMachine>> {
     if !entry
-        .rom_names
+        .archive_names()
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
     {
         return None;
     }
-    let set = load_rom_set(dir.to_str().unwrap(), entry.rom_names).ok()?;
-    let mut machine = match (entry.create)(&set) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("skipping {}: {e}", entry.name);
-            return None;
+    let set = load_rom_set(dir.to_str().unwrap(), &entry.archive_names()).ok()?;
+    let mut last_err = None;
+    for rev in 0..entry.revisions.len() {
+        match (entry.create)(&set, rev) {
+            Ok(mut machine) => {
+                machine.reset();
+                return Some(machine);
+            }
+            Err(e) => last_err = Some(e),
         }
-    };
-    machine.reset();
-    Some(machine)
+    }
+    eprintln!(
+        "skipping {}: {}",
+        entry.name,
+        last_err.expect("an entry always declares a revision")
+    );
+    None
 }
 
 /// The same property, on machines whose game is really running.
@@ -642,7 +649,7 @@ fn replay_refuses_a_rom_set_the_movie_was_not_recorded_against() {
         return;
     };
 
-    let set = load_rom_set(dir.to_str().unwrap(), entry.rom_names).expect("load_rom_set");
+    let set = load_rom_set(dir.to_str().unwrap(), &entry.archive_names()).expect("load_rom_set");
     let real = rom_digest(&set);
 
     let machine = booted(&dir, entry).expect("just checked");
@@ -790,7 +797,7 @@ fn two_dumps_of_one_game_do_not_digest_alike() {
     let mut checked = 0usize;
     for entry in &all {
         let present: Vec<&str> = entry
-            .rom_names
+            .archive_names()
             .iter()
             .copied()
             .filter(|n| dir.join(format!("{n}.zip")).exists())

@@ -431,7 +431,7 @@ fn create_from_first_rom_set(
     }
 
     let mut last_err = None;
-    for name in entry.rom_names {
+    for name in entry.archive_names() {
         let rom_set = match phosphor_harness::load_rom_set(path, &[name]) {
             Ok(set) => set,
             Err(e) => {
@@ -439,14 +439,16 @@ fn create_from_first_rom_set(
                 continue;
             }
         };
-        match (entry.create)(&rom_set) {
-            // Digest the set the machine was actually built from, so a captured
-            // movie can refuse to replay against a different dump.
-            Ok(machine) => {
-                let digest = phosphor_harness::movie::rom_digest(&rom_set);
-                return (machine, digest);
+        for rev in 0..entry.revisions.len() {
+            match (entry.create)(&rom_set, rev) {
+                // Digest the set the machine was actually built from, so a captured
+                // movie can refuse to replay against a different dump.
+                Ok(machine) => {
+                    let digest = phosphor_harness::movie::rom_digest(&rom_set);
+                    return (machine, digest);
+                }
+                Err(e) => last_err = Some(e),
             }
-            Err(e) => last_err = Some(e),
         }
     }
     let err = last_err.unwrap_or_else(|| {
@@ -459,7 +461,10 @@ fn create_from_first_rom_set(
         "Failed to load ROMs for '{}' from {path}: {err}",
         entry.name
     );
-    eprintln!("  Tried ROM set names: {}", entry.rom_names.join(", "));
+    eprintln!(
+        "  Tried ROM set names: {}",
+        entry.archive_names().join(", ")
+    );
     std::process::exit(1);
 }
 

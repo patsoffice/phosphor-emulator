@@ -62,6 +62,7 @@ static PROGRAM_ROM: RomRegion = RomRegion {
 
 /// Black Widow, the production release.
 pub static BWIDOW_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "bwidow",
     vector: &VECTOR_ROM,
     program: &PROGRAM_ROM,
 };
@@ -506,7 +507,10 @@ crate::impl_dip_switches!(
 crate::register_machine!(
     BlackWidowSystem,
     "blackwidow",
-    &["bwidow"],
+    &[crate::registry::Revision {
+        names: &["bwidow"],
+        nvram_group: None
+    }],
     BWIDOW_CONTROLS,
     configs = ALL_CONFIGS
 );

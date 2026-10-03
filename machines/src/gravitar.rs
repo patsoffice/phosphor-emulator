@@ -133,24 +133,28 @@ static PROGRAM_LUNARBAT: RomRegion = RomRegion {
 
 /// Gravitar, version 3.
 pub static GRAVITAR_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "gravitar",
     vector: &VECTOR_V3,
     program: &PROGRAM_V3,
 };
 
 /// Gravitar, version 2.
 pub static GRAVITAR2_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "gravitar2",
     vector: &VECTOR_V2,
     program: &PROGRAM_V2,
 };
 
 /// Gravitar, version 1.
 pub static GRAVITAR1_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "gravitar1",
     vector: &VECTOR_V1,
     program: &PROGRAM_V1,
 };
 
 /// Lunar Battle, the later prototype.
 pub static LUNARBAT_CONFIG: ConversionRomConfig = ConversionRomConfig {
+    set: "lunarbat",
     vector: &VECTOR_LUNARBAT,
     program: &PROGRAM_LUNARBAT,
 };
@@ -188,6 +192,11 @@ pub struct GravitarSystem {
     board: AtariColorVectorConversionsBoard,
     #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
+    /// MAME set name this machine loaded (e.g., "gravitar2"), reported by
+    /// `MachineCore::revision`. Loading a save restores state, never ROMs,
+    /// so this keeps its value across loads.
+    #[save_skip]
+    loaded_revision: &'static str,
 }
 
 impl GravitarSystem {
@@ -200,6 +209,7 @@ impl GravitarSystem {
             cpu: M6502::new(),
             board,
             audio_buffer: SampleRing::with_capacity(2048),
+            loaded_revision: "",
         }
     }
 
@@ -212,6 +222,10 @@ impl GravitarSystem {
         rom_set: &RomSet,
         config: &ConversionRomConfig,
     ) -> Result<(), RomLoadError> {
+        // Recorded before the first ROM read so a blank-set load still
+        // carries the attempted revision. `create` builds a fresh instance
+        // per attempt, so a failed attempt cannot poison a later success.
+        self.loaded_revision = config.set;
         self.board.load_roms(rom_set, config)
     }
 
@@ -483,6 +497,10 @@ crate::impl_board_debug_trace!(GravitarSystem, board);
 impl MachineCore for GravitarSystem {
     crate::machine_core_metadata!("gravitar", TIMING, atari_avg::clock_tree);
 
+    fn revision(&self) -> &str {
+        self.loaded_revision
+    }
+
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.board.tick(&mut self.cpu);
@@ -615,12 +633,29 @@ crate::impl_dip_switches!(
 // Registry
 // ---------------------------------------------------------------------------
 
-// One board, four ROM revisions: the registry tries each config in
-// ALL_CONFIGS order and the first whose files the set has wins.
+// One board, four ROM revisions in preference order: each config is built
+// only when its revision is asked for.
 crate::register_machine!(
     GravitarSystem,
     "gravitar",
-    &["gravitar", "gravitar2", "gravitar1", "lunarbat"],
+    &[
+        crate::registry::Revision {
+            names: &["gravitar"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["gravitar2"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["gravitar1"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["lunarbat"],
+            nvram_group: None
+        },
+    ],
     GRAVITAR_CONTROLS,
     configs = ALL_CONFIGS
 );

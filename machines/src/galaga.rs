@@ -367,6 +367,8 @@ static GALAGA_SOUND_PROM: RomRegion = RomRegion {
 // ---------------------------------------------------------------------------
 
 struct GalagaRomConfig {
+    /// MAME set name this config loads (e.g., "galagao").
+    set: &'static str,
     main_rom: &'static RomRegion,
     sub_rom: &'static RomRegion,
     sound_rom: &'static RomRegion,
@@ -377,6 +379,7 @@ struct GalagaRomConfig {
 }
 
 static GALAGA_CONFIG: GalagaRomConfig = GalagaRomConfig {
+    set: "galaga",
     main_rom: &GALAGA_MAIN_ROM,
     sub_rom: &GALAGA_SUB_ROM,
     sound_rom: &GALAGA_SOUND_ROM,
@@ -387,6 +390,7 @@ static GALAGA_CONFIG: GalagaRomConfig = GalagaRomConfig {
 };
 
 static GALAGAO_CONFIG: GalagaRomConfig = GalagaRomConfig {
+    set: "galagao",
     main_rom: &GALAGAO_MAIN_ROM,
     sub_rom: &GALAGAO_SUB_ROM,
     sound_rom: &GALAGAO_SOUND_ROM,
@@ -397,6 +401,7 @@ static GALAGAO_CONFIG: GalagaRomConfig = GalagaRomConfig {
 };
 
 static GALAGAMW_CONFIG: GalagaRomConfig = GalagaRomConfig {
+    set: "galagamw",
     main_rom: &GALAGAMW_MAIN_ROM,
     sub_rom: &GALAGAMW_SUB_ROM,
     sound_rom: &GALAGAMW_SOUND_ROM,
@@ -494,6 +499,12 @@ pub struct GalagaSystem {
     // Frame buffer (288 × 224 native, indexed — rotated in render_frame)
     #[save_skip]
     native_buffer: Vec<u8>,
+
+    /// MAME set name this machine loaded (e.g., "galagao"), reported by
+    /// `MachineCore::revision`. Loading a save restores state, never ROMs,
+    /// so this keeps its value across loads.
+    #[save_skip]
+    loaded_revision: &'static str,
 }
 
 impl GalagaSystem {
@@ -555,6 +566,8 @@ impl GalagaSystem {
             sprite_lut: [0; 256],
 
             native_buffer: vec![0u8; 288 * 224],
+
+            loaded_revision: "",
         }
     }
 
@@ -563,6 +576,11 @@ impl GalagaSystem {
         rom_set: &RomSet,
         config: &GalagaRomConfig,
     ) -> Result<(), RomLoadError> {
+        // Recorded before the first ROM read so a blank-set load still
+        // carries the attempted revision. `create` builds a fresh instance
+        // per attempt, so a failed attempt cannot poison a later success.
+        self.loaded_revision = config.set;
+
         // Program ROMs
         self.board.load_main_rom(&config.main_rom.load(rom_set)?);
         self.board.load_sub_rom(&config.sub_rom.load(rom_set)?);
@@ -1357,6 +1375,10 @@ impl MachineDebug for GalagaSystem {
 impl MachineCore for GalagaSystem {
     crate::machine_core_metadata!("galaga", namco_galaga::TIMING, namco_galaga::clock_tree);
 
+    fn revision(&self) -> &str {
+        self.loaded_revision
+    }
+
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
         vec![
@@ -1884,7 +1906,20 @@ const ALL_CONFIGS: &[&GalagaRomConfig] = &[&GALAGA_CONFIG, &GALAGAO_CONFIG, &GAL
 crate::register_machine!(
     GalagaSystem,
     "galaga",
-    &["galaga", "galagao", "galagamw"],
+    &[
+        crate::registry::Revision {
+            names: &["galaga"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["galagao"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["galagamw"],
+            nvram_group: None
+        },
+    ],
     namco_galaga::NAMCO_GALAGA_CONTROLS,
     configs = ALL_CONFIGS
 );

@@ -66,7 +66,7 @@ use phosphor_core::device::x2212::X2212;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::atari_dvg::rasterize_vectors;
-use crate::registry::MachineEntry;
+use crate::registry::{MachineEntry, Revision};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -2691,14 +2691,17 @@ crate::impl_board_debug_trace!(StarWarsSystem, board);
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
+fn create_machine(rom_set: &RomSet, _rev: usize) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
     let mut sys = StarWarsSystem::new();
     sys.board.load_rom_set(rom_set)?;
     sys.reset();
     Ok(Box::new(sys))
 }
 
-fn create_esb_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
+fn create_esb_machine(
+    rom_set: &RomSet,
+    _rev: usize,
+) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
     let mut sys = StarWarsSystem::new_esb();
     sys.board.load_esb_rom_set(rom_set)?;
     sys.reset();
@@ -2722,11 +2725,24 @@ fn create_esb_bare() -> Box<dyn FrontendMachine> {
     Box::new(sys)
 }
 
+fn create_bare_revision(_rev: usize) -> Box<dyn FrontendMachine> {
+    create_bare()
+}
+
+fn create_esb_bare_revision(_rev: usize) -> Box<dyn FrontendMachine> {
+    create_esb_bare()
+}
+
+// One revision, no aliases: the regions above name the starwars.zip members
+// with single CRCs, and the split starwars1/starwarso clones cannot satisfy
+// them without parent merging, which the loader does not do
+// (phosphor-emulator-gqq3 tracks supporting them, likely as own revisions).
+// List them if that ever lands.
 inventory::submit! {
-MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine, create_bare, STARWARS_CONTROLS) }
+MachineEntry::new("starwars", &[Revision { names: &["starwars"], nvram_group: None }], create_machine, create_bare, create_bare_revision, STARWARS_CONTROLS) }
 
 inventory::submit! {
-MachineEntry::new("esb", &["esb"], create_esb_machine, create_esb_bare, STARWARS_CONTROLS) }
+MachineEntry::new("esb", &[Revision { names: &["esb"], nvram_group: None }], create_esb_machine, create_esb_bare, create_esb_bare_revision, STARWARS_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

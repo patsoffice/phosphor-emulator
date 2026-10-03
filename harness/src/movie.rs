@@ -48,7 +48,7 @@
 //! when `digest` and friends are already linked.
 //!
 //! `rom_digest` covers the loaded set's member files, names and contents. It
-//! deliberately does *not* cover the registry's `rom_names`: those name the
+//! deliberately does *not* cover the registry's archive names: those name the
 //! archive to look in, not the dump inside it, and hashing them was the bug
 //! [`rom_digest`] documents.
 
