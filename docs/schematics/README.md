@@ -246,6 +246,6 @@ section is there so that is obvious.
 - [`bwidow-gravitar-board.md`](bwidow-gravitar-board.md), the board Black Widow
   and Gravitar share: memory map and decode PROM, an IRQ counter that restarts
   on every acknowledge, a 128-count watchdog, a RAM bank select and picture
-  inverts on the output latch whose polarity two of three sheets get wrong, and both games' audio chains, which
+  inverts on the output latch that draw upright when their labels say inverted, and both games' audio chains, which
   differ in four part values. Also where the drawings disagree with each other,
   settled by dumping the decode PROM.

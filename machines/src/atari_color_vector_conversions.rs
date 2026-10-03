@@ -39,7 +39,7 @@
 //! - **Watchdog** from H4, an LS393 pair on the same clock: 128 periods
 //!   without a write to `8980` resets the board.
 //! - **The output latch** R9 carries the coin counters, the start lamps, a RAM
-//!   bank select and two active-low picture inverts, and clears on reset.
+//!   bank select and two picture inverts, and clears on reset.
 //!
 //! Memory map:
 //!

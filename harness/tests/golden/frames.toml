@@ -43,7 +43,7 @@ vectors = "sha256:82b4622802b5ab08da6259ad936f1d207f0f7d4337750b52a6740d1827ccae
 [[frame]]
 machine = "blackwidow"
 frames = 1800
-shows = "Attract mode: INSERT COINS in red and SHOOT GRENADE BUGS WITH CAUTION in white across the top, the blue web with the green spider beside the hub, white and green bugs drifting out of it, a cyan ring around a blue 500 at upper left, and CREDITS 0 in green over the blue copyright line at the bottom. The right way up because the latch's invert bits are read active low: the program writes both set in an upright cabinet, and read the other way the whole picture turns 180 degrees."
+shows = "Attract mode: INSERT COINS in red and SHOOT GRENADE BUGS WITH CAUTION in white across the top, the blue web with the green spider beside the hub, white and green bugs drifting out of it, a cyan ring around a blue 500 at upper left, and CREDITS 0 in green over the blue copyright line at the bottom. The right way up because the model inverts an axis while its latch bit is clear: the program writes both set in an upright cabinet, and modeled as the labels read (1 = invert) the whole picture turns 180 degrees."
 size = [727, 666]
 frame = "sha256:3deef5794a139e4558fd277c5c49b3dffcf863914e450ffc7da0a016a24eac93"
 vectors = "sha256:3b30ee7bb4193af3aeef5f61d5226dcb17e32c93b2d27e58f74371df0ead1b66"
@@ -162,7 +162,7 @@ frame = "sha256:52e015d7a16770f4acaca1ef9463dc548f7758a4d68b4b0895dff98fb92843d6
 [[frame]]
 machine = "gravitar"
 frames = 1800
-shows = "Attract demo: SCORE and FUEL at the top, GAME OVER, INSERT COIN and 1 COIN 1 PLAY in cyan, and below them the demo ship tractoring fuel, its green beam over a blue fuel tank in a green valley, with TRACTOR FUEL and SHOOT BUNKERS captions and a red bunker on the right-hand slope. Upright for the same reason as Black Widow's: the latch's invert bits are read active low."
+shows = "Attract demo: SCORE and FUEL at the top, GAME OVER, INSERT COIN and 1 COIN 1 PLAY in cyan, and below them the demo ship tractoring fuel, its green beam over a blue fuel tank in a green valley, with TRACTOR FUEL and SHOOT BUNKERS captions and a red bunker on the right-hand slope. Upright for the same reason as Black Widow's: the program writes both invert bits set, and the model inverts an axis only while its bit is clear."
 size = [727, 692]
 frame = "sha256:659e607af699d38f5baffee145f742f653d16392343423b85e998a6ea5b0084f"
 vectors = "sha256:8c651157116872a7c61836c4840feb7d7c2ac73f1aaf5f4695e924510676d1c3"

@@ -149,8 +149,8 @@ R9, an LS273 clocked by `LATCH` at `8800` and **cleared by `/RESET`**:
 
 | bit | Q pin | signal | goes to |
 |---|---|---|---|
-| D7 | 15 | `/INVERT Y` | E10, the Y-axis output's inverting switch |
-| D6 | 12 | `/INVERT X` | B10 through K9, the X-axis output's inverting switch |
+| D7 | 15 | `INVERT Y` | E10, the Y-axis output's inverting switch |
+| D6 | 12 | `INVERT X` | B10 through K9, the X-axis output's inverting switch |
 | D5 | 16 | `/PLAYER 2 LED` | R102 220 ohm to J20 J |
 | D4 | 19 | `/PLAYER 1 LED` | R103 220 ohm to J20 7 |
 | D3 | 9 | `COIN LOCKOUT` | Q2 |
@@ -158,17 +158,18 @@ R9, an LS273 clocked by `LATCH` at `8800` and **cleared by `/RESET`**:
 | D1 | 6 | `COIN CNTR-L` | Q4 |
 | D0 | 5 | `COIN CNTR-R` | Q3 |
 
-- **`/INVERT X` and `/INVERT Y` are active low, whatever two of the three
-  sheets say.** Sheet 3A draws a bar over both names. Gravitar's 11A does not,
-  and sheet 4A says "When high, INVERT X closes switch B10 through inverter K9
-  in the X-axis Output circuit. This inverts the X-axis vector instruction to
-  the display", and the same for Y with E10. The program decides it: in an
-  upright cabinet (`CABINET 1` open) Black Widow writes `38` to the latch at
-  reset and `C8` and `F8` from its second frame on, both invert bits set
-  throughout attract, and read as active high that is a picture rotated 180
-  degrees. Read with the bars it is upright. Space Duel's latch uses the same
-  polarity. The latch clears on reset, so the picture is inverted until the
-  program's first write, 65 cycles in.
+- **The program draws upright with both invert bits set, whatever the labels
+  say.** Sheet 4A says "When high, INVERT X closes switch B10 through inverter
+  K9 in the X-axis Output circuit. This inverts the X-axis vector instruction
+  to the display", and the same for Y with E10; Gravitar's 11A and Space Duel's
+  CAT-box map (`1 = Invert`) agree. Only Black Widow's sheet 3A draws bars over
+  the names. But in an upright cabinet (`CABINET 1` open) Black Widow writes
+  `38` to the latch at reset and `C8` and `F8` from its second frame on, both
+  bits set throughout attract, and Space Duel's program does the same; modeled
+  as the labels read, the picture turns 180 degrees. So somewhere between the
+  latch and the yoke the sense flips, in a stage that was not traced, and the
+  model inverts an axis while its bit is clear. The latch clears on reset, so
+  the picture is inverted until the program's first write, 65 cycles in.
 - **`BANK SEL` swaps the two 1K halves of program RAM.** Sheet 6B: N/P1's A10
   pin is B6's output, the exclusive-OR of A10 and BANK SEL. Cleared on reset.
 
@@ -254,10 +255,12 @@ amplifies.
   are at `6000`.** The PROM was dumped from the Gravitar set; Black Widow's
   sheet 6A draws the same part number at R2, and its contents were not checked
   against a Black Widow board.
-- **The bar over `INVERT X` and `INVERT Y`** on 3A, against 11A and the 4A
-  descriptions. Two sheets to one for active high, but the program's own latch
-  writes say active low, as above. The LF13201 switch polarities at B10 and
-  E10 were not traced, which would settle it from the drawing alone.
+- **The bar over `INVERT X` and `INVERT Y`** on 3A, against 11A, the 4A
+  descriptions and Space Duel's map. The labels are not the question, though:
+  every one of them may describe the switch at B10 correctly while the output
+  stage or the monitor's yoke wiring inverts again. The LF13201 switch
+  polarities at B10 and E10 and everything after them were not traced, and
+  would settle it from the drawing alone.
 - **Sheet 4B's watchdog address**, as above.
 
 ## Where the reference driver differs
