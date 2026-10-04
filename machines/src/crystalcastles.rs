@@ -1502,7 +1502,8 @@ crate::register_machine!(
     CrystalCastlesSystem,
     "crystalcastles",
     &["ccastles"],
-    CCASTLES_CONTROLS
+    CCASTLES_CONTROLS,
+    former_names = &["ccastles"]
 );
 
 #[cfg(test)]

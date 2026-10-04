@@ -629,6 +629,11 @@ macro_rules! rom {
 /// );
 /// ```
 ///
+/// Every arm accepts a trailing `, former_names = &["old", ...]`: registry
+/// names the machine answered to in earlier releases, recorded on
+/// [`registry::MachineEntry::former_names`] so persisted files filed under
+/// them are adopted. Omitted names default to none.
+///
 /// Machines whose factory does anything else (a reset after load, a
 /// non-standard loader) keep their hand-written factory and
 /// `inventory::submit!`. Per `machines/CLAUDE.md`, macros generate obvious
@@ -636,7 +641,7 @@ macro_rules! rom {
 macro_rules! register_machine {
     // Constructor takes an argument (hardware variant, ROM config); still just
     // construct-then-`load_rom_set`, through the one loader every name shares.
-    (new = $ctor:expr, $name:expr, $rom_names:expr, $controls:expr) => {
+    (new = $ctor:expr, $name:expr, $rom_names:expr, $controls:expr $(, former_names = $former:expr)?) => {
         ::inventory::submit! {
             // One loader, so one revision: the first name is the set and the
             // rest are its aliases.
@@ -672,12 +677,12 @@ macro_rules! register_machine {
                     Box::new(sys)
                 }
                 create_bare_revision
-            }, $controls)
+            }, $controls) $(.with_former_names($former))?
         }
     };
 
     // Standard: `Type::new()`, then `load_rom_set`.
-    ($type:ty, $name:expr, $rom_names:expr, $controls:expr) => {
+    ($type:ty, $name:expr, $rom_names:expr, $controls:expr $(, former_names = $former:expr)?) => {
         ::inventory::submit! {
             // One loader, so one revision: the first name is the set and the
             // rest are its aliases.
@@ -713,14 +718,14 @@ macro_rules! register_machine {
                     Box::new(sys)
                 }
                 create_bare_revision
-            }, $controls)
+            }, $controls) $(.with_former_names($former))?
         }
     };
 
     // ROM set varies by revision: one config per revision, paired by position.
     // The caller spells the revision list explicitly so each config's set is
     // visible next to it; the counts must agree or nothing compiles.
-    ($type:ty, $name:expr, $revisions:expr, $controls:expr, configs = $configs:expr) => {
+    ($type:ty, $name:expr, $revisions:expr, $controls:expr, configs = $configs:expr $(, former_names = $former:expr)?) => {
         const _: () = assert!(($revisions).len() == ($configs).len());
         ::inventory::submit! {
             $crate::registry::MachineEntry::new($name, $revisions, {
@@ -754,7 +759,7 @@ macro_rules! register_machine {
                     Box::new(sys)
                 }
                 create_bare_revision
-            }, $controls)
+            }, $controls) $(.with_former_names($former))?
         }
     };
 }

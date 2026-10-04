@@ -903,7 +903,13 @@ crate::impl_board_debug_trace!(DkongSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-crate::register_machine!(DkongSystem, "donkeykong", &["dkong"], DKONG_CONTROLS);
+crate::register_machine!(
+    DkongSystem,
+    "donkeykong",
+    &["dkong"],
+    DKONG_CONTROLS,
+    former_names = &["dkong"]
+);
 
 // ---------------------------------------------------------------------------
 // Tests

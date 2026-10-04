@@ -1688,7 +1688,13 @@ crate::impl_map_debug_trace!(FoodFightSystem, board.map);
 // Registry
 // ---------------------------------------------------------------------------
 
-crate::register_machine!(FoodFightSystem, "foodfight", &["foodf"], FOODF_CONTROLS);
+crate::register_machine!(
+    FoodFightSystem,
+    "foodfight",
+    &["foodf"],
+    FOODF_CONTROLS,
+    former_names = &["foodf"]
+);
 
 #[cfg(test)]
 mod tests {

@@ -1644,13 +1644,15 @@ crate::register_machine!(
         },
     ],
     MHAVOC_CONTROLS,
-    configs = &[&MHAVOC, &MHAVOC2, &MHAVOCP]
+    configs = &[&MHAVOC, &MHAVOC2, &MHAVOCP],
+    former_names = &["mhavoc", "mhavoc2", "mhavocp"]
 );
 crate::register_machine!(
     new = MhavocSystem::with_config(&MHAVOCRV),
     "majorhavocreturntovax",
     &["mhavocrv"],
-    MHAVOC_CONTROLS
+    MHAVOC_CONTROLS,
+    former_names = &["mhavocrv"]
 );
 
 fn gamma_map() -> AddressSpace16 {

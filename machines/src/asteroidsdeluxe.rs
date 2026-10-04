@@ -1150,7 +1150,8 @@ crate::register_machine!(
     AsteroidsDeluxeSystem,
     "asteroidsdeluxe",
     &["astdelux"],
-    ASTDELUX_CONTROLS
+    ASTDELUX_CONTROLS,
+    former_names = &["astdelux"]
 );
 
 #[cfg(test)]

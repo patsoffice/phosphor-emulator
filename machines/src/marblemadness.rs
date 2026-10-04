@@ -811,7 +811,13 @@ impl phosphor_core::core::machine::DipSwitches for MarbleSystem {}
 // Registry + disassembly
 // ---------------------------------------------------------------------------
 
-crate::register_machine!(MarbleSystem, "marblemadness", &["marble"], MARBLE_CONTROLS);
+crate::register_machine!(
+    MarbleSystem,
+    "marblemadness",
+    &["marble"],
+    MARBLE_CONTROLS,
+    former_names = &["marble"]
+);
 
 // Disassemblable code regions for the standalone `disasm` tool.
 // `main`  — the MC68010 program image (000000-07FFFF, de-interleaved).

@@ -721,7 +721,8 @@ crate::register_machine!(
     AsteroidsSystem,
     "asteroids",
     &["asteroid"],
-    ASTEROIDS_CONTROLS
+    ASTEROIDS_CONTROLS,
+    former_names = &["asteroid"]
 );
 
 #[cfg(test)]

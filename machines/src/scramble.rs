@@ -1475,7 +1475,13 @@ crate::impl_dip_switches!(
 
 crate::impl_board_debug_trace!(ScobraSystem, board);
 
-crate::register_machine!(ScobraSystem, "supercobra", &["scobra"], SCRAMBLE_CONTROLS);
+crate::register_machine!(
+    ScobraSystem,
+    "supercobra",
+    &["scobra"],
+    SCRAMBLE_CONTROLS,
+    former_names = &["scobra"]
+);
 
 #[cfg(test)]
 mod tests {

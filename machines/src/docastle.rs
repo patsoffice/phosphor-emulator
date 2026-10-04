@@ -2230,7 +2230,8 @@ crate::register_machine!(
     new = DocastleSystem::new(DocastleVariant::Docastle),
     "mrdoscastle",
     &["docastle"],
-    DOCASTLE_CONTROLS
+    DOCASTLE_CONTROLS,
+    former_names = &["docastle"]
 );
 crate::register_machine!(
     new = DocastleSystem::new(DocastleVariant::Dorunrun),
@@ -2242,7 +2243,8 @@ crate::register_machine!(
     new = DocastleSystem::new(DocastleVariant::Dowild),
     "mrdoswildride",
     &["dowild"],
-    DOCASTLE_CONTROLS
+    DOCASTLE_CONTROLS,
+    former_names = &["dowild"]
 );
 
 inventory::submit! {

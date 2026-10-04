@@ -78,6 +78,12 @@ pub struct MachineEntry {
     /// Held here so the control table can be validated without constructing
     /// anything at all.
     pub controls: &'static [InputControl],
+    /// Registry names this machine answered to in earlier releases, in
+    /// adoption order: the default revision's predecessor first. NVRAM
+    /// files, saves and settings entries still filed under one of these are
+    /// adopted on first boot; empty for machines that never moved. Dead
+    /// names only: nothing resolves them to a machine.
+    pub former_names: &'static [&'static str],
 }
 
 impl MachineEntry {
@@ -100,7 +106,16 @@ impl MachineEntry {
             create_bare,
             create_bare_revision,
             controls,
+            former_names: &[],
         }
+    }
+
+    /// Record the registry names this machine answered to in earlier
+    /// releases (see [`former_names`](Self::former_names)). Const so
+    /// `register_machine!` can apply it inside `inventory::submit!`.
+    pub const fn with_former_names(mut self, names: &'static [&'static str]) -> Self {
+        self.former_names = names;
+        self
     }
 
     /// The default revision: the first declared.

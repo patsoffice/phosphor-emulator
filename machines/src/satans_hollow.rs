@@ -603,7 +603,8 @@ crate::register_machine!(
     SatansHollowSystem,
     "satanshollow",
     &["shollow"],
-    SHOLLOW_CONTROLS
+    SHOLLOW_CONTROLS,
+    former_names = &["shollow"]
 );
 
 // ---------------------------------------------------------------------------

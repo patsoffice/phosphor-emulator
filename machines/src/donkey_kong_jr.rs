@@ -746,5 +746,6 @@ crate::register_machine!(
     DkongJrSystem,
     "donkeykongjunior",
     &["dkongjr", "dkongjr2"],
-    crate::donkey_kong::DKONG_CONTROLS
+    crate::donkey_kong::DKONG_CONTROLS,
+    former_names = &["dkongjr"]
 );

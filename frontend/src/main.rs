@@ -324,6 +324,18 @@ fn main() {
 
     // Load battery-backed NVRAM from disk (if available)
     let nvram_path = nvram_path_for(&config, per_game.nvram_path.as_deref(), nvram_group);
+    // A renamed machine adopts the NVRAM filed under a former name, except
+    // names still live as NVRAM stems: the prototype's file stays its own.
+    let live_stems: Vec<&str> = entry
+        .revisions
+        .iter()
+        .map(|r| r.nvram_group.unwrap_or(entry.name))
+        .collect();
+    if let Some((_, old)) = former_file_to_adopt(&nvram_path, entry.former_names, &live_stems)
+        && std::fs::copy(&old, &nvram_path).is_ok()
+    {
+        log::info!("adopted NVRAM from {}", old.display());
+    }
     if let Ok(data) = std::fs::read(&nvram_path) {
         machine.load_nvram(&data);
     }
@@ -357,6 +369,29 @@ fn main() {
     let fullscreen = cli.fullscreen || per_game.fullscreen.or(config.fullscreen).unwrap_or(false);
 
     let save_path = save_path_for(&config, per_game.save_path.as_deref(), &machine_name);
+    // A renamed machine adopts the save filed under a former name,
+    // retargeting its machine id; a file that will not retarget (foreign,
+    // corrupt) is left behind with a warning, never copied as-is.
+    if let Some((old_stem, old)) = former_file_to_adopt(&save_path, entry.former_names, &[]) {
+        match std::fs::read(&old).ok().and_then(|bytes| {
+            phosphor_core::core::save_state::retarget_save_machine_id(
+                &bytes,
+                old_stem,
+                &machine_name,
+            )
+            .ok()
+        }) {
+            Some(retargeted) => {
+                if std::fs::write(&save_path, retargeted).is_ok() {
+                    log::info!("adopted save from {}", old.display());
+                }
+            }
+            None => log::warn!(
+                "ignoring {}: not a loadable save from '{old_stem}'",
+                old.display()
+            ),
+        }
+    }
     let screenshot_dir = screenshot_dir();
 
     // Build input bindings from machine defaults, then overlay any persisted
@@ -523,6 +558,33 @@ fn save_path_for(
     dir.join(format!("{machine_name}.sav"))
 }
 
+/// Sibling file to adopt for `new_path`: the first present `{old}.{ext}`
+/// for a former name that is not a live stem, when `new_path` itself is
+/// missing. Returns the former stem and its path. One-shot by construction:
+/// once the caller copies the file over, the new path exists and this finds
+/// nothing.
+fn former_file_to_adopt<'a>(
+    new_path: &std::path::Path,
+    former_names: &[&'a str],
+    live_stems: &[&str],
+) -> Option<(&'a str, std::path::PathBuf)> {
+    if new_path.exists() || former_names.is_empty() {
+        return None;
+    }
+    let dir = new_path.parent()?;
+    let ext = new_path.extension()?;
+    for old in former_names {
+        if live_stems.contains(old) {
+            continue;
+        }
+        let candidate = dir.join(format!("{old}.{}", ext.to_string_lossy()));
+        if candidate.exists() {
+            return Some((*old, candidate));
+        }
+    }
+    None
+}
+
 /// Resolve the NVRAM path: per-game override > global config > default for
 /// the directory, and the booted revision's NVRAM group (usually the machine)
 /// for the file.
@@ -557,4 +619,66 @@ fn movie_dir() -> std::path::PathBuf {
 fn auto_scale(pres_w: u32, pres_h: u32) -> u32 {
     let longest = pres_w.max(pres_h);
     (1200 / longest).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn scratch() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "phosphor-adopt-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn adoption_picks_the_first_present_former_file() {
+        let dir = scratch();
+        std::fs::write(dir.join("mhavoc2.nvram"), [2]).unwrap();
+        std::fs::write(dir.join("mhavoc.nvram"), [1]).unwrap();
+
+        let found = former_file_to_adopt(
+            &dir.join("majorhavoc.nvram"),
+            &["mhavoc", "mhavoc2", "mhavocp"],
+            &["majorhavoc", "mhavocp"],
+        );
+        assert_eq!(
+            found,
+            Some(("mhavoc", dir.join("mhavoc.nvram"))),
+            "adoption order wins over directory order"
+        );
+
+        // The new file existing, a live stem, and an empty past each veto.
+        std::fs::write(dir.join("majorhavoc.nvram"), [0]).unwrap();
+        assert!(
+            former_file_to_adopt(&dir.join("majorhavoc.nvram"), &["mhavoc"], &[]).is_none(),
+            "an existing new file is never overwritten"
+        );
+        std::fs::remove_file(dir.join("majorhavoc.nvram")).unwrap();
+        std::fs::remove_file(dir.join("mhavoc.nvram")).unwrap();
+        std::fs::remove_file(dir.join("mhavoc2.nvram")).unwrap();
+        std::fs::write(dir.join("mhavocp.nvram"), [3]).unwrap();
+        assert!(
+            former_file_to_adopt(
+                &dir.join("majorhavoc.nvram"),
+                &["mhavoc", "mhavoc2", "mhavocp"],
+                &["majorhavoc", "mhavocp"],
+            )
+            .is_none(),
+            "a name still live as an NVRAM stem is not adopted from"
+        );
+        assert!(
+            former_file_to_adopt(&dir.join("majorhavoc.nvram"), &[], &[]).is_none(),
+            "machines that never moved find nothing"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

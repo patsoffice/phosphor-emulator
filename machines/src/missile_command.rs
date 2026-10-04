@@ -1451,7 +1451,8 @@ crate::register_machine!(
     MissileCommandSystem,
     "missilecommand",
     &["missile"],
-    MISSILE_CONTROLS
+    MISSILE_CONTROLS,
+    former_names = &["missile"]
 );
 
 #[cfg(test)]

@@ -787,7 +787,8 @@ crate::register_machine!(
     LunarLanderSystem,
     "lunarlander",
     &["llander"],
-    LLANDER_CONTROLS
+    LLANDER_CONTROLS,
+    former_names = &["llander"]
 );
 
 #[cfg(test)]

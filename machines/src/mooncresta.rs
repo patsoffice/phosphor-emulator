@@ -419,7 +419,8 @@ crate::register_machine!(
     MoonCrestaSystem,
     "mooncresta",
     &["mooncrst"],
-    GALAXIAN_CONTROLS
+    GALAXIAN_CONTROLS,
+    former_names = &["mooncrst"]
 );
 
 // ---------------------------------------------------------------------------

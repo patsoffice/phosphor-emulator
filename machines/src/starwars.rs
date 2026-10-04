@@ -2742,7 +2742,7 @@ inventory::submit! {
 MachineEntry::new("starwars", &[Revision { names: &["starwars"], nvram_group: None }], create_machine, create_bare, create_bare_revision, STARWARS_CONTROLS) }
 
 inventory::submit! {
-MachineEntry::new("empirestrikesback", &[Revision { names: &["esb"], nvram_group: None }], create_esb_machine, create_esb_bare, create_esb_bare_revision, STARWARS_CONTROLS) }
+MachineEntry::new("empirestrikesback", &[Revision { names: &["esb"], nvram_group: None }], create_esb_machine, create_esb_bare, create_esb_bare_revision, STARWARS_CONTROLS).with_former_names(&["esb"]) }
 
 // ---------------------------------------------------------------------------
 // Tests

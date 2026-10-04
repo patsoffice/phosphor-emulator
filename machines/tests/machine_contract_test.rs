@@ -368,3 +368,34 @@ fn every_machine_supports_save_state() {
         );
     }
 }
+
+/// Former names are dead: no live machine answers to one, and no two
+/// machines claim the same one. Adoption moves NVRAM, saves and settings
+/// filed under these names, so a collision would hand one machine's files
+/// to another.
+#[test]
+fn former_names_are_dead_and_unclaimed() {
+    let live: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for entry in registry::all() {
+        for old in entry.former_names {
+            assert!(
+                !live.contains(old),
+                "'{old}' is still a live machine name; '{}' cannot claim it as former",
+                entry.name
+            );
+            if let Some((_, other)) = seen.iter().find(|(name, _)| *name == *old) {
+                panic!(
+                    "'{old}' is claimed as a former name by both '{other}' and '{}'",
+                    entry.name
+                );
+            }
+            seen.push((old, entry.name));
+        }
+    }
+    assert!(
+        !seen.is_empty(),
+        "the renames are historical fact: an empty claim list means the \
+         registration wiring dropped them"
+    );
+}

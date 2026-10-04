@@ -202,10 +202,10 @@ impl State {
     /// maps into the unified `machines` map, then clear them so they are not
     /// re-serialized.
     ///
-    /// Legacy entries are keyed by the old `machine_id`. A migrated entry
-    /// whose key matches no current CLI name (a machine renamed since) is
-    /// simply never matched again — an acceptable reset for an
-    /// auto-generated file.
+    /// Legacy entries are keyed by the old `machine_id`. One filed under a
+    /// former name rides the adoption below to the current one; a migrated
+    /// entry whose key matches nothing at all is simply never matched
+    /// again, an acceptable reset for an auto-generated file.
     /// **A legacy entry never overwrites one already in `machines`.** It fills a
     /// gap or it is dropped.
     ///
@@ -237,6 +237,24 @@ impl State {
             let entry = self.machines.entry(id).or_default();
             if entry.dip_switches.is_empty() {
                 entry.dip_switches = dips;
+            }
+        }
+        // Renamed machines adopt the settings entry filed under a former
+        // name, the first present one in adoption order. Like the legacy
+        // folds above this only fills a gap: an entry already under the new
+        // name wins, and the stale former key is dropped either way, since
+        // nothing writes it anymore.
+        for entry in phosphor_machines::registry::all() {
+            if !self.machines.contains_key(entry.name) {
+                for old in entry.former_names {
+                    if let Some(settings) = self.machines.remove(*old) {
+                        self.machines.insert(entry.name.to_string(), settings);
+                        break;
+                    }
+                }
+            }
+            for old in entry.former_names {
+                self.machines.remove(*old);
             }
         }
     }
@@ -379,6 +397,79 @@ mod tests {
         assert!(out.contains("[machines.joust]"));
         assert!(!out.contains("[input_bindings]"));
         assert!(!out.contains("[dip_switches]"));
+    }
+
+    /// A settings entry filed under a former machine name moves to the
+    /// current one on load; an entry already under the new name wins, and
+    /// the stale former key is dropped either way.
+    #[test]
+    fn migrates_entries_filed_under_former_names() {
+        let mut state = State::default();
+        state.machines.insert(
+            "dkong".to_string(),
+            MachineSettings {
+                dip_switches: vec![3],
+                ..MachineSettings::default()
+            },
+        );
+        state.machines.insert(
+            "missile".to_string(),
+            MachineSettings {
+                dip_switches: vec![1],
+                ..MachineSettings::default()
+            },
+        );
+        state.machines.insert(
+            "missilecommand".to_string(),
+            MachineSettings {
+                dip_switches: vec![2],
+                ..MachineSettings::default()
+            },
+        );
+        state.migrate();
+
+        let adopted = state.machine("donkeykong").expect("adopted entry");
+        assert_eq!(adopted.dip_switches, vec![3]);
+        assert!(
+            state.machine("dkong").is_none(),
+            "the former key does not survive the move"
+        );
+        assert_eq!(
+            state.machine("missilecommand").unwrap().dip_switches,
+            vec![2],
+            "an entry under the new name wins over the former one"
+        );
+        assert!(state.machine("missile").is_none());
+    }
+
+    /// Folded machines adopt the first present former entry in adoption
+    /// order: the default revision's predecessor wins over later ones.
+    #[test]
+    fn migration_prefers_the_default_predecessors_entry() {
+        let mut state = State::default();
+        state.machines.insert(
+            "mhavoc2".to_string(),
+            MachineSettings {
+                dip_switches: vec![2],
+                ..MachineSettings::default()
+            },
+        );
+        state.machines.insert(
+            "mhavoc".to_string(),
+            MachineSettings {
+                dip_switches: vec![3],
+                ..MachineSettings::default()
+            },
+        );
+        state.migrate();
+
+        assert_eq!(
+            state.machine("majorhavoc").unwrap().dip_switches,
+            vec![3],
+            "mhavoc precedes mhavoc2 in adoption order"
+        );
+        assert!(state.machine("mhavoc").is_none());
+        assert!(state.machine("mhavoc2").is_none());
     }
 
     /// A file carrying both shapes keeps the current one. The legacy maps fill

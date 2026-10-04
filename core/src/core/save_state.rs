@@ -846,6 +846,59 @@ pub fn read_header<'a>(
     Ok(r)
 }
 
+/// Retarget a save file's machine id from `from` to `to`, preserving its
+/// envelope version, revision tag and body. Renamed machines adopt saves
+/// recorded under their former names this way; anything else (a file from
+/// another machine, an unsupported version) is refused unchanged.
+pub fn retarget_save_machine_id(data: &[u8], from: &str, to: &str) -> Result<Vec<u8>, SaveError> {
+    let mut r = StateReader::new(data);
+
+    let magic = r.take(4)?;
+    if magic != SAVE_MAGIC {
+        return Err(SaveError::InvalidFormat("bad magic".into()));
+    }
+
+    let version = r.read_u32_le()?;
+    if version > SAVE_VERSION {
+        return Err(SaveError::InvalidFormat(format!(
+            "save version {version} is newer than this build understands (max {SAVE_VERSION})"
+        )));
+    }
+    if version < MIN_SUPPORTED_SAVE_VERSION {
+        return Err(SaveError::InvalidFormat(format!(
+            "save version {version} predates chunk framing (minimum {MIN_SUPPORTED_SAVE_VERSION})"
+        )));
+    }
+
+    let id_len = r.read_u32_le()? as usize;
+    let found_id = std::str::from_utf8(r.take(id_len)?)
+        .map_err(|_| SaveError::InvalidFormat("non-UTF8 machine id".into()))?;
+    if found_id != from {
+        return Err(SaveError::MachineMismatch {
+            expected: from.to_string(),
+            found: found_id.to_string(),
+        });
+    }
+
+    // The revision tag arrived with envelope 14; validate it the way
+    // `read_header` does, then copy tag and body through unchanged.
+    let tag_start = data.len() - r.remaining();
+    if version >= 14 {
+        let rev_len = r.read_u32_le()? as usize;
+        let rev_bytes = r.take(rev_len)?;
+        std::str::from_utf8(rev_bytes)
+            .map_err(|_| SaveError::InvalidFormat("non-UTF8 revision".into()))?;
+    }
+
+    let mut out = Vec::with_capacity(data.len() + to.len());
+    out.extend_from_slice(SAVE_MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&(to.len() as u32).to_le_bytes());
+    out.extend_from_slice(to.as_bytes());
+    out.extend_from_slice(&data[tag_start..]);
+    Ok(out)
+}
+
 /// Serialize a `Saveable` struct with the standard machine header and a
 /// trailing CRC-32 over everything before it, magic included.
 pub fn save_machine(saveable: &impl Saveable, machine_id: &str, revision: &str) -> Vec<u8> {
@@ -1049,6 +1102,71 @@ mod tests {
             err.to_string().contains("--rom-set 'joust1'"),
             "the message should say which set boots this save: {err}"
         );
+    }
+
+    #[test]
+    fn retarget_save_machine_id_rewrites_the_header_only() {
+        let mut w = StateWriter::new();
+        write_header(&mut w, "dkong", "dkong");
+        w.write_u32_le(0x1234_5678);
+        let data = w.into_vec();
+
+        let out = retarget_save_machine_id(&data, "dkong", "donkeykong").unwrap();
+        let mut r = read_header(&out, "donkeykong", "dkong").unwrap();
+        assert_eq!(
+            r.read_u32_le().unwrap(),
+            0x1234_5678,
+            "revision tag and body survive the retarget"
+        );
+        assert!(
+            matches!(
+                read_header(&out, "dkong", "dkong").unwrap_err(),
+                SaveError::MachineMismatch { .. }
+            ),
+            "the old id no longer matches"
+        );
+    }
+
+    #[test]
+    fn retarget_save_machine_id_handles_untagged_v13() {
+        let mut data = Vec::new();
+        data.extend_from_slice(SAVE_MAGIC);
+        data.extend_from_slice(&13u32.to_le_bytes());
+        data.extend_from_slice(&5u32.to_le_bytes());
+        data.extend_from_slice(b"dkong");
+        data.extend_from_slice(&[9, 9, 9]);
+
+        let out = retarget_save_machine_id(&data, "dkong", "donkeykong").unwrap();
+        let r = read_header(&out, "donkeykong", "").unwrap();
+        assert_eq!(r.remaining(), 3, "the v13 body survives the retarget");
+    }
+
+    #[test]
+    fn retarget_save_machine_id_refuses_foreign_files() {
+        let mut w = StateWriter::new();
+        write_header(&mut w, "joust", "");
+        let data = w.into_vec();
+        assert!(
+            matches!(
+                retarget_save_machine_id(&data, "dkong", "donkeykong").unwrap_err(),
+                SaveError::MachineMismatch { .. }
+            ),
+            "a save from another machine is not adopted"
+        );
+
+        let mut bad_magic = data.clone();
+        bad_magic[0] = b'X';
+        assert!(matches!(
+            retarget_save_machine_id(&bad_magic, "joust", "joust").unwrap_err(),
+            SaveError::InvalidFormat(_)
+        ));
+
+        let mut too_new = data.clone();
+        too_new[4..8].copy_from_slice(&(SAVE_VERSION + 1).to_le_bytes());
+        assert!(matches!(
+            retarget_save_machine_id(&too_new, "joust", "joust").unwrap_err(),
+            SaveError::InvalidFormat(_)
+        ));
     }
 
     #[test]
