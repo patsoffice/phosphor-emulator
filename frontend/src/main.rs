@@ -379,6 +379,14 @@ fn main() {
         for (bank, &byte) in dips.iter().enumerate() {
             machine.set_dip_bank_value(bank, byte);
         }
+    } else if has_dip && per_game.dips_cover_other_sets_only(booted_set, default_set) {
+        // Saved DIP settings exist, but for other revisions: say so, or the
+        // power-on defaults this boot keeps look like lost settings.
+        log::warn!(
+            "'{}' has no saved DIP settings for '{}'; using power-on defaults",
+            entry.name,
+            booted_set
+        );
     }
 
     // Display knobs resolve the way the paths above do: the measured figures

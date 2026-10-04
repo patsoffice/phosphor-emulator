@@ -96,7 +96,8 @@ impl std::fmt::Display for SaveError {
             SaveError::RevisionMismatch { expected, found } => {
                 write!(
                     f,
-                    "revision mismatch: machine booted '{expected}', save is from '{found}'"
+                    "revision mismatch: machine booted '{expected}', save is from '{found}'; \
+                     boot with --rom-set '{found}' to load this save"
                 )
             }
             SaveError::Component { path, source } => write!(f, "{path}: {source}"),
@@ -1043,6 +1044,10 @@ mod tests {
         assert!(
             err.to_string().contains("joust1") && err.to_string().contains("joust2"),
             "the message should name both revisions: {err}"
+        );
+        assert!(
+            err.to_string().contains("--rom-set 'joust1'"),
+            "the message should say which set boots this save: {err}"
         );
     }
 

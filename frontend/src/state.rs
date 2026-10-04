@@ -79,6 +79,14 @@ impl MachineSettings {
         }
     }
 
+    /// True when saved DIP bytes exist but none for the booted `set`: the
+    /// settings cover other revisions only, so this boot silently falls back
+    /// to the machine's power-on defaults unless something says so.
+    pub fn dips_cover_other_sets_only(&self, set: &str, default_set: &str) -> bool {
+        self.dips_for(set, default_set).is_empty()
+            && (!self.dip_switches.is_empty() || !self.dip_switches_by_set.is_empty())
+    }
+
     /// Store `dips` for the booted `set`, diff-only: an empty `dips` (the
     /// machine's power-on defaults) clears the slot instead of recording it.
     pub fn set_dips_for(&mut self, set: &str, default_set: &str, dips: Vec<u8>) {
@@ -496,6 +504,35 @@ mod tests {
         assert!(
             settings.dips_for("spacdual", "spaceduel").is_empty(),
             "an unrecorded set boots at power-on defaults"
+        );
+    }
+
+    /// The fallback notice fires exactly when saved DIP bytes exist but none
+    /// for the booted set: a boot the settings cover, and a machine with no
+    /// saved DIPs at all, both stay quiet.
+    #[test]
+    fn dip_fallback_notice_covers_other_sets_only() {
+        let mut settings = MachineSettings {
+            dip_switches: vec![3],
+            ..MachineSettings::default()
+        };
+        settings.set_dips_for("spacduel1", "spacduel", vec![7, 7]);
+
+        assert!(
+            !settings.dips_cover_other_sets_only("spacduel", "spacduel"),
+            "the default revision's own settings apply silently"
+        );
+        assert!(
+            !settings.dips_cover_other_sets_only("spacduel1", "spacduel"),
+            "a recorded revision's own settings apply silently"
+        );
+        assert!(
+            settings.dips_cover_other_sets_only("spacdual", "spacduel"),
+            "an unrecorded set falls back despite saved settings elsewhere"
+        );
+        assert!(
+            !MachineSettings::default().dips_cover_other_sets_only("spacdual", "spacduel"),
+            "no saved settings anywhere means nothing to notice"
         );
     }
 
