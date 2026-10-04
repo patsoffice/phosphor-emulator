@@ -33,6 +33,8 @@ fn unknown_machine(name: &str) -> String {
 struct Header {
     version: u32,
     machine_id: String,
+    /// The revision tag, present from envelope 14 on.
+    revision: Option<String>,
     /// Byte offset of the first chunk.
     body_start: usize,
 }
@@ -59,10 +61,28 @@ fn parse_header(data: &[u8]) -> Result<Header, String> {
     }
     let machine_id = String::from_utf8(data[12..end].to_vec())
         .map_err(|_| "machine id is not UTF-8".to_string())?;
+    // The revision tag arrived with envelope 14; older files end at the id.
+    let (revision, body_start) = if version >= 14 {
+        if end + 4 > data.len() {
+            return Err("file ends inside the revision length".to_string());
+        }
+        let rev_len =
+            u32::from_le_bytes([data[end], data[end + 1], data[end + 2], data[end + 3]]) as usize;
+        let rev_end = end + 4 + rev_len;
+        if rev_end > data.len() {
+            return Err(format!("revision length {rev_len} runs past the file"));
+        }
+        let revision = String::from_utf8(data[end + 4..rev_end].to_vec())
+            .map_err(|_| "revision is not UTF-8".to_string())?;
+        (Some(revision), rev_end)
+    } else {
+        (None, end)
+    };
     Ok(Header {
         version,
         machine_id,
-        body_start: end,
+        revision,
+        body_start,
     })
 }
 
@@ -98,6 +118,9 @@ pub fn run(
         header.version, MIN_SUPPORTED_SAVE_VERSION, SAVE_VERSION
     );
     let _ = writeln!(out, "  machine id    {}", header.machine_id);
+    if let Some(rev) = &header.revision {
+        let _ = writeln!(out, "  rom set       {rev}");
+    }
 
     // Checksum, reported rather than enforced: a corrupt file is exactly the
     // one worth walking as far as it goes.
@@ -127,7 +150,16 @@ pub fn run(
 
     // A bare machine: real devices, zero-filled ROM. Nothing here runs the
     // game, and the layout of the state does not depend on ROM contents.
-    let mut machine = (entry.create_bare)();
+    // Built for the file's own revision, since layouts can differ per
+    // revision; an unknown tag falls back to the default and the load
+    // below reports the mismatch rather than indexing blindly.
+    let mut machine = match &header.revision {
+        Some(rev) => match entry.find_revision(rev) {
+            Some(i) => (entry.create_bare_revision)(i),
+            None => (entry.create_bare)(),
+        },
+        None => (entry.create_bare)(),
+    };
     let trace = RefCell::new(ChunkTrace::new());
     let result = machine.load_state_traced(&data, &trace);
     let trace = trace.borrow();
@@ -208,16 +240,48 @@ mod tests {
 
     #[test]
     fn the_header_reads_back_what_save_machine_wrote() {
+        use phosphor_core::core::save_state::save_machine;
+        let sys = phosphor_machines::joust::JoustSystem::new();
+        let data = save_machine(&sys, "majorhavoc", "mhavoc");
+
+        let h = parse_header(&data).unwrap();
+        assert_eq!(h.version, SAVE_VERSION);
+        assert_eq!(h.machine_id, "majorhavoc");
+        assert_eq!(h.revision.as_deref(), Some("mhavoc"));
+        assert_eq!(h.body_start, 12 + "majorhavoc".len() + 4 + "mhavoc".len());
+    }
+
+    #[test]
+    fn a_non_default_revision_reads_back_with_its_own_tag() {
+        use phosphor_core::core::save_state::save_machine;
+        let sys = phosphor_machines::joust::JoustSystem::new();
+        let data = save_machine(&sys, "majorhavoc", "mhavocp");
+
+        let h = parse_header(&data).unwrap();
+        assert_eq!(h.revision.as_deref(), Some("mhavocp"));
+        assert_eq!(h.body_start, 12 + "majorhavoc".len() + 4 + "mhavocp".len());
+    }
+
+    #[test]
+    fn a_v13_header_has_no_revision() {
         let mut data = Vec::new();
         data.extend_from_slice(SAVE_MAGIC);
-        data.extend_from_slice(&SAVE_VERSION.to_le_bytes());
+        data.extend_from_slice(&13u32.to_le_bytes());
         data.extend_from_slice(&5u32.to_le_bytes());
         data.extend_from_slice(b"joust");
         data.extend_from_slice(&[0; 8]);
 
         let h = parse_header(&data).unwrap();
-        assert_eq!(h.version, SAVE_VERSION);
+        assert_eq!(h.version, 13);
         assert_eq!(h.machine_id, "joust");
+        assert_eq!(h.revision, None);
         assert_eq!(h.body_start, 17);
+    }
+
+    #[test]
+    fn a_bare_multi_revision_dump_names_its_rom_set() {
+        let out = run(None, Some("majorhavoc"), None).unwrap();
+        assert!(out.contains("rom set"), "{out}");
+        assert!(out.contains("mhavoc"), "{out}");
     }
 }
