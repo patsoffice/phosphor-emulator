@@ -138,7 +138,7 @@ pub(crate) enum ConversionRegion {
     ProgramRom = 5,
 }
 
-/// The two PCBs in the class decode the same parts at different addresses.
+/// The PCBs in the class decode the same parts at different addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Decode {
     /// SP-181: LS42s and an LS139. 1K of RAM, the I/O page at $0800, the
@@ -149,6 +149,12 @@ pub(crate) enum Decode {
     /// the POKEYs at $6000 and $6800, the input buffers at $7800-$8FFF, 14K
     /// of vector ROM and 24K of program ROM from $9000.
     GravitarBlackWidow,
+    /// The Lunar Battle earlier prototype: Space Duel's I/O, RAM and vector
+    /// ROM with six program pages from $4000 instead of five. No schematic
+    /// is available, so the program size and the $9000 page's reload through
+    /// $A000-$FFFF are from the reference driver's map, which marks the game
+    /// working; everything else is SP-181 as in [`Decode::SpaceDuel`].
+    LunarBa1,
 }
 
 fn build_map(decode: Decode) -> AddressSpace16 {
@@ -156,6 +162,7 @@ fn build_map(decode: Decode) -> AddressSpace16 {
     let (ram, io, io_len, vrom, prom, prom_len) = match decode {
         Decode::SpaceDuel => (0x0400, 0x0800, 0x1000, 0x1800, 0x4000, 0x5000),
         Decode::GravitarBlackWidow => (0x0800, 0x6000, 0x3000, 0x3800, 0x9000, 0x6000),
+        Decode::LunarBa1 => (0x0400, 0x0800, 0x1000, 0x1800, 0x4000, 0x6000),
     };
     let mut map = AddressSpace16::new();
     map.region(
@@ -192,6 +199,13 @@ fn build_map(decode: Decode) -> AddressSpace16 {
         Decode::SpaceDuel => {
             for page in 0..7u16 {
                 map.mirror(0x9000 + page * 0x1000, 0x8000, 0x1000);
+            }
+        }
+        // The sixth page sits at $9000 where Space Duel reloads $8000, and
+        // repeats through $A000-$FFFF for the reset vectors.
+        Decode::LunarBa1 => {
+            for page in 0..6u16 {
+                map.mirror(0xA000 + page * 0x1000, 0x9000, 0x1000);
             }
         }
         // R1 selects ROM 5 for both $E000 and $F000, so the reset vectors
@@ -474,7 +488,7 @@ impl AtariColorVectorConversionsBoard {
     fn ram_address(&self, addr: u16) -> u16 {
         match self.decode {
             Decode::GravitarBlackWidow => addr ^ (u16::from(self.latch & 0x04 != 0) << 10),
-            Decode::SpaceDuel => addr,
+            Decode::SpaceDuel | Decode::LunarBa1 => addr,
         }
     }
 
@@ -828,7 +842,7 @@ impl Bus for AtariColorVectorConversionsBoard {
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let data = match self.decode {
             Decode::GravitarBlackWidow => self.read_gravitar_black_widow(addr),
-            Decode::SpaceDuel => self.read_space_duel(addr),
+            Decode::SpaceDuel | Decode::LunarBa1 => self.read_space_duel(addr),
         };
         self.map.watch_read(0, master, addr, data);
         data
@@ -838,7 +852,7 @@ impl Bus for AtariColorVectorConversionsBoard {
         self.map.watch_write(0, master, addr, data);
         match self.decode {
             Decode::GravitarBlackWidow => self.write_gravitar_black_widow(addr, data),
-            Decode::SpaceDuel => self.write_space_duel(addr, data),
+            Decode::SpaceDuel | Decode::LunarBa1 => self.write_space_duel(addr, data),
         }
     }
 

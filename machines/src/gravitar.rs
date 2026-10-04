@@ -19,7 +19,7 @@
 //!
 //! Lunar Battle's later prototype (`lunarbat`) runs on this board without the
 //! R7 vector ROM. Its earlier prototype (`lunarba1`) runs on Space Duel's
-//! memory map and is not carried here (`phosphor-emulator-quwu.6`).
+//! memory map and is carried as its own machine.
 
 use crate::atari_avg;
 use crate::atari_color_vector_conversions::{

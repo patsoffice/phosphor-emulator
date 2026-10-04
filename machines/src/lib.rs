@@ -801,6 +801,7 @@ pub mod gridlee;
 pub(crate) mod input_defaults;
 pub mod irobot;
 pub mod joust;
+pub mod lunarba1;
 pub mod lunarlander;
 pub mod lunarlander_sound;
 pub mod majorhavoc;

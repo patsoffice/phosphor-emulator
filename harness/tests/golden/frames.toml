@@ -24,6 +24,10 @@
 machine = "donkeykongjunior"
 reason = "The machine's ROM table names a revision (djr1-c_5b_f-2.5b) that neither the dkongjr nor the dkongjr2 ZIP in the reference collection supplies, so it cannot be booted here to capture a frame. Pin it once a matching dump is available."
 
+[[unpinned]]
+machine = "lunarba1"
+reason = "The lunarba1 ROM set is not in the reference collection, so the machine cannot be booted here to capture a frame. Pin it once a matching dump is available."
+
 [[frame]]
 machine = "asteroidsdeluxe"
 frames = 1800

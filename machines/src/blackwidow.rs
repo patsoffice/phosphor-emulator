@@ -16,7 +16,8 @@
 //!   hardware and no drawing gives it.
 //!
 //! The prototype `bwidowp` runs on a different memory map and is not carried
-//! here (`phosphor-emulator-quwu.6`).
+//! here: the reference driver marks it not working, so there is no trusted
+//! map to model it from (`phosphor-emulator-quwu.6`).
 
 use crate::atari_avg;
 use crate::atari_color_vector_conversions::{

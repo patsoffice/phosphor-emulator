@@ -1432,6 +1432,17 @@ NOT ESTABLISHED: the parts list; everything past J19 pins 11/12, so mono is
 an assumption; and any comparison against hardware or the reference."""
 
 [[target]]
+id = "lunarba1-output"
+machines = ["lunarba1"]
+status = "unexamined"
+notes = """
+The earlier Lunar Battle prototype plays through the shared board's mix_audio
+in machines/src/atari_color_vector_conversions.rs with Space Duel's SP-181
+part values, but no schematic is available for the prototype board, so the
+values are assumed from the production game and nothing here is reviewed.
+See machines/src/lunarba1.rs (phosphor-emulator-quwu.6)."""
+
+[[target]]
 id = "majorhavoc-output"
 machines = ["majorhavoc", "majorhavocreturntovax"]
 status = "partial"
