@@ -292,6 +292,8 @@ fn main() {
     let mut machine = resolved.machine;
     let rom_digest = resolved.source.digest;
     let nvram_group = resolved.source.nvram_group();
+    let booted_set = resolved.source.set();
+    let default_set = entry.default_revision().set();
 
     // GFX viewer: display the machine's decoded charset/sprite sheets.
     if cli.gfxview {
@@ -360,14 +362,15 @@ fn main() {
     }
 
     // Snapshot the machine's power-on DIP bytes, then overlay any persisted
-    // per-machine overrides. Applied before reset() so that OnReset options
-    // latch when the machine powers on.
+    // overrides for the booted revision. Applied before reset() so that
+    // OnReset options latch when the machine powers on.
     let has_dip = !machine.dip_banks().is_empty();
     let dip_defaults: Vec<u8> = (0..machine.dip_banks().len())
         .map(|i| machine.dip_bank_value(i))
         .collect();
-    if has_dip && !per_game.dip_switches.is_empty() {
-        for (bank, &byte) in per_game.dip_switches.iter().enumerate() {
+    let dips = per_game.dips_for(booted_set, default_set);
+    if has_dip && !dips.is_empty() {
+        for (bank, &byte) in dips.iter().enumerate() {
             machine.set_dip_bank_value(bank, byte);
         }
     }
@@ -449,17 +452,19 @@ fn main() {
         };
     }
 
-    // Persist DIP bytes, dropping them when they match the machine's power-on
-    // defaults (keeps state.toml free of redundant entries).
+    // Persist DIP bytes against the booted revision, dropping them when they
+    // match the machine's power-on defaults (keeps state.toml free of
+    // redundant entries).
     if has_dip {
         let current: Vec<u8> = (0..machine.dip_banks().len())
             .map(|i| machine.dip_bank_value(i))
             .collect();
-        settings.dip_switches = if current == dip_defaults {
+        let dips = if current == dip_defaults {
             Vec::new()
         } else {
             current
         };
+        settings.set_dips_for(booted_set, default_set, dips);
     }
 
     // Persist the display knobs against what they were resolved from, so a game

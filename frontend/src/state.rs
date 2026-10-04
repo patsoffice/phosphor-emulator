@@ -44,10 +44,18 @@ pub struct MachineSettings {
     /// Per-game save-state directory override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_path: Option<String>,
-    /// Live DIP byte per bank, in `dip_banks()` order. Empty means "use the
-    /// machine's power-on defaults".
+    /// Live DIP byte per bank, in `dip_banks()` order, for the machine's
+    /// default revision. Empty means "use the machine's power-on defaults".
+    /// Revisions other than the default keep their own bytes in
+    /// `dip_switches_by_set`, since banks and their meanings can differ per
+    /// revision. Files written before per-revision DIPs hold only this slot,
+    /// which is exactly the default revision's, so they load unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dip_switches: Vec<u8>,
+    /// Per-revision DIP bytes for non-default revisions, keyed by ROM set
+    /// name. The default revision keeps using `dip_switches`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub dip_switches_by_set: HashMap<String, Vec<u8>>,
     /// Overridden input bindings. Empty means "use the machine defaults".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_bindings: Vec<SerializedBinding>,
@@ -57,6 +65,33 @@ pub struct MachineSettings {
 }
 
 impl MachineSettings {
+    /// Persisted DIP bytes for the booted `set`: the shared slot when `set`
+    /// is the machine's default revision, otherwise the per-set entry. Empty
+    /// means "use the machine's power-on defaults".
+    pub fn dips_for(&self, set: &str, default_set: &str) -> &[u8] {
+        if set == default_set {
+            &self.dip_switches
+        } else {
+            self.dip_switches_by_set
+                .get(set)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+    }
+
+    /// Store `dips` for the booted `set`, diff-only: an empty `dips` (the
+    /// machine's power-on defaults) clears the slot instead of recording it.
+    pub fn set_dips_for(&mut self, set: &str, default_set: &str, dips: Vec<u8>) {
+        if set == default_set {
+            self.dip_switches = dips;
+            self.dip_switches_by_set.remove(set);
+        } else if dips.is_empty() {
+            self.dip_switches_by_set.remove(set);
+        } else {
+            self.dip_switches_by_set.insert(set.to_string(), dips);
+        }
+    }
+
     /// True when no field carries a non-default value. Such entries are dropped
     /// from [`State::machines`] so unchanged games leave no trace in state.toml.
     pub fn is_empty(&self) -> bool {
@@ -66,6 +101,7 @@ impl MachineSettings {
             && self.nvram_path.is_none()
             && self.save_path.is_none()
             && self.dip_switches.is_empty()
+            && self.dip_switches_by_set.is_empty()
             && self.input_bindings.is_empty()
             && self.display.is_empty()
     }
@@ -442,6 +478,86 @@ mod tests {
         // Clearing the diff removes the entry again.
         state.set_machine("joust", MachineSettings::default());
         assert!(state.machine("joust").is_none());
+    }
+
+    /// Each revision reads its own DIP bytes: the default revision reads the
+    /// shared slot, other revisions read their per-set entry, and a set with
+    /// no entry reads power-on defaults.
+    #[test]
+    fn dips_scope_to_the_booted_revision() {
+        let mut settings = MachineSettings {
+            dip_switches: vec![3],
+            ..MachineSettings::default()
+        };
+        settings.set_dips_for("spacduel1", "spaceduel", vec![7, 7]);
+
+        assert_eq!(settings.dips_for("spaceduel", "spaceduel"), &[3]);
+        assert_eq!(settings.dips_for("spacduel1", "spaceduel"), &[7, 7]);
+        assert!(
+            settings.dips_for("spacdual", "spaceduel").is_empty(),
+            "an unrecorded set boots at power-on defaults"
+        );
+    }
+
+    /// Clearing a revision's DIPs back to the power-on defaults drops the
+    /// entry, and recording the default revision drops any stray per-set key
+    /// a hand edit may have left for it.
+    #[test]
+    fn set_dips_for_clears_back_to_defaults() {
+        let mut settings = MachineSettings::default();
+        settings.set_dips_for("spacduel1", "spaceduel", vec![7]);
+        assert!(settings.dip_switches_by_set.contains_key("spacduel1"));
+
+        settings.set_dips_for("spacduel1", "spaceduel", Vec::new());
+        assert!(
+            settings.dip_switches_by_set.is_empty(),
+            "defaults leave no per-set entry behind"
+        );
+        assert!(
+            settings.is_empty(),
+            "a fully cleared entry carries nothing at all"
+        );
+
+        settings
+            .dip_switches_by_set
+            .insert("spaceduel".into(), vec![9]);
+        settings.set_dips_for("spaceduel", "spaceduel", vec![3]);
+        assert_eq!(settings.dip_switches, vec![3]);
+        assert!(
+            !settings.dip_switches_by_set.contains_key("spaceduel"),
+            "the default revision reads one slot only"
+        );
+    }
+
+    /// Per-set DIPs round trip through TOML, and the map stays out of the
+    /// file while empty.
+    #[test]
+    fn per_set_dips_round_trip_and_stay_diff_only() {
+        let mut state = State::default();
+        let mut settings = MachineSettings::default();
+        settings.set_dips_for("spacduel1", "spaceduel", vec![7, 7]);
+        state.set_machine("spaceduel", settings);
+
+        let out = toml::to_string_pretty(&state).unwrap();
+        assert!(out.contains("dip_switches_by_set"));
+        let reloaded: State = toml::from_str(&out).unwrap();
+        let dips = reloaded.machine("spaceduel").unwrap();
+        assert_eq!(dips.dips_for("spacduel1", "spaceduel"), &[7, 7]);
+        assert!(dips.dips_for("spaceduel", "spaceduel").is_empty());
+
+        let mut plain = State::default();
+        plain.set_machine(
+            "spaceduel",
+            MachineSettings {
+                scale: Some(3),
+                ..MachineSettings::default()
+            },
+        );
+        let out = toml::to_string_pretty(&plain).unwrap();
+        assert!(
+            !out.contains("dip_switches"),
+            "no per-set map while nothing is recorded"
+        );
     }
 
     /// Diff-only fields are omitted from the serialized form.
