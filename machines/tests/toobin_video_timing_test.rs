@@ -1047,7 +1047,7 @@ fn the_sweep_actually_drove_all_four_priority_values() {
 // and `/1V`, so one is filled while the other is displayed and what the beam
 // shows on a line was scanned during the line before it. What it does not settle
 // is whether the vertical match constant on sheet 7 already absorbs that, and
-// `machines/CLAUDE.md` warns that adding the delay twice moves every object
+// `machines/AGENTS.md` warns that adding the delay twice moves every object
 // pixel the wrong way.
 //
 // **So the probe is a latency, not a position.** "Is this object on the right

@@ -7,7 +7,7 @@
 // real horizontal porch and sync split behind `in_hblank`, which assumes the 512
 // visible dots of a 640-dot line come first. Both would be read off SP-320
 // sheets 14 and 5. Before reading a sheet, find out whether the program can tell:
-// a behavior the game never exercises is not worth a model, and machines/CLAUDE.md
+// a behavior the game never exercises is not worth a model, and machines/AGENTS.md
 // warns that a video constant added on a guess moves every pixel the wrong way.
 //
 // Same shape as the object-priority survey in that issue, which closed half the

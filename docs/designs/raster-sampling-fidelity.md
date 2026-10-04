@@ -43,7 +43,7 @@ Both are genuine active-display writes. On hardware those frames show the rows
 above the write with the old value and the rows below with the new one; we
 render them uniformly. They were classified B because the effect does not repeat
 and is not a deliberate raster trick. That is an argument from "nobody will
-notice", and `CLAUDE.md` ranks **Correctness first and Performance last**.
+notice", and `AGENTS.md` ranks **Correctness first and Performance last**.
 
 ## The principle
 
@@ -956,7 +956,7 @@ per-scanline rendering plus this costs about nothing.
 That cancellation is not attribution. It is consistent with the per-pixel map
 fetch being the dominant cost, which is what the 92,160-against-12,288 count
 predicted, but a profile is still what would prove it and still has not been
-run. The rule went into `machines/CLAUDE.md`: a row pass iterates the units that
+run. The rule went into `machines/AGENTS.md`: a row pass iterates the units that
 vary along the row, and must not precompute a per-frame index of live state,
 because that is a latch and it reintroduces what per-scanline rendering exists
 to remove.
@@ -1390,7 +1390,7 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
 * **Perf:** W1 and W2 need no measurement. W4 changes tile-info lookups from
   per-tile to per-tile-per-scanline (8× for 8-pixel-tall tiles — on a 36×28
   tilemap, 1008 → 8064 lookups per frame). Expected negligible; confirm with
-  `phosphor-bench` in release, per `CLAUDE.md`.
+  `phosphor-bench` in release, per `AGENTS.md`.
 
 ## Risks
 

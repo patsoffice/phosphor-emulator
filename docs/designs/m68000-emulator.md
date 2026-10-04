@@ -111,7 +111,7 @@ pub enum SrFlag {
 ```
 
   Per-CPU `set_flag`/`flag_is_set` wrappers delegate to `cpu::flags::set_flag`
-  (`core/CLAUDE.md` convention). Add `interrupt_mask()`/`set_interrupt_mask()`. **X flag** is
+  (`core/AGENTS.md` convention). Add `interrupt_mask()`/`set_interrupt_mask()`. **X flag** is
   the subtle one: arithmetic sets X = C; logical/MOVE leave X untouched; ADDX/SUBX/ROXL
   consume it. Document X in every instruction doc comment.
 - `M68000State` in `core/src/cpu/state.rs` (D0-7, A0-7, USP, SSP, PC, SR + `debug_registers()`),
@@ -234,7 +234,7 @@ Secondary (later, optional tie-breaker): MAME 68000 cross-validation under
 `cross-validation/m68000_0148/`, mirroring the existing m6809 shim.
 
 Also add focused hand-written `core/tests/m68000_move_test.rs` /
-`m68000_alu_test.rs` for the M1 instructions — `core/CLAUDE.md` requires integration tests
+`m68000_alu_test.rs` for the M1 instructions: `core/AGENTS.md` requires integration tests
 per instruction; TomHarte is the broad gate, these pin specific edge cases (zero, sign
 boundary 0x7F/0x80, 0x7FFF/0x8000, 0x7FFFFFFF/0x80000000, X-flag, An sign-extension).
 

@@ -636,7 +636,7 @@ macro_rules! rom {
 ///
 /// Machines whose factory does anything else (a reset after load, a
 /// non-standard loader) keep their hand-written factory and
-/// `inventory::submit!`. Per `machines/CLAUDE.md`, macros generate obvious
+/// `inventory::submit!`. Per `machines/AGENTS.md`, macros generate obvious
 /// delegation only; machine-specific behavior stays visible in the machine file.
 macro_rules! register_machine {
     // Constructor takes an argument (hardware variant, ROM config); still just

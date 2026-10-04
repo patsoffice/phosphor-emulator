@@ -343,7 +343,7 @@ pub trait Tkg04Bus: Bus<Address = u16, Data = u8> {
 /// DAC-08, the sound CPU, the latches, the amplifier — so the board carries the
 /// DAC stream and the decay line, and the game carries the circuit those feed.
 ///
-/// Modelled on `machines/CLAUDE.md`'s board-wrapper pattern: shared hardware on
+/// Modeled on `machines/AGENTS.md`'s board-wrapper pattern: shared hardware on
 /// the board, game-specific behavior on the wrapper.
 pub trait Tkg04Sound {
     /// A bit of the 74LS259 sound-control latch changed.

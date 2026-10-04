@@ -1050,7 +1050,7 @@ impl ToobinBoard {
     /// computing `V + MOV` against a constant gated with `/384V`, and the
     /// placement below is that same relation solved for the object's top line.
     /// Whether the constant already absorbs the buffer swap cannot be read off
-    /// the sheet at the resolution available, and `machines/CLAUDE.md` warns
+    /// the sheet at the resolution available, and `machines/AGENTS.md` warns
     /// specifically that some boards' sprite Y constants fold the delay in
     /// already. Adding a lead on top of one that is already there would move
     /// every object pixel a line the wrong way, and the golden frame cannot

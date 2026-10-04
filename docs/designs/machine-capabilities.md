@@ -95,7 +95,7 @@ making capability boundaries explicit.
 
 ### Boilerplate Drift
 
-`machines/CLAUDE.md` says board-wrapper forwarding should be explicit one-line
+`machines/AGENTS.md` says board-wrapper forwarding should be explicit one-line
 methods, but the code now uses macros for board delegation and save-state
 boilerplate. The macros are practical, but the guidance is outdated.
 

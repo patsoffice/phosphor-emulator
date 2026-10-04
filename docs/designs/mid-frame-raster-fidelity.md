@@ -23,7 +23,7 @@
 > Nine machines carry that assumption with nothing tracking it. Two of the nine
 > (burgertime scroll, satanshollow palette) were additionally classified B on
 > *visibility* grounds despite genuine active-display writes — an argument from
-> "nobody will notice", which sits badly against `CLAUDE.md`'s
+> "nobody will notice", which sits badly against `AGENTS.md`'s
 > Correctness-first ordering. [`raster-sampling-fidelity.md`](raster-sampling-fidelity.md)
 > reframes the goal as *sample each register at the rate the hardware samples
 > it* — which subsumes per-scanline rendering and also rules it out where the

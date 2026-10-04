@@ -25,7 +25,7 @@ are explicitly not settleable by reading the schematic harder or by guessing:
   trade every scanline, so what the beam shows on a line was scanned during the
   line before it. Whether our placement already absorbs that one-line delay
   could not be pinned down at the resolution the sheet was read at, and
-  `machines/CLAUDE.md` warns that adding the delay a second time moves every
+  `machines/AGENTS.md` warns that adding the delay a second time moves every
   object pixel the wrong way.
 
 A golden frame cannot tell a right answer from a wrong one for either. That is

@@ -151,7 +151,7 @@ for the measurements.
 
 This section used to document the opposite: a `*mut Self` reborrowed into
 `&mut dyn Bus` inside an `unsafe` block, presented as the chosen design. That
-pattern is gone from the tree and **must not come back**; `core/CLAUDE.md` says
+pattern is gone from the tree and **must not come back**; `core/AGENTS.md` says
 so directly. There is no `unsafe` in `machines/src` at all.
 
 ## Troubleshooting

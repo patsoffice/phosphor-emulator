@@ -63,7 +63,7 @@ Cycle divergence. Where our M6809 has been measured against modern MAME (ESB
 boot, 454,189 instructions, `oyxg` notes) the agreement is exact per instruction
 but carries a **constant offset** from our reset sequence. Where the two cores
 disagree — indexed `[n]` extended indirect, +5 cycles per the MC6809E datasheet
-against the reference core's +8 — the datasheet wins per `CLAUDE.md`, so **we**
+against the reference core's +8; the datasheet wins per `AGENTS.md`, so **we**
 are the correct side. A timing oracle built on MAME would have scored that
 backwards. Anything indexed by cycles, and anything that runs long enough for an
 RNG to move, cannot be compared.

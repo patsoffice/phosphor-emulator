@@ -190,7 +190,7 @@ PF_HI       equ 2                    ; solid pen 10, bit 3 set
 ; they trade every scanline: what the beam shows on a line was scanned during the
 ; line before it. What the sheet does not settle, at the resolution it was read
 ; at, is whether the vertical match constant on sheet 7 already absorbs that, and
-; machines/CLAUDE.md warns that adding the delay a second time moves every object
+; machines/AGENTS.md warns that adding the delay a second time moves every object
 ; pixel the wrong way.
 ;
 ; SO THE PROBE IS A LATENCY, NOT A POSITION. Asking "is this object on the right

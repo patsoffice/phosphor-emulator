@@ -10,7 +10,7 @@
 //! the `alu_*` / `rmw_*` addressing helpers these wrappers forward to.
 //!
 //! Every row carries its own doc comment (matched as `#[$meta]`), which the
-//! generated function keeps: `core/CLAUDE.md` requires each instruction to
+//! generated function keeps: `core/AGENTS.md` requires each instruction to
 //! document its flag behaviour.
 //!
 //! The expansions name `Bus`, `BusMaster`, `Acc`, `ExecState` and the

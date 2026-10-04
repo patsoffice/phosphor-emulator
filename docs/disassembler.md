@@ -276,7 +276,7 @@ region next to the machine's ROM definitions — see the flat `DisasmRegion`
 entries in [`machines/src/mario_bros.rs`](../machines/src/mario_bros.rs), the
 region-per-bank entries in
 [`machines/src/crystalcastles.rs`](../machines/src/crystalcastles.rs), and the note in
-[`machines/CLAUDE.md`](../machines/CLAUDE.md). For banked ROM, register one
+[`machines/AGENTS.md`](../machines/AGENTS.md). For banked ROM, register one
 region per bank (same `org`, a `load` closure that slices that bank, and a
 distinct name). Until a machine is registered, `raw` and `rom` modes still work
 for any ROM with an explicit `--cpu`.
