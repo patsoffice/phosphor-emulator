@@ -829,6 +829,35 @@ fn replay_refuses_a_rom_set_contradicting_the_movie() {
     );
 }
 
+/// Binding a movie to a machine booted from another revision fails, the way
+/// `from_movie` refuses: the build-then-bind path (bench) gets the same
+/// digest check the boot-from-movie path does. A matching dump still binds.
+#[test]
+fn bind_movie_refuses_a_movie_from_another_revision() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let Some((entry, set_a, set_b)) = two_revision_machine(&dir) else {
+        eprintln!("skipping: no machine has two bootable revisions");
+        return;
+    };
+    let dir_str = dir.to_str().unwrap();
+
+    let movie = record_on(&dir, entry, &set_b);
+    let mut ha = Harness::build(entry.name, dir_str, Some(&set_a), None, None, &[], &[])
+        .expect("revision booted a moment ago");
+    assert_eq!(
+        ha.bind_movie(movie.clone()),
+        Err(MovieError::RomMismatch),
+        "a movie from another revision must refuse to bind"
+    );
+
+    let mut hb = Harness::build(entry.name, dir_str, Some(&set_b), None, None, &[], &[])
+        .expect("revision booted a moment ago");
+    hb.bind_movie(movie).expect("a matching dump binds");
+}
+
 /// A v2 movie names no set, so replay infers the revision by digest — and an
 /// explicit `--rom-set` still wins over the inference.
 #[test]

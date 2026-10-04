@@ -447,7 +447,18 @@ impl Harness {
     /// to the caller would make the two entry points silently disagree about
     /// what "bound" means, and a DIP the replay did not restore diverges in a
     /// way that looks like a movie bug rather than a missing step.
+    ///
+    /// When this harness knows what it booted, the movie's digest must match
+    /// that dump: a movie recorded against another revision refuses rather
+    /// than replaying against foreign game code. A harness wrapping a box
+    /// someone else built keeps no such record, so the check is skipped
+    /// there and only the control table binds.
     pub fn bind_movie(&mut self, movie: Movie) -> Result<(), MovieError> {
+        if let Some(source) = &self.source
+            && source.digest != movie.header.rom_digest
+        {
+            return Err(MovieError::RomMismatch);
+        }
         if let Some(nv) = &movie.header.nvram {
             self.machine.load_nvram(nv);
         }

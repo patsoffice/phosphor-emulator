@@ -159,6 +159,20 @@ fn every_machine_with_roms_boots_and_draws() {
                 continue;
             };
 
+            // Identity first: the booted machine reports the set it was
+            // built from, so saves and movies tag the revision they ran on.
+            let expected_revision = if entry.revisions.len() > 1 {
+                entry.revisions[rev].set()
+            } else {
+                ""
+            };
+            assert_eq!(
+                harness.machine().revision(),
+                expected_revision,
+                "{label}: reports revision {:?}, not the booted set",
+                harness.machine().revision()
+            );
+
             let reset_pcs = program_counters(harness.machine());
             let mut drew_at = None;
             for frame in 1..=BOOT_BUDGET {
