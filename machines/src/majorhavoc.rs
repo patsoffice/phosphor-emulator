@@ -9,7 +9,7 @@
 //! | `MAJOR HAVOC Main Wiring Diagram`, SP-252 sheet 1B | same | p2 |
 //!
 //! The audio output is transcribed in
-//! [`docs/schematics/mhavoc-audio-output.md`](../../docs/schematics/mhavoc-audio-output.md).
+//! [`docs/schematics/majorhavoc-audio-output.md`](../../docs/schematics/majorhavoc-audio-output.md).
 //!
 //! # The board
 //!
@@ -62,8 +62,10 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 /// Where one Major Havoc ROM set's chips go.
 pub struct MhavocConfig {
-    /// The registry name, which is also the machine id.
+    /// The machine id, shared by every revision of one machine.
     id: &'static str,
+    /// The MAME set name, reported by `MachineCore::revision`.
+    set: &'static str,
     /// Alpha's fixed program ROM, 0x8000-0xFFFF.
     alpha: &'static RomRegion,
     /// Alpha's paged program ROM, four 8K pages at 0x2000-0x3FFF.
@@ -195,7 +197,8 @@ static MHAVOCP_GAMMA: RomRegion = RomRegion {
 
 /// Major Havoc, revision 3.
 pub static MHAVOC: MhavocConfig = MhavocConfig {
-    id: "mhavoc",
+    id: "majorhavoc",
+    set: "mhavoc",
     alpha: &MHAVOC_ALPHA,
     alpha_paged: &MHAVOC_PAGED,
     vector: &MHAVOC_VECTOR,
@@ -206,7 +209,8 @@ pub static MHAVOC: MhavocConfig = MhavocConfig {
 };
 /// Major Havoc, revision 2.
 pub static MHAVOC2: MhavocConfig = MhavocConfig {
-    id: "mhavoc2",
+    id: "majorhavoc",
+    set: "mhavoc2",
     alpha: &MHAVOC2_ALPHA,
     alpha_paged: &MHAVOC2_PAGED,
     vector: &MHAVOC2_VECTOR,
@@ -218,6 +222,7 @@ pub static MHAVOC2: MhavocConfig = MhavocConfig {
 /// Major Havoc: Return to Vax, a later hack that adds levels and speech.
 pub static MHAVOCRV: MhavocConfig = MhavocConfig {
     id: "mhavocrv",
+    set: "mhavocrv",
     alpha: &MHAVOCRV_ALPHA,
     alpha_paged: &MHAVOCRV_PAGED,
     vector: &MHAVOC_VECTOR,
@@ -228,7 +233,8 @@ pub static MHAVOCRV: MhavocConfig = MhavocConfig {
 };
 /// Major Havoc, prototype.
 pub static MHAVOCP: MhavocConfig = MhavocConfig {
-    id: "mhavocp",
+    id: "majorhavoc",
+    set: "mhavocp",
     alpha: &MHAVOCP_ALPHA,
     alpha_paged: &MHAVOCP_PAGED,
     vector: &MHAVOCP_VECTOR,
@@ -1093,10 +1099,15 @@ pub struct MhavocSystem {
     avg_dom: DomainId,
     #[save_skip]
     config: &'static MhavocConfig,
+    /// MAME set name this machine loaded (e.g. "mhavocp"), reported by
+    /// `MachineCore::revision`. Loading a save restores state, never ROMs,
+    /// so this keeps its value across loads.
+    #[save_skip]
+    loaded_revision: &'static str,
 }
 
 impl MhavocSystem {
-    pub fn new(config: &'static MhavocConfig) -> Self {
+    pub fn new() -> Self {
         use phosphor_core::core::ClockDomainName as Clk;
         let clocks = clock_tree();
         let find = |name| clocks.find(name).expect("declared domain");
@@ -1109,17 +1120,56 @@ impl MhavocSystem {
         Self {
             alpha: M6502::new(),
             gamma: M6502::new(),
-            board: MhavocBoard::new(config),
+            board: MhavocBoard::new(&MHAVOC),
             clocks,
             gamma_dom,
             pokey_dom,
             speech_dom,
             avg_dom,
-            config,
+            config: &MHAVOC,
+            loaded_revision: "",
         }
     }
+}
 
+impl Default for MhavocSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MhavocSystem {
+    /// A system fixed to `config`: the single-revision path, which leaves
+    /// the revision unreported. `new` plus [`load_roms`](Self::load_roms) is
+    /// the multi-revision path, which reports the loaded set.
+    pub fn with_config(config: &'static MhavocConfig) -> Self {
+        let mut sys = Self::new();
+        sys.config = config;
+        sys.board.speech = config.speech;
+        sys
+    }
+
+    /// Load with the preset config, leaving the revision unreported: the
+    /// single-revision path.
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.load_regions(rom_set)
+    }
+
+    pub fn load_roms(
+        &mut self,
+        rom_set: &RomSet,
+        config: &'static MhavocConfig,
+    ) -> Result<(), RomLoadError> {
+        // Recorded before the first ROM read so a blank-set load still
+        // carries the attempted revision. `create` builds a fresh instance
+        // per attempt, so a failed attempt cannot poison a later success.
+        self.config = config;
+        self.loaded_revision = config.set;
+        self.board.speech = config.speech;
+        self.load_regions(rom_set)
+    }
+
+    fn load_regions(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
         let c = self.config;
         let b = &mut self.board;
         b.map
@@ -1373,6 +1423,10 @@ impl MachineCore for MhavocSystem {
         self.config.id
     }
 
+    fn revision(&self) -> &str {
+        self.loaded_revision
+    }
+
     crate::machine_clock_declaration!(TIMING, clock_tree);
 
     fn run_frame(&mut self) {
@@ -1573,27 +1627,29 @@ impl DipSwitches for MhavocSystem {
 // ---------------------------------------------------------------------------
 
 crate::register_machine!(
-    new = MhavocSystem::new(&MHAVOC),
-    "mhavoc",
-    &["mhavoc"],
-    MHAVOC_CONTROLS
+    MhavocSystem,
+    "majorhavoc",
+    &[
+        crate::registry::Revision {
+            names: &["mhavoc"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["mhavoc2"],
+            nvram_group: None
+        },
+        crate::registry::Revision {
+            names: &["mhavocp"],
+            nvram_group: Some("mhavocp")
+        },
+    ],
+    MHAVOC_CONTROLS,
+    configs = &[&MHAVOC, &MHAVOC2, &MHAVOCP]
 );
 crate::register_machine!(
-    new = MhavocSystem::new(&MHAVOC2),
-    "mhavoc2",
-    &["mhavoc2"],
-    MHAVOC_CONTROLS
-);
-crate::register_machine!(
-    new = MhavocSystem::new(&MHAVOCRV),
+    new = MhavocSystem::with_config(&MHAVOCRV),
     "mhavocrv",
     &["mhavocrv"],
-    MHAVOC_CONTROLS
-);
-crate::register_machine!(
-    new = MhavocSystem::new(&MHAVOCP),
-    "mhavocp",
-    &["mhavocp"],
     MHAVOC_CONTROLS
 );
 
@@ -1641,12 +1697,35 @@ mod tests {
     #[test]
     fn dip_tables_are_valid_for_each_variant() {
         for config in [&MHAVOC, &MHAVOC2, &MHAVOCRV, &MHAVOCP] {
-            let sys = MhavocSystem::new(config);
+            let mut sys = MhavocSystem::new();
+            let _ = sys.load_roms(&RomSet::blank(), config);
             crate::assert_dip_banks_valid(sys.dip_banks(), &[0x00, 0xFF]);
         }
-        let p = MhavocSystem::new(&MHAVOCP);
+        let mut p = MhavocSystem::new();
+        let _ = p.load_roms(&RomSet::blank(), &MHAVOCP);
         assert_eq!(p.dip_banks()[0].options[0].name, "Lives");
         assert_eq!(p.dip_banks()[0].options[0].mask, 0x03);
+    }
+
+    /// The folded revisions share one machine id and report their own set;
+    /// Return to Vax stays its own single-revision machine and reports none.
+    #[test]
+    fn every_revision_reports_one_machine_id_and_its_own_set() {
+        for (config, set) in [
+            (&MHAVOC, "mhavoc"),
+            (&MHAVOC2, "mhavoc2"),
+            (&MHAVOCP, "mhavocp"),
+        ] {
+            let mut sys = MhavocSystem::new();
+            let _ = sys.load_roms(&RomSet::blank(), config);
+            assert_eq!(sys.machine_id(), "majorhavoc");
+            assert_eq!(sys.revision(), set);
+        }
+
+        let mut rv = MhavocSystem::with_config(&MHAVOCRV);
+        let _ = rv.load_rom_set(&RomSet::blank());
+        assert_eq!(rv.machine_id(), "mhavocrv");
+        assert_eq!(rv.revision(), "", "single-revision machines report none");
     }
 
     /// Alpha's write to gamma's latch sets alpha's transmitted flag, clears
@@ -1655,7 +1734,7 @@ mod tests {
     /// same with the roles exchanged.
     #[test]
     fn the_latch_pair_hands_a_byte_each_way() {
-        let mut sys = MhavocSystem::new(&MHAVOC);
+        let mut sys = MhavocSystem::new();
         let b = &mut sys.board;
         b.write(BusMaster::Cpu(0), 0x17C0, 0x5A);
         assert!(b.alpha_xmtd && !b.gamma_rcvd);
@@ -1681,7 +1760,7 @@ mod tests {
     /// gamma with no NMI pending.
     #[test]
     fn gamma_reset_hold_clears_and_blocks_the_nmi() {
-        let mut sys = MhavocSystem::new(&MHAVOC);
+        let mut sys = MhavocSystem::new();
         let b = &mut sys.board;
         b.write(BusMaster::Cpu(0), 0x17C0, 0x5A);
         assert!(b.gamma_nmi, "a latch write queues an NMI");
@@ -1702,7 +1781,7 @@ mod tests {
     /// each 1024-cycle period.
     #[test]
     fn in0_bit_1_is_the_2_4_khz_clock() {
-        let mut sys = MhavocSystem::new(&MHAVOC);
+        let mut sys = MhavocSystem::new();
         let b = &mut sys.board;
         for (clock, high) in [
             (0, true),
@@ -1740,7 +1819,7 @@ mod tests {
             }
         }
         let dark = |n: usize| vec![line(0); n];
-        let mut sys = MhavocSystem::new(&MHAVOC);
+        let mut sys = MhavocSystem::new();
         let b = &mut sys.board;
         b.file_pass(vec![line(8)]);
         b.present();
@@ -1764,7 +1843,7 @@ mod tests {
     /// the ROM page register chooses which 8K of the paged ROM is at 0x2000.
     #[test]
     fn paging_moves_both_ram_windows_and_the_rom_window() {
-        let mut sys = MhavocSystem::new(&MHAVOC);
+        let mut sys = MhavocSystem::new();
         let rom: Vec<u8> = (0..0x8000u32).map(|i| (i / 0x2000) as u8 + 1).collect();
         sys.board.map.load_region(AlphaRegion::PagedRom, &rom);
         let b = &mut sys.board;

@@ -2,7 +2,7 @@
 
 What Atari's Major Havoc main PCB does between its quad POKEY and the cabinet.
 Read for `phosphor-emulator-yxda`, part of adding the machine
-(`phosphor-emulator-r7pa`). The model is `machines/src/mhavoc.rs`.
+(`phosphor-emulator-r7pa`). The model is `machines/src/majorhavoc.rs`.
 
 The finding in one line: **the quad POKEY's four outputs reach the mixer as two
 groups, not one.** OUT 1 to OUT 3 are tied onto one node and OUT 4 has a node of

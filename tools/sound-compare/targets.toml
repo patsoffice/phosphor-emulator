@@ -1432,12 +1432,12 @@ NOT ESTABLISHED: the parts list; everything past J19 pins 11/12, so mono is
 an assumption; and any comparison against hardware or the reference."""
 
 [[target]]
-id = "mhavoc-output"
-machines = ["mhavoc", "mhavoc2", "mhavocrv", "mhavocp"]
+id = "majorhavoc-output"
+machines = ["majorhavoc", "mhavocrv"]
 status = "partial"
 notes = """
 MODELED from the drawing when the machine was added (phosphor-emulator-r7pa,
-yxda); transcribed at docs/schematics/mhavoc-audio-output.md from SP-252 sheets
+yxda); transcribed at docs/schematics/majorhavoc-audio-output.md from SP-252 sheets
 10A, 1B and 2A.
 
 The quad POKEY at 13Q feeds TWO nodes: OUT1-3 tied onto one 1k transimpedance

@@ -231,7 +231,7 @@ size = [256, 224]
 frame = "sha256:f703d9b08fd9e3a28901fbebf3e84927e1ef5bd21a33200071bc7473ecced702"
 
 [[frame]]
-machine = "mhavoc"
+machine = "majorhavoc"
 frames = 1800
 shows = "Attract mode, the maze demo: the green maze walls under a white horizon line, the maze map top center with OXYGEN 120 in green and REACTOR 24 in red beside it and a magenta 1000 on the left, the cyan Major Havoc between a red OUT arrow and the yellow reactor with its own OUT arrow, white robots drifting in the corridors, and the 1 COIN 1 PLAY / GAME OVER / CREDITS 0 and 3 LIVES PER PLAYER / BONUS EVERY 100000 / MCMLXXXIII ATARI text. The walls, the header and the text lines are what this pins; the robots and Havoc are a running demo. The framing matched a reference snapshot of the title screen when the machine was added."
 size = [727, 630]
@@ -239,17 +239,18 @@ frame = "sha256:aa32c45933a660ae393b0549664af80f14024af8d65e72992ada8c8f3173d20d
 vectors = "sha256:327430372a221d1d262ce76c4ec92e3353be582b7414808677e869bcd8a8669e"
 
 [[frame]]
-machine = "mhavoc"
+machine = "majorhavoc"
 id = "gameplay"
 frames = 1200
 shows = "A recorded game in the space phase: score 4600 in cyan with two ships in reserve beside it, BONUS 4500 in green, the green space station top center, yellow shots in flight across the middle, the white fighter low center and red enemy ships around it, over a sparse starfield. The vector display list is pinned beside the raster frame, so this guards the generator's paging and colors under player control as well as the alpha and gamma CPUs' handshake that carries the buttons and the roller. The movie runs on to a 6700 entered as tenth place in the high-score table."
-movie = "movies/mhavoc-1790811924.phmi"
+movie = "movies/majorhavoc-1790811924.phmi"
 size = [727, 630]
 frame = "sha256:8053c5e8c982afbd4332d7e004a74553aae1bb0725dd25309045c7f0483531c5"
 vectors = "sha256:b8696ee30922a4a3f518437ad2a017cff4f936b26b730a4136c587c11c9b9648"
 
 [[frame]]
-machine = "mhavoc2"
+machine = "majorhavoc"
+rom_set = "mhavoc2"
 frames = 1800
 shows = "Revision 2's attract maze demo at the same point as revision 3's: the same header (magenta 1000, maze map, OXYGEN 120, REACTOR 24, here in a smaller font), Havoc under a red OUT arrow beside the yellow reactor, white robots in the corridors, and the 1 COIN 1 PLAY / GAME OVER / CREDITS 0 and 3 LIVES PER PLAYER / BONUS EVERY 100000 / MCMLXXXIII ATARI text, the last without revision 3's copyright symbol. The header, walls and text are what this pins."
 size = [727, 630]
@@ -257,7 +258,8 @@ frame = "sha256:b69d6c214d247cd0e396dbc97f16a8dc3df1bdbc53753f72a1952ffbbe64b7fa
 vectors = "sha256:71b70721198256097883898d97e505d335faec961ed619957e5c31042aeffc78"
 
 [[frame]]
-machine = "mhavocp"
+machine = "majorhavoc"
+rom_set = "mhavocp"
 frames = 1800
 shows = "The prototype's attract maze demo: the white ship docked at the top of the maze, red guide arrows down the corridors with Havoc among them, OXYGEN 118 and REACTOR 23, and 2 COINS 1 PLAY / GAME OVER / CREDITS 0 and 5 LIVES PER PLAYER / BONUS EVERY 100000 / MCMLXXXIII ATARI. The 2-coin and 5-life text is the prototype reading the default switches its own way, not a fault: a reference snapshot 30 seconds in showed the same text, header values and scene when the machine was added."
 size = [727, 630]
