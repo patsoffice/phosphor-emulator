@@ -245,7 +245,7 @@ pub fn hex(digest: &[u8; 32]) -> String {
 /// against, before a single record is delivered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MovieHeader {
-    /// Registry name, e.g. `"marble"`.
+    /// Registry name, e.g. `"marblemadness"`.
     pub machine: String,
     /// MAME set name the session was recorded on, e.g. `"spacduel1"`. Empty
     /// when unknown: version 2 files predate the field, and replay infers the
@@ -1098,7 +1098,7 @@ mod tests {
 
     fn header() -> MovieHeader {
         MovieHeader {
-            machine: "marble".into(),
+            machine: "marblemadness".into(),
             rom_set: "marble".into(),
             rom_digest: [0xAB; 32],
             controls: vec!["track_x".into(), "coin".into()],
@@ -1435,7 +1435,14 @@ mod tests {
     ];
 
     fn recorder() -> MovieRecorder {
-        MovieRecorder::new("marble", "marble", [7; 32], CONTROLS, vec![0x40], None)
+        MovieRecorder::new(
+            "marblemadness",
+            "marble",
+            [7; 32],
+            CONTROLS,
+            vec![0x40],
+            None,
+        )
     }
 
     /// Stopping with input on a frame that never completed still yields a

@@ -19,7 +19,7 @@ The codebase already knows this. Every board's timing block documents its
 crystal in a comment:
 
 ```rust
-// machines/src/ccastles.rs:338          // machines/src/tkg04.rs:45
+// machines/src/crystalcastles.rs:338          // machines/src/tkg04.rs:45
 // Master clock: 10 MHz XTAL             // Master clock:  61.44 MHz
 // CPU clock: 10 MHz / 8 = 1.25 MHz      // CPU clock:     61.44 / 5 / 4 = 3.072 MHz
 // Pixel clock: 10 MHz / 2 = 5 MHz       // Pixel clock:   61.44 / 10 = 6.144 MHz
@@ -169,7 +169,7 @@ Rev 2 listed these; they are either already solved or were misreadings.
   structure is a deliberate optimisation and rev 2's unified per-master-tick
   loop would have thrown it away.
 * **"Marble and Road Runner duplicate `TIMING`."** They share it —
-  `marble.rs:673,676` and `roadrunner.rs:741,744` both reference
+  `marblemadness.rs:673,676` and `roadrunner.rs:741,744` both reference
   `atari_system1::TIMING`.
 
 ## Goals
@@ -197,7 +197,7 @@ Deleting `TimingConfig` or `pub const TIMING` (see Scope).
 This is the central correction to rev 2. Rev 2 made master ticks the loop unit:
 `for _ in 0..ticks_per_frame { let mask = tree.tick(); let ctx =
 FrameCtx::from_master(...); }`. The CPU:master ratios in the table above make
-that 8× the loop iterations on ccastles, missile_command and atari_dvg, 16× on
+that 8× the loop iterations on crystalcastles, missilecommand and atari_dvg, 16× on
 gridlee and congo_bongo, and 20× on tkg04 — each iteration additionally carrying
 a `u64` divide and modulo that today doesn't exist on the hot path at all. On
 Crystal Castles that is 163,840 iterations per frame becoming 1,310,720.
@@ -333,7 +333,7 @@ let frame_cycle = self.clock % TIMING.cycles_per_frame();
 let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
 ```
 
-— `atari_system1.rs:322,340`, `williams.rs:240,262`, `ccastles.rs:592,913`,
+— `atari_system1.rs:322,340`, `williams.rs:240,262`, `crystalcastles.rs:592,913`,
 `irobot.rs`, `missile_command.rs`. Give them one `params.position(clock)`
 helper returning `(scanline, is_line_start)` and leave the loop structure alone.
 The scanline-hoisted boards keep calling it once per scanline; the plain-loop

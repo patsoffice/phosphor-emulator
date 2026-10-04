@@ -918,7 +918,7 @@ mod tests {
     /// call a train one exponential. That is the whole argument for reading the
     /// tau over T20, and the reason this test asserts on both.
     ///
-    /// The real capture behind it is `sndcmp capture dkong/walk`, whose enable
+    /// The real capture behind it is `sndcmp capture donkeykong/walk`, whose enable
     /// is held two seconds and so produces an onset pulse and a release pulse.
     /// Its T20 was 2.045 s, the gap between the two to three digits, where the
     /// event's own is 0.055 s and its tau 0.024 s at r² 0.992.

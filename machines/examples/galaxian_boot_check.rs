@@ -20,7 +20,7 @@ fn main() {
     let root = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/tmp/rk".to_string());
-    for id in ["galaxian", "mooncrst", "pisces", "uniwars"] {
+    for id in ["galaxian", "mooncresta", "pisces", "uniwars"] {
         check(&root, id);
     }
 }

@@ -1,0 +1,23 @@
+schema = 1
+id = "donkeykong/walk"
+target = "donkeykong-discrete"
+duration_s = 5.0
+description = "Walk held for two seconds, then released with its tail"
+
+# The 2 s pre-roll matches the MAME driver, where it is necessary rather than
+# cosmetic: Donkey Kong makes power-on noise at -11 dBFS that takes ~1.5 s to
+# decay and would otherwise bury the effect. Kept here so both sides describe
+# the same event.
+[[action]]
+at_s = 2.0
+control = "walk"
+value = true
+
+[[action]]
+at_s = 4.0
+control = "walk"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

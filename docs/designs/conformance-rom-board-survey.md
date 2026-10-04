@@ -92,18 +92,18 @@ where a signal's edges are, which needs a readable position.
 
 | Board (machines) | CPU | Beam primitive | Resolution | Scratch not displayed | Verdict |
 |---|---|---|---|---|---|
-| `atari_system1` (**roadrunner**, marble) | M68000 @ 7.159 MHz (hardware is M68010) | motion-object timer entry fires IRQ3 at a chosen scanline, state readable at `$2E0000` bit 7; vblank level at `$F60000` bit 4 | 1 line | `$400000-$401FFF` (8 KB) | **FULL** on roadrunner, **FRAME** on marble (defect 3) |
-| `mcr2` (shollow) | Z80 @ 2.496 MHz | Z80 CTC: readable down-counter, and a timer channel that interrupts N scanlines after a beam-locked trigger | 1 line | `$C000-$C7FF` (2 KB battery RAM) | **FULL** |
+| `atari_system1` (**roadrunner**, marblemadness) | M68000 @ 7.159 MHz (hardware is M68010) | motion-object timer entry fires IRQ3 at a chosen scanline, state readable at `$2E0000` bit 7; vblank level at `$F60000` bit 4 | 1 line | `$400000-$401FFF` (8 KB) | **FULL** on roadrunner, **FRAME** on marblemadness (defect 3) |
+| `mcr2` (satanshollow) | Z80 @ 2.496 MHz | Z80 CTC: readable down-counter, and a timer channel that interrupts N scanlines after a beam-locked trigger | 1 line | `$C000-$C7FF` (2 KB battery RAM) | **FULL** |
 | `gridlee` (gridlee) | M6809 @ 1.25 MHz | IRQ at lines 64/128/192/256; FIRQ at ~92; vblank level at `$9700` bit 7 | 64 lines | `$0080-$07FF` (1920 B), `$9C00-$9CFF` NVRAM | **FIXED** |
 | `namco_galaga` (galaga, digdug, xevious) | 3x Z80 @ 3.072 MHz, shared bus | sound-CPU NMI at lines 64 and 192; main/sub IRQ at line 224 | 128 lines | `$8800-$8B7F`, `$9000-$937F`, `$9800-$9B7F` | **FIXED** |
-| `foodf` (foodf) | M68000 @ 6.048 MHz | IRQ1 at lines 0/64/128/192 (see defect 4); IRQ2 at line 224 | 64 lines | `$014000-$01BFFF` (32 KB) | **FIXED** |
+| `foodfight` (foodfight) | M68000 @ 6.048 MHz | IRQ1 at lines 0/64/128/192 (see defect 4); IRQ2 at line 224 | 64 lines | `$014000-$01BFFF` (32 KB) | **FIXED** |
 | `btime` (burgertime) | M6502 (DECO CPU-7) @ 1.5 MHz | vblank level at `$4003` bit 7 | frame | `$0000-$07FF` (2 KB) | **FRAME** |
 | `gottlieb` (qbert) | I8088 @ 5 MHz | NMI on vblank, line 240 | frame | `$0000-$2FFF` (12 KB incl. NVRAM) | **FRAME** |
 | `mrdo` (mrdo) | Z80 @ 4.1 MHz | IRQ at line 224, once per frame, nothing readable | frame | `$E000-$EFFF` (4 KB) | **FRAME** |
 
 Link addresses, all backed `ReadOnly` regions that `debug_write` will take:
 `mcr2` `$0000` 48 KB; `gridlee` `$A000` 24 KB; `namco_galaga` `$0000` 16 KB per
-CPU, selected by bus master; `foodf` `$000000` 64 KB; `atari_system1`
+CPU, selected by bus master; `foodfight` `$000000` 64 KB; `atari_system1`
 `$000000` 512 KB; `btime` `$B000` 20 KB; `gottlieb` `$6000` 40 KB; `mrdo`
 `$0000` 32 KB. Reset vectors land inside the window in every case, including
 Gottlieb, where the 8088's `$FFFF0` aliases to `$FFF0` because A16-A19 are not
@@ -240,7 +240,7 @@ no palette-split test here. The mid-frame writable state is the tilemap, the
 sprite registers, the starfield latches and, on Xevious, the scroll registers,
 which is a T7-shaped test rather than a T6-shaped one.
 
-### foodf - FIXED, on top of an unresolved reference
+### foodfight - FIXED, on top of an unresolved reference
 
 68000, four IRQ1s and one IRQ2 per frame, 32 KB of undisplayed work RAM, and a
 write-only palette at `$950000`. Mechanically the easiest of the FIXED boards.
@@ -253,9 +253,9 @@ in as many words (`foodf.cpp:326-329`):
 > structure, it cannot fire at the same time as VBLANK. I have not solved this
 > mystery yet
 
-We copy MAME's fallback of 0/64/128/192 (`foodf.rs:778-781`). A conformance ROM
+We copy MAME's fallback of 0/64/128/192 (`foodfight.rs:778-781`). A conformance ROM
 derived from our source would therefore pin a value the reference itself flags
-as wrong. Filed as defect 4. Until that is settled, foodf is a board where the
+as wrong. Filed as defect 4. Until that is settled, foodfight is a board where the
 instrument would be built on a known-unsound expectation, which is the exact trap
 `williams-video-conformance.md` risk 1 describes.
 
@@ -330,7 +330,7 @@ wearing a plural.
 
 Three candidates, and each is the best answer to a different question.
 
-| | `roadrunner` (atari_system1) | `shollow` (mcr2) | `gridlee` |
+| | `roadrunner` (atari_system1) | `satanshollow` (mcr2) | `gridlee` |
 |---|---|---|---|
 | Sync primitive | MO timer entry, 1 line, plus a poll path | CTC timer channel, 1 line, plus a readable line counter | interrupts at 4 fixed lines |
 | Distance from Williams | M68000, `AddressSpace32`, tilemap plus motion objects, autovector levels | Z80, IM2 vectored, tilemap with a dirty-tile cache, palette inside video RAM | M6809, bitmap video RAM, near-identical |
@@ -341,7 +341,7 @@ Three candidates, and each is the best answer to a different question.
 
 `roadrunner` is the widest structural jump and the only one that would exercise
 the 32-bit address space, so it is the strongest test of what the shared contract
-really is. `shollow` is the primitive that surprised the survey and the board
+really is. `satanshollow` is the primitive that surprised the survey and the board
 whose open raster issue is furthest along. `gridlee` is the only one that
 produces a green suite on the day it lands, and the cheapest by a wide margin,
 and the weakest generalisation.
@@ -377,7 +377,7 @@ the tree exercises for timing, which is the whole argument for the programme.
 3. **atari_system1 generates IRQ3 for both its games, and only Road Runner's
    cartridge has the hardware.** See the atari_system1 section above. The fix is
    a per-cartridge gate, not the removal of the feature.
-4. **foodf's IRQ1 scanlines are a documented guess.** See the foodf section
+4. **foodfight's IRQ1 scanlines are a documented guess.** See the foodfight section
    above.
 
 ## What this survey did not do

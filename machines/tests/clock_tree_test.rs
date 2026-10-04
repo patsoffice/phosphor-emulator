@@ -223,7 +223,7 @@ fn every_raster_board_derives_its_scanline() {
 fn the_cross_crystal_scanline_conversions_are_what_we_think() {
     let cases = [
         // (machine, cycles per scanline, ppm error in the video rate)
-        ("docastle", 254, -125),
+        ("mrdoscastle", 254, -125),
         ("mrdo", 261, 235),
         // Three crystals, but 384 dot clocks at 6 MHz is exactly 256 cycles at
         // 4 MHz, so unlike the two above this one has nothing to round.
@@ -304,7 +304,7 @@ fn the_migrated_dividers_kept_their_ratios() {
             (4_000_000, 3_041_250),
         ),
         (
-            "docastle",
+            "mrdoscastle",
             phosphor_machines::docastle::clock_tree(),
             Clk::Psg,
             (4_000_000 / 16, 4_000_000),

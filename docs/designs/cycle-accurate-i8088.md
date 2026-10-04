@@ -1154,7 +1154,7 @@ depend much on whether the board is running self-test or attract code. The
 pinned at, so the two measurements describe the same machine state.
 
 The rest of the default list on the same host and run, for context: pacman
-26.37x, galaga 19.83x, joust 9.10x, marble 6.44x, tempest 4.79x. Q\*bert sits
+26.37x, galaga 19.83x, joust 9.10x, marblemadness 6.44x, tempest 4.79x. Q\*bert sits
 second-slowest, and unlike tempest its cost is emulation rather than render.
 
 **Read this number with the correction in [What the core does

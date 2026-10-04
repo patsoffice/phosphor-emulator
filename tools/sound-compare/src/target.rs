@@ -63,10 +63,10 @@ pub type CreateFn = fn(probe: Option<&str>) -> Result<Box<dyn SoundTarget>, Stri
 /// makes the coverage tests trivially exhaustive.
 static ALL: &[&TargetSpec] = &[
     &crate::targets::asteroids::SPEC,
-    &crate::targets::dkong::SPEC,
-    &crate::targets::dkongjr::SPEC,
+    &crate::targets::donkeykong::SPEC,
+    &crate::targets::donkeykongjunior::SPEC,
     &crate::targets::galaxian::SPEC,
-    &crate::targets::llander::SPEC,
+    &crate::targets::lunarlander::SPEC,
     &crate::targets::mariobros::SPEC,
     &crate::targets::zaxxon::SPEC,
 ];

@@ -285,7 +285,7 @@ the third is decisive.
 - The bus cycle is not a fixed length once wait states exist.
 - The idle records in the oracle (`["n", 122]`) are in clocks, not bus cycles,
   and 122 is not a multiple of 4.
-- **The boards already call us once per clock.** `foodf.rs:670` is
+- **The boards already call us once per clock.** `foodfight.rs:670` is
   `cpu.execute_cycle(board, BusMaster::Cpu(0))` inside a per-cycle loop, and the
   clock tree declares the CPU domain at 6.048 MHz (Food Fight, Quantum) and
   7.15909 MHz (Atari System 1). A clock *is* one CPU cycle. So this needs no
@@ -594,9 +594,9 @@ recapture is scoped to that machine; 38 of 39 frames are unchanged.
 
 | machine | M1 emul ms/f | M3 emul ms/f | change | real time |
 |---|---|---|---|---|
-| foodf | 1.594 | 1.638 | +2.8% | 10.01x |
+| foodfight | 1.594 | 1.638 | +2.8% | 10.01x |
 | quantum | 1.862 | 1.863 | +0.1% | 4.69x |
-| marble | 3.026 | 3.054 | +0.9% | 5.45x |
+| marblemadness | 3.026 | 3.054 | +0.9% | 5.45x |
 | roadrunner | 3.310 | 3.370 | +1.8% | 4.94x |
 
 Road Runner still binds and is now 2.47x above the floor rather than 2.52x. The
@@ -766,9 +766,9 @@ worktree, same protocol.
 
 | machine | M3 emul ms/f | M4 emul ms/f | change | real time |
 |---|---|---|---|---|
-| foodf | 0.808 | 1.134 | +40.3% | 14.47x |
+| foodfight | 0.808 | 1.134 | +40.3% | 14.47x |
 | quantum | 1.009 | 1.392 | +38.0% | 9.31x |
-| marble | 1.685 | 2.117 | +25.6% | 7.87x |
+| marblemadness | 1.685 | 2.117 | +25.6% | 7.87x |
 | roadrunner | 2.000 | 2.400 | +20.0% | 6.94x |
 
 **And the same milestone measured back on the original host**, which is the one
@@ -777,9 +777,9 @@ argued against. Two runs agreeing within 0.4%, same protocol:
 
 | machine | M1 emul ms/f | M4 emul ms/f | change | real time |
 |---|---|---|---|---|
-| foodf | 1.594 | 2.137 | +34.1% | 7.68x |
+| foodfight | 1.594 | 2.137 | +34.1% | 7.68x |
 | quantum | 1.862 | 2.434 | +30.7% | 4.05x |
-| marble | 3.026 | 3.865 | +27.7% | 4.31x |
+| marblemadness | 3.026 | 3.865 | +27.7% | 4.31x |
 | roadrunner | 3.310 | 3.987 | **+20.5%** | **4.18x** |
 
 That is the whole conversion's cost, M1 through M4, against the baseline the bar
@@ -1016,9 +1016,9 @@ within 1%, fastest rep of five, 600 frames, 1800 warmup.
 
 | machine | M1 emul ms/f | M4 emul ms/f | M5 emul ms/f | M4 to M5 | M1 to M5 | real time |
 |---|---|---|---|---|---|---|
-| foodf | 1.594 | 2.139 | 2.198 | +2.8% | +37.9% | 7.46x |
+| foodfight | 1.594 | 2.139 | 2.198 | +2.8% | +37.9% | 7.46x |
 | quantum | 1.862 | 2.427 | 2.536 | +4.5% | +36.2% | 3.91x |
-| marble | 3.026 | 3.882 | 3.957 | +1.9% | +30.8% | 4.21x |
+| marblemadness | 3.026 | 3.882 | 3.957 | +1.9% | +30.8% | 4.21x |
 | roadrunner | 3.310 | 4.007 | 4.106 | **+2.5%** | **+24.0%** | **4.06x** |
 
 Road Runner binds at **4.06x** against the 2x floor, so M6 and M7 have 2.03x of
@@ -1031,7 +1031,7 @@ about a quarter of a budget that was allowed to grow by 152%.
 skip the body-state capture for bodies that cannot suspend. Its ceiling was
 measured first, by making the capture cost *twice* as much rather than by
 skipping it unsoundly, which keeps the program correct and so measures the same
-program: one capture is worth 2.8% of foodf's emulation time and 1.2% of Road
+program: one capture is worth 2.8% of foodfight's emulation time and 1.2% of Road
 Runner's. So the whole optimization can return at most 1.2% on the machine that
 binds, and only for the fraction of instructions that cannot suspend. Collecting
 it needs a per-encoding predicate for "makes at most one operand read", whose
@@ -1127,7 +1127,7 @@ and three exist to fail if a delta is applied too widely.
 
 **Correctness first, and nothing moved.** The four boards were already carrying
 M6, whose two golden-frame pins had been recaptured scoped at that milestone
-(marble and roadrunner, the two 68010 boards, with foodf and quantum unmoved).
+(marblemadness and roadrunner, the two 68010 boards, with foodfight and quantum unmoved).
 M7 re-ran the sweeps rather than trusting that: 12 golden-frame tests including
 `every_pinned_machine_still_draws_its_frame` and
 `reference_pngs_match_their_hashes`, 13 audio-sanity tests including
@@ -1151,9 +1151,9 @@ same stable estimator the bench applies across reps.
 
 | machine | CPU | M1 emul ms/f | M5 emul ms/f | M6 emul ms/f | M5 to M6 | M1 to M6 | real time |
 |---|---|---|---|---|---|---|---|
-| foodf | 68000 | 0.946 | 1.199 | 1.195 | -0.3% | +26.3% | 13.72x |
+| foodfight | 68000 | 0.946 | 1.199 | 1.195 | -0.3% | +26.3% | 13.72x |
 | quantum | 68000 | 1.196 | 1.446 | 1.451 | +0.3% | +21.3% | 9.00x |
-| marble | 68010 | 1.735 | 2.186 | 2.193 | +0.3% | +26.4% | 7.60x |
+| marblemadness | 68010 | 1.735 | 2.186 | 2.193 | +0.3% | +26.4% | 7.60x |
 | roadrunner | 68010 | 2.038 | 2.511 | 2.535 | **+1.0%** | **+24.4%** | **6.57x** |
 
 **Road Runner still binds, at 6.57x real time, which is 3.3x above the 2x
@@ -1172,7 +1172,7 @@ Two things in this table are worth more than the headline.
 - **Road Runner's +24.4% here lands on the +24.0% recorded for M1 to M5 on the
   original host.** The percentages travel between hosts for the binding machine
   even though the absolutes do not, which is the claim the M4 section made and
-  the first chance anyone has had to check it. foodf and quantum did **not**
+  the first chance anyone has had to check it. foodfight and quantum did **not**
   travel as well, coming in at +26.3% and +21.3% against +37.9% and +36.2%
   there: the newer host absorbs the conversion better on the lighter boards. So
   quote percentages across hosts for the machine that binds and re-measure for
@@ -1389,15 +1389,15 @@ reported:
 
 ```text
 cargo run --release -p phosphor-bench -- --roms ~/ws/mame-runtime/roms \
-  --machine foodf --machine quantum --machine marble --machine roadrunner \
+  --machine foodfight --machine quantum --machine marblemadness --machine roadrunner \
   --frames 600 --warmup 1800 --reps 5
 ```
 
 | machine | emul ms/f | render | audio | total ms/f | fps | realtime | spread |
 |---|---|---|---|---|---|---|---|
-| foodf | 1.594 | 0.005 | 0.000 | 1.599 | 625.5 | **10.29x** | 3.6% |
+| foodfight | 1.594 | 0.005 | 0.000 | 1.599 | 625.5 | **10.29x** | 3.6% |
 | quantum | 1.862 | 1.664 | 0.000 | 3.526 | 283.6 | **4.73x** | 2.0% |
-| marble | 3.026 | 0.007 | 0.000 | 3.034 | 329.6 | **5.50x** | 3.3% |
+| marblemadness | 3.026 | 0.007 | 0.000 | 3.034 | 329.6 | **5.50x** | 3.3% |
 | roadrunner | 3.310 | 0.007 | 0.000 | 3.318 | 301.4 | **5.03x** | 1.2% |
 
 **Quantum is not the tight board.** It looks slowest at 4.73x, but 1.664 of its
@@ -1412,9 +1412,9 @@ emulation cost may grow by:
 
 | machine | emul now | emul budget at 2x | headroom |
 |---|---|---|---|
-| foodf | 1.594 | 8.21 | 5.15x |
+| foodfight | 1.594 | 8.21 | 5.15x |
 | quantum | 1.862 | 6.68 | 3.59x |
-| marble | 3.026 | 8.32 | 2.75x |
+| marblemadness | 3.026 | 8.32 | 2.75x |
 | roadrunner | 3.310 | 8.33 | 2.52x |
 
 **Road Runner binds, at 2.52x.** That is the number to hold the conversion
@@ -1566,7 +1566,7 @@ rather than shipped quietly.
 - np9x.1's acceptance holds: a write-only register on a 68000 board sees exactly
   one access for a byte write and no read, proved by a test that fails before
   M2.
-- Golden frames and audio-sanity entries on foodf, quantum, marble and
+- Golden frames and audio-sanity entries on foodfight, quantum, marblemadness and
   roadrunner are unchanged, or changed with a named mechanism and an image that
   was looked at.
 - `phosphor-bench` on all four boards at each milestone, against the M1 baseline

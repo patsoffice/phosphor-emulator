@@ -212,8 +212,8 @@ mod tests {
 
     const GOOD: &str = r#"
 schema = 1
-id = "dkong/stomp"
-target = "dkong-discrete"
+id = "donkeykong/stomp"
+target = "donkeykong-discrete"
 duration_s = 3.0
 description = "one stomp, decaying fully"
 
@@ -235,8 +235,8 @@ end_s = 3.0
     #[test]
     fn a_valid_scenario_round_trips() {
         let s = parse(GOOD).expect("should parse");
-        assert_eq!(s.id, "dkong/stomp");
-        assert_eq!(s.target, "dkong-discrete");
+        assert_eq!(s.id, "donkeykong/stomp");
+        assert_eq!(s.target, "donkeykong-discrete");
         assert_eq!(s.actions.len(), 2);
         assert_eq!(s.actions[0].value, Value::Bool(true));
         assert_eq!(s.analysis.end_s, 3.0);

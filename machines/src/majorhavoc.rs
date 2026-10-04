@@ -221,7 +221,7 @@ pub static MHAVOC2: MhavocConfig = MhavocConfig {
 };
 /// Major Havoc: Return to Vax, a later hack that adds levels and speech.
 pub static MHAVOCRV: MhavocConfig = MhavocConfig {
-    id: "mhavocrv",
+    id: "majorhavocreturntovax",
     set: "mhavocrv",
     alpha: &MHAVOCRV_ALPHA,
     alpha_paged: &MHAVOCRV_PAGED,
@@ -1648,7 +1648,7 @@ crate::register_machine!(
 );
 crate::register_machine!(
     new = MhavocSystem::with_config(&MHAVOCRV),
-    "mhavocrv",
+    "majorhavocreturntovax",
     &["mhavocrv"],
     MHAVOC_CONTROLS
 );
@@ -1724,7 +1724,7 @@ mod tests {
 
         let mut rv = MhavocSystem::with_config(&MHAVOCRV);
         let _ = rv.load_rom_set(&RomSet::blank());
-        assert_eq!(rv.machine_id(), "mhavocrv");
+        assert_eq!(rv.machine_id(), "majorhavocreturntovax");
         assert_eq!(rv.revision(), "", "single-revision machines report none");
     }
 

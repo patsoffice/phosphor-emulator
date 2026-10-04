@@ -156,7 +156,7 @@ Decode a machine's charset/sprite tile ROMs into a picture — the machine's pal
 cargo run -p phosphor-frontend -- pacman /path/to/roms --gfxview
 
 # Open on a specific sheet (default: the first one)
-cargo run -p phosphor-frontend -- dkong /path/to/roms --gfxview --gfx-region sprites
+cargo run -p phosphor-frontend -- donkeykong /path/to/roms --gfxview --gfx-region sprites
 ```
 
 The machine is booted for a moment first so palette-RAM-driven colors are populated. Vector/bitmap-framebuffer machines (Asteroids, I, Robot's 3-D, Crystal Castles) have no tile sheets and report so.
@@ -327,7 +327,7 @@ models it yet.
 cargo run -p phosphor-sound-compare -- targets
 
 # One entry in full, with its controls and probes where an adapter exists
-cargo run -p phosphor-sound-compare -- targets llander-discrete
+cargo run -p phosphor-sound-compare -- targets lunarlander-discrete
 ```
 
 Each row carries a status, and the statuses mean different things on purpose.
@@ -343,7 +343,7 @@ read against it, transcribed in [docs/schematics/](docs/schematics/) with a
 modelling issue filed for what it found, or carries a documented blocker. That
 says nothing about how much is *modelled*: most rows are `missing`, and reaching
 `validated` is separate work. Four machines also ride on a row read on a sibling
-board — `xevious`, `dorunrun`, `dowild` and `esb` — and those rows say so, because
+board — `xevious`, `dorunrun`, `mrdoswildride` and `empirestrikesback` — and those rows say so, because
 three times in this audit a shared board family has not meant a shared output
 stage.
 
@@ -372,7 +372,7 @@ cargo run -p phosphor-disasm --bin disasm -- audiodiff reference.wav /tmp/shot.w
 ```
 
 ```bash
-# Representative board set: pacman, galaga, tempest, marble, joust
+# Representative board set: pacman, galaga, tempest, marblemadness, joust
 cargo run --release -p phosphor-bench -- --roms /path/to/roms
 
 # One machine, more frames, past the power-on self-test

@@ -1,5 +1,5 @@
 -- Drive Donkey Kong through real gameplay on the same frame schedule as
--- tools/script/examples/dkong_walk_gameplay.rhai, so the two emulators can be
+-- tools/script/examples/donkeykong_walk_gameplay.rhai, so the two emulators can be
 -- compared on audio the *game* produced rather than on a stimulus someone
 -- invented.
 --

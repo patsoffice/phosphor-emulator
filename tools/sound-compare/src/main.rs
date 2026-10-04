@@ -11,7 +11,7 @@
 //! ```text
 //! sndcmp targets
 //! sndcmp scenarios [TARGET]
-//! sndcmp capture dkong/stomp --out /tmp/stomp.wav [--probe walk]
+//! sndcmp capture donkeykong/stomp --out /tmp/stomp.wav [--probe walk]
 //! ```
 //!
 //! MAME stays outside this boundary on purpose: `sndcmp` knows nothing of Lua,
@@ -69,13 +69,13 @@ enum Command {
     /// 30 ms (must change). A scenario that passes neither is capturing
     /// something it does not drive.
     Verify {
-        /// Scenario id (`dkong/stomp`) or a path to a scenario file. Omit to
+        /// Scenario id (`donkeykong/stomp`) or a path to a scenario file. Omit to
         /// check every registered scenario.
         scenario: Option<String>,
     },
     /// Run a scenario and write a WAV.
     Capture {
-        /// Scenario id (`dkong/stomp`) or a path to a scenario file.
+        /// Scenario id (`donkeykong/stomp`) or a path to a scenario file.
         scenario: String,
         /// Output WAV path.
         #[arg(short, long)]
@@ -238,7 +238,7 @@ fn scenarios_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios")
 }
 
-/// Resolve `dkong/stomp` to its file, or take a path as given.
+/// Resolve `donkeykong/stomp` to its file, or take a path as given.
 fn resolve(id_or_path: &str) -> PathBuf {
     let direct = PathBuf::from(id_or_path);
     if direct.is_file() {

@@ -291,7 +291,7 @@ and the debugger sees a machine with no CPUs. Return the machine instead — it
 merges the board through `#[debug_bus]`.
 
 Golden frames cannot catch this: the picture is identical either way. The
-ROM-gated boot check can, and did — "esb: exposes no CPUs through its debug bus,
+ROM-gated boot check can, and did — "empirestrikesback: exposes no CPUs through its debug bus,
 so this test cannot tell a booted machine from a wedged one". Run it.
 
 ### Machine API for tests and tools
@@ -415,8 +415,8 @@ path (DAC, CVSD, resampler), which neither change touches. Expect a board's gain
 to track how much of its frame is CPU cycles.
 
 The Nintendo boards, back at 3.072 MHz and 50,688 cycles a frame, bear that out
-with the largest gains so far: **dkong −16.8%**, **mariobros −17.8%**, both
-changes together. Do Castle is the other end of the same rule — **docastle
+with the largest gains so far: **donkeykong −16.8%**, **mariobros −17.8%**, both
+changes together. Do Castle is the other end of the same rule — **mrdoscastle
 −4.1%**, **dorunrun −3.3%** — because four PSGs are serviced every cycle and
 every main-CPU T-state clones the Z80 for its WAIT rewind. When a board gains
 little, find out what the frame is actually spending its time on before

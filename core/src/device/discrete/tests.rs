@@ -430,7 +430,7 @@ fn step_n(c: &mut DiscreteCircuit, n: usize) {
 /// The shelf's three regions, on Mr. Do's Castle's own values.
 ///
 /// 22k in series with 2k + 0.22 uF to ground, from
-/// `docs/schematics/docastle-audio-output.md`. DC passes at unity because the
+/// `docs/schematics/mrdoscastle-audio-output.md`. DC passes at unity because the
 /// capacitor is open; the far side settles to the bare resistor divider once the
 /// capacitor is a short, which is `2/24` or -21.6 dB; and the corners are
 /// `1/(2π·24k·0.22u)` and `1/(2π·2k·0.22u)`.

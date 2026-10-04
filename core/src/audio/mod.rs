@@ -919,7 +919,7 @@ mod tests {
             ("ssio and its ay8910s", 2_000_000),
             ("pokey, jsa", 1_789_772),
             ("pokey, default ntsc", 1_789_773),
-            ("pokey, astdelux", 1_512_000),
+            ("pokey, asteroidsdeluxe", 1_512_000),
             ("ay8910, btime", 1_500_000),
             ("pokey, missile command", 1_250_000),
         ] {

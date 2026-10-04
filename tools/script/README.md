@@ -45,10 +45,10 @@ Exactly one of the three must be given. A one-off — take a screenshot, poke an
 address, check a PC — should not cost a temp file:
 
 ```bash
-# Inline: nudge marble's trackball and report the PC
+# Inline: nudge marblemadness's trackball and report the PC
 cargo run -p phosphor-script -- run \
     -e 'm.run_frames(300); m.input_relative("p1_trackball_x", 4.0); print(m.pc(0));' \
-    --machine marble ~/ws/mame-runtime/roms
+    --machine marblemadness ~/ws/mame-runtime/roms
 
 # Stdin: composes with heredocs and pipes
 cargo run -p phosphor-script -- run - --machine galaga ~/ws/mame-runtime/roms <<'EOF'

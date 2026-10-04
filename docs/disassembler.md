@@ -114,13 +114,13 @@ example, exposes both banks (which share the `0xA000-0xDFFF` window) plus the
 fixed ROM:
 
 ```bash
-disasm machine --machine ccastles
-#   disasm regions for 'ccastles':
+disasm machine --machine crystalcastles
+#   disasm regions for 'crystalcastles':
 #     bank0    m6502  org 0xA000  16384 bytes (0x4000)
 #     bank1    m6502  org 0xA000  16384 bytes (0x4000)
 #     fixed    m6502  org 0xE000  8192 bytes (0x2000)
 
-disasm machine --machine ccastles --region bank1 ~/mame/roms
+disasm machine --machine crystalcastles --region bank1 ~/mame/roms
 ```
 
 For a `raw`/`rom` dump of a banked image, use `--org` to set the window base and
@@ -275,7 +275,7 @@ seeded). To expose a new machine's code ROMs, add one `inventory::submit!` per
 region next to the machine's ROM definitions — see the flat `DisasmRegion`
 entries in [`machines/src/mario_bros.rs`](../machines/src/mario_bros.rs), the
 region-per-bank entries in
-[`machines/src/ccastles.rs`](../machines/src/ccastles.rs), and the note in
+[`machines/src/crystalcastles.rs`](../machines/src/crystalcastles.rs), and the note in
 [`machines/CLAUDE.md`](../machines/CLAUDE.md). For banked ROM, register one
 region per bank (same `org`, a `load` closure that slices that bank, and a
 distinct name). Until a machine is registered, `raw` and `rom` modes still work

@@ -1,7 +1,7 @@
 -- drive_llander_single.lua
 --
 -- Capture ONE Lunar Lander discrete voice on the same timeline as the matching
--- `sndcmp` scenario in tools/sound-compare/scenarios/llander/.
+-- `sndcmp` scenario in tools/sound-compare/scenarios/lunarlander/.
 --
 -- Why this exists alongside drive_llander_sound.lua: that driver walks five
 -- segments through 2 s windows back to back, which is fine for a listen and for
@@ -32,7 +32,7 @@
 -- scenario's analysis window, so trim the REFERENCE to the same span rather than
 -- re-ranging the capture:
 --
---   sndcmp capture llander/thrust --out /tmp/ll_thrust_ours.wav
+--   sndcmp capture lunarlander/thrust --out /tmp/ll_thrust_ours.wav
 --   disasm audiodiff /tmp/ll_thrust_ours.wav /tmp/ll_thrust_ref.wav --range-b 0.95:3.0
 --
 -- THE MAIN CPU IS PARKED, and on this board parking the program counter is not
@@ -85,7 +85,7 @@ end
 -- THE CRASH AS THE GAME PLAYS IT, from trace_llander_writes.lua: descent at
 -- throttle 1, then at impact the explosion with throttle 7, stepped down one
 -- notch at a time to 0. Offsets from the first traced crash, relative to the
--- impact at TRIGGER_S. Matches scenarios/llander/crash.toml.
+-- impact at TRIGGER_S. Matches scenarios/lunarlander/crash.toml.
 local CRASH_STEPS = {
   { 0.0000, 0x0f }, { 0.3228, 0x0e }, { 0.7319, 0x0d }, { 1.1435, 0x0c },
   { 1.5553, 0x0b }, { 1.9722, 0x0a }, { 2.3894, 0x09 }, { 2.8081, 0x08 },
@@ -105,7 +105,7 @@ local TRIGGER_S = 1.0
 -- in isolation, and neither can this driver. The throttle opens half a second
 -- early so the window carries the step from thrust alone to thrust plus
 -- explosion, which is the only part of the capture that belongs to the
--- explosion leg. Matches scenarios/llander/explosion.toml.
+-- explosion leg. Matches scenarios/lunarlander/explosion.toml.
 local EXPLOSION_THROTTLE_S = 0.5
 
 print(string.format("[DRIVER] %s: assert at %.2f s, held to the end", effect, TRIGGER_S))

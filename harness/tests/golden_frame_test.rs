@@ -491,12 +491,12 @@ fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
         // entry would silently pin a different game against this machine's hash.
         //
         // COMPARED AGAINST THE MOVIE'S OWN RECORDED NAME, NOT `machine_id()`.
-        // Those are two different namespaces and they are not the same string on
-        // every board: Missile Command registers as "missile" and reports a
-        // `machine_id()` of "missile_command". This read `machine_id()` until the
-        // first movie entry was added, and then rejected a correct entry, which
-        // is the direction that gets noticed. The other direction is the reason
-        // to fix it properly rather than to special-case the name.
+        // Those are two different namespaces: the registry name is what the
+        // movie records, and `machine_id()` is the save-file key. This read
+        // `machine_id()` until the first movie entry was added, and then
+        // rejected a correct entry, which is the direction that gets noticed.
+        // The other direction is the reason to fix it properly rather than
+        // to special-case the name.
         let actual = harness
             .movie()
             .expect("build_with_movie always binds a movie")
@@ -1048,7 +1048,7 @@ fn reference_pngs_match_their_hashes() {
 #[test]
 fn a_movie_entry_round_trips_through_frames_toml() {
     let entries = vec![Entry {
-        machine: "marble".into(),
+        machine: "marblemadness".into(),
         id: Some("gameplay".into()),
         rom_set: None,
         frames: 6000,
@@ -1077,7 +1077,7 @@ fn a_movie_entry_round_trips_through_frames_toml() {
     assert_eq!(back[0].movie.as_deref(), Some("movies/marble-level1.phmi"));
     assert_eq!(back[0].frames, 6000);
     assert_eq!(back[0].id.as_deref(), Some("gameplay"));
-    assert_eq!(back[0].slug(), "marble-gameplay");
+    assert_eq!(back[0].slug(), "marblemadness-gameplay");
 }
 
 /// `rom_set` is human-authored, so it round-trips like `movie` and `id`,
@@ -1086,7 +1086,7 @@ fn a_movie_entry_round_trips_through_frames_toml() {
 #[test]
 fn a_rom_set_entry_round_trips_and_slugs() {
     let entries = vec![Entry {
-        machine: "marble".into(),
+        machine: "marblemadness".into(),
         id: None,
         rom_set: Some("proto".into()),
         frames: 1800,
@@ -1107,7 +1107,7 @@ fn a_rom_set_entry_round_trips_and_slugs() {
     let back = parse_entries(&text, "<round trip>");
     assert_eq!(back.len(), 1);
     assert_eq!(back[0].rom_set.as_deref(), Some("proto"));
-    assert_eq!(back[0].slug(), "marble-proto");
+    assert_eq!(back[0].slug(), "marblemadness-proto");
 }
 
 /// One machine may carry several pins, distinguished by `id`, and they must
@@ -1120,7 +1120,7 @@ fn a_rom_set_entry_round_trips_and_slugs() {
 #[test]
 fn a_machine_can_carry_both_an_attract_pin_and_a_gameplay_pin() {
     let mk = |id: Option<&str>| Entry {
-        machine: "marble".into(),
+        machine: "marblemadness".into(),
         id: id.map(str::to_string),
         rom_set: None,
         frames: 1800,
@@ -1135,8 +1135,8 @@ fn a_machine_can_carry_both_an_attract_pin_and_a_gameplay_pin() {
 
     let attract = mk(None);
     let gameplay = mk(Some("gameplay"));
-    assert_eq!(attract.slug(), "marble");
-    assert_eq!(gameplay.slug(), "marble-gameplay");
+    assert_eq!(attract.slug(), "marblemadness");
+    assert_eq!(gameplay.slug(), "marblemadness-gameplay");
     assert_ne!(
         reference_png(&attract.slug()),
         reference_png(&gameplay.slug()),
@@ -1148,8 +1148,8 @@ fn a_machine_can_carry_both_an_attract_pin_and_a_gameplay_pin() {
     let text = render_frames_toml(&[gameplay, attract], &[]);
     let back = parse_entries(&text, "<two pins>");
     assert_eq!(back.len(), 2);
-    assert_eq!(back[0].slug(), "marble");
-    assert_eq!(back[1].slug(), "marble-gameplay");
+    assert_eq!(back[0].slug(), "marblemadness");
+    assert_eq!(back[1].slug(), "marblemadness-gameplay");
 }
 
 /// An `id` that is not a safe filename fragment is refused, because it names a
@@ -1159,7 +1159,7 @@ fn a_machine_can_carry_both_an_attract_pin_and_a_gameplay_pin() {
 fn an_id_that_could_escape_the_golden_directory_is_refused() {
     parse_entries(
         "[[frame]]\n\
-         machine = \"marble\"\n\
+         machine = \"marblemadness\"\n\
          id = \"../../etc\"\n\
          frames = 1800\n\
          shows = \"whatever this frame shows, described at length for the guard\"\n\

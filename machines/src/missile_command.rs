@@ -560,7 +560,7 @@ impl MissileCommandBoard {
     /// R8's eight toggles are wired one per pot line rather than onto a byte
     /// the CPU can read directly, so the game reads them the long way round:
     /// strobe POTGO, poll ALLPOT until the scan finishes, then read POT0-7. That
-    /// this is the path, and not the ALLPOT shortcut `ccastles.rs` uses, was
+    /// this is the path, and not the ALLPOT shortcut `crystalcastles.rs` uses, was
     /// settled by watching which POKEY offsets the ROM actually reads — it
     /// touches 0x00-0x08, which is the full scan.
     ///
@@ -1166,7 +1166,7 @@ impl MachineCore for MissileCommandSystem {
     }
 
     fn machine_id(&self) -> &str {
-        "missile_command"
+        "missilecommand"
     }
 
     crate::machine_clock_declaration!(TIMING, crate::missile_command::clock_tree);
@@ -1449,7 +1449,7 @@ impl DipSwitches for MissileCommandSystem {
 
 crate::register_machine!(
     MissileCommandSystem,
-    "missile",
+    "missilecommand",
     &["missile"],
     MISSILE_CONTROLS
 );

@@ -112,14 +112,14 @@ mod tests {
     #[test]
     fn ccastles_banks_registered_per_bank() {
         // Banked program ROM: two banks at the same org, plus the fixed ROM.
-        let regions = regions_for("ccastles");
+        let regions = regions_for("crystalcastles");
         assert_eq!(
             regions.iter().map(|r| r.region).collect::<Vec<_>>(),
             vec!["bank0", "bank1", "fixed"],
         );
 
-        let b0 = find("ccastles", "bank0").unwrap();
-        let b1 = find("ccastles", "bank1").unwrap();
+        let b0 = find("crystalcastles", "bank0").unwrap();
+        let b1 = find("crystalcastles", "bank1").unwrap();
         assert_eq!((b0.org, b0.size), (0xA000, 0x4000));
         assert_eq!(
             (b1.org, b1.size),
@@ -127,7 +127,7 @@ mod tests {
             "both banks map to the same window"
         );
 
-        let fixed = find("ccastles", "fixed").unwrap();
+        let fixed = find("crystalcastles", "fixed").unwrap();
         assert_eq!((fixed.org, fixed.size), (0xE000, 0x2000));
     }
 

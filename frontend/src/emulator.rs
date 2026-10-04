@@ -1878,7 +1878,7 @@ mod tests {
     fn a_cropped_vector_window_fills_a_four_by_three_screen() {
         for (name, native, want) in [
             ("asteroids", (1045, 789), 4.0 / 3.0),
-            ("llander", (1045, 801), 4.0 / 3.0),
+            ("lunarlander", (1045, 801), 4.0 / 3.0),
         ] {
             let (w, h, a) = presentation(native.0, native.1, None, false);
             assert_eq!((w, h), native, "{name}: square units are presented as-is");

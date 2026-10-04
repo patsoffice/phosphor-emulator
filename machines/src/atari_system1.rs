@@ -48,7 +48,7 @@
 //! applied here; and the rest of the package, including all of the sound board.
 //!
 //! This module owns everything that is identical across the catalog (Marble
-//! Madness, Road Runner, …). A per-game wrapper (see [`crate::marble`]) holds
+//! Madness, Road Runner, …). A per-game wrapper (see [`crate::marblemadness`]) holds
 //! only the cartridge ROM manifest, the slapstic chip id, and the game's own
 //! input ports; its [`Bus`] intercepts those ports and forwards the rest to the
 //! board's [`bus_read`](AtariSystem1Board::bus_read)/[`bus_write`](AtariSystem1Board::bus_write),
@@ -1573,15 +1573,19 @@ mod tests {
             "and reads back at 0x2E0000"
         );
 
-        let mut marble = timer_entry_board(false);
-        marble.begin_scanline(TIMER_LINE);
+        let mut marblemadness = timer_entry_board(false);
+        marblemadness.begin_scanline(TIMER_LINE);
         assert!(
-            !marble.scanline_int,
+            !marblemadness.scanline_int,
             "a cartridge without the circuit ignores the same entry"
         );
-        assert_eq!(marble.interrupt_level(), 0, "no interrupt reaches the CPU");
         assert_eq!(
-            marble.int3_state(),
+            marblemadness.interrupt_level(),
+            0,
+            "no interrupt reaches the CPU"
+        );
+        assert_eq!(
+            marblemadness.int3_state(),
             0x0000,
             "and 0x2E0000 reads a flat zero"
         );

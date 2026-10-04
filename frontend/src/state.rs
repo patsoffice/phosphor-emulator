@@ -194,10 +194,10 @@ impl State {
     /// maps into the unified `machines` map, then clear them so they are not
     /// re-serialized.
     ///
-    /// Legacy entries are keyed by the old `machine_id`. For the handful of
-    /// machines whose CLI name differs from `machine_id` (e.g. `asteroid` vs
-    /// `asteroids`) the migrated entry keeps the old key and is simply never
-    /// matched again — an acceptable reset for an auto-generated file.
+    /// Legacy entries are keyed by the old `machine_id`. A migrated entry
+    /// whose key matches no current CLI name (a machine renamed since) is
+    /// simply never matched again — an acceptable reset for an
+    /// auto-generated file.
     /// **A legacy entry never overwrites one already in `machines`.** It fills a
     /// gap or it is dropped.
     ///

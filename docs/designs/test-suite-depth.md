@@ -84,7 +84,7 @@ tests can reach *behaviour* (rendering, DIP accessors, save state,
 
 `register_machine!` emits it for all three of its arms, so the common case
 costs nothing. The three hand-written registrations (`quantum`, `starwars`,
-`esb`) grow a two-line bare factory each.
+`empirestrikesback`) grow a two-line bare factory each.
 
 Running a bare machine executes whatever a zero-filled ROM decodes to. That
 is fine for the purpose: the CPU still runs, the video and audio devices
@@ -198,10 +198,10 @@ Promoted verdicts:
 
 | Machine | Assertion |
 |---|---|
-| `starwars`, `esb` | AVG display list non-empty on every frame of a 60-frame tail window, with at least one lit vector |
+| `starwars`, `empirestrikesback` | AVG display list non-empty on every frame of a 60-frame tail window, with at least one lit vector |
 | `xevious` | sub and sound CPUs released from reset (the 50XX handshake) and still running; video RAM populated |
-| `marble`, `roadrunner` | 68010 left the reset vector, stayed inside mapped space, clock advanced, video RAM populated |
-| `galaxian`, `mooncrst`, `pisces`, `uniwars` | framebuffer neither all-black nor all-lit after the attract intro |
+| `marblemadness`, `roadrunner` | 68010 left the reset vector, stayed inside mapped space, clock advanced, video RAM populated |
+| `galaxian`, `mooncresta`, `pisces`, `uniwars` | framebuffer neither all-black nor all-lit after the attract intro |
 
 Alongside them, one registry-driven test boots *every* machine whose ROM
 set the collection can supply — 39 of the 40 registered here — and

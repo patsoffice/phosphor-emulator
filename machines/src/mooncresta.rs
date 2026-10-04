@@ -353,7 +353,7 @@ impl Default for MoonCrestaSystem {
 crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation);
 
 impl MachineCore for MoonCrestaSystem {
-    crate::machine_core_metadata!("mooncrst", TIMING, crate::galaxian::clock_tree);
+    crate::machine_core_metadata!("mooncresta", TIMING, crate::galaxian::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
@@ -417,7 +417,7 @@ crate::impl_board_debug_trace!(MoonCrestaSystem, board);
 
 crate::register_machine!(
     MoonCrestaSystem,
-    "mooncrst",
+    "mooncresta",
     &["mooncrst"],
     GALAXIAN_CONTROLS
 );
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn machine_id_and_gfx_mode() {
         let sys = MoonCrestaSystem::new();
-        assert_eq!(sys.machine_id(), "mooncrst");
+        assert_eq!(sys.machine_id(), "mooncresta");
         // Language DIP defaults to English (IN1 bit 7).
         assert_eq!(sys.board.in1 & MC_DIP1_MASK, MC_DIP1_DEFAULT);
     }

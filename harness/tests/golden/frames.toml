@@ -21,11 +21,11 @@
 # be captured at all — as an [[unpinned]] with a reason.
 
 [[unpinned]]
-machine = "dkongjr"
+machine = "donkeykongjunior"
 reason = "The machine's ROM table names a revision (djr1-c_5b_f-2.5b) that neither the dkongjr nor the dkongjr2 ZIP in the reference collection supplies, so it cannot be booted here to capture a frame. Pin it once a matching dump is available."
 
 [[frame]]
-machine = "astdelux"
+machine = "asteroidsdeluxe"
 frames = 1800
 shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright. The words are what this pins; the rubble is a demo game and moves whenever the machine's state evolves differently. It last moved when RAMSEL began swapping the two 256-byte SRAMs it had been ignoring, which changes where the demo keeps its working state and so where the asteroids drift, and changes none of the text. The frame is 1045 by 789 rather than 1024 square because it is now cropped to the part of the DVG's field the monitor swept (atari_dvg::WINDOW); the display list is the same one, translated by the window's origin, so that recapture moved the hash without moving the rubble."
 size = [1045, 789]
@@ -33,7 +33,7 @@ frame = "sha256:412305fa84ceb15190ebadbdf447108d315dc25e15444922d58d11e07cca88ea
 vectors = "sha256:1ffca0922e31bfb41986b177bae1cf04854cf332e7f2ed3bd8a8595e7c1e519a"
 
 [[frame]]
-machine = "asteroid"
+machine = "asteroids"
 frames = 1800
 shows = "Attract mode: 1 COIN 1 PLAY over drifting asteroids with a small saucer, above the 1979 Atari copyright. It read PUSH START until the option mux was fixed, because the broken decode delivered the Language toggle as the coinage setting and the game saw Free Play; the default byte is the manual's suggested 1 coin / 1 play. The frame is 1045 by 789 rather than 1024 square because it is now cropped to the part of the DVG's field the monitor swept (atari_dvg::WINDOW); the display list is the same one, translated by the window's origin, so this hash moved without the machine moving at all."
 size = [1045, 789]
@@ -66,18 +66,18 @@ size = [240, 240]
 frame = "sha256:16b3432c781a1421d906fd9a5e9427d6d6130e89d766a98b40bf52ecd6d18644"
 
 [[frame]]
-machine = "ccastles"
+machine = "crystalcastles"
 frames = 1800
 shows = "Attract mode: the isometric first castle, the red bonus-timer bar top left, and the CRYSTAL CASTLES / 1983 Atari copyright panel."
 size = [256, 232]
 frame = "sha256:e51a189a658900694c97c3bae36b01da9eac76ae8ce913060b31346aaf62e926"
 
 [[frame]]
-machine = "ccastles"
+machine = "crystalcastles"
 id = "gameplay"
 frames = 1600
 shows = "Level 3 in play at score 140,105 with three lives in reserve: the isometric castle in gray and green, Bentley Bear on the left-hand walkway, the HIDDEN RAMP / LEVEL 3 panel at the top right, and gem dots still lining most of the paths. Replayed from a recorded trackball session, so this pins scoring, the level indicator and a player-driven sprite position, none of which the attract castle reaches."
-movie = "movies/ccastles-1787707168.phmi"
+movie = "movies/crystalcastles-1787707168.phmi"
 size = [256, 232]
 frame = "sha256:49910b5a953b7f70a431fda311f8e07016f01485146550a0723f298466eb25d3"
 
@@ -96,14 +96,14 @@ size = [224, 288]
 frame = "sha256:4b763923d1d8318e5dc8eac6169cdc099f656c8e67aa2d6be0ea10260a84be13"
 
 [[frame]]
-machine = "dkong"
+machine = "donkeykong"
 frames = 1800
 shows = "Attract mode: the DONKEY KONG title in blue block letters with Kong beneath it and the 1981 Nintendo of America copyright."
 size = [224, 256]
 frame = "sha256:38da556efd94fc99c750eb8a3a6b023ef045e78e31fdfd705b7a49e6c6a903ad"
 
 [[frame]]
-machine = "docastle"
+machine = "mrdoscastle"
 frames = 1800
 shows = "Attract mode: the TODAY'S RANKING / BEST 10 table, ten green name rows on black inside the purple brick border."
 size = [192, 240]
@@ -117,14 +117,14 @@ size = [240, 192]
 frame = "sha256:75d26359fea41ff0cb925aa216d875838c63d0e3e83ea7fa98c9a368d45ccfcf"
 
 [[frame]]
-machine = "dowild"
+machine = "mrdoswildride"
 frames = 1800
 shows = "Attract demo: the first course, its yellow track loops with coloured balls rolling, the GOAL flag top right, and the bonus and scene counters."
 size = [240, 192]
 frame = "sha256:0440cf2ec8f7562a89ce7a0f291cf7678fe02a6586ef77a1e898d3ca2c051e44"
 
 [[frame]]
-machine = "esb"
+machine = "empirestrikesback"
 frames = 1800
 shows = "Attract mode: the opening text crawl (IT IS A DARK TIME FOR THE REBELS...) in green over the starfield, under the red INSERT COINS / 1 COIN 1 PLAY header."
 size = [705, 727]
@@ -132,7 +132,7 @@ frame = "sha256:5b2dd0878218b61c5c153800bd8951e235b9aea50bdbe1475a3a0d2a76e04e1c
 vectors = "sha256:c425d8139bc4f89a141085a516ab1b30754e2a1d25159d7ad7b307e6e83e40c4"
 
 [[frame]]
-machine = "foodf"
+machine = "foodfight"
 frames = 1800
 shows = "Attract mode: the FOOD FIGHT logo with INTRODUCING... below it, flying fruit, and a splash of pie in the top-right corner."
 size = [256, 224]
@@ -200,7 +200,7 @@ size = [292, 240]
 frame = "sha256:5129c5c150136ddf04c9ac408fd8dcf2f74ea281a6b3863fe70344037ed78132"
 
 [[frame]]
-machine = "llander"
+machine = "lunarlander"
 frames = 1800
 shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and 750 FUEL UNITS PER COIN. It read a literal X until the option mux was fixed and the undriven data-bus bits were made to float high, which this ROM depends on because its fuel routine reads 0x2800 without masking. 750 is the default byte's setting, and the game's own self-test prints the same number. INSERT COINS BLINKS and is NOT what this pins: it went off when the NMI period was corrected and back on when the refresh became 41.016 Hz, both in phosphor-emulator-mtme. The terrain is static in attract and has been byte-identical across both; what moves is the lander's drift and the blink phase. The frame is 1045 by 801 rather than 1024 square because it is now cropped to the part of the DVG's field the monitor swept (atari_dvg::WINDOW_LLANDER, which sits lower in the field than the Asteroids one because this board draws lower); the display list is the same one, translated by the window's origin, so that recapture moved the hash and nothing else."
 size = [1045, 801]
@@ -208,18 +208,18 @@ frame = "sha256:e48aba225e4e7416925a402b8382e5e7c6b35dd57ccbe9de8d0e97de1a91a5c9
 vectors = "sha256:8327a313c4306a142623bb5ffaae376e4cf21e6fcd57985a107268c8d1af5c81"
 
 [[frame]]
-machine = "marble"
+machine = "marblemadness"
 frames = 1800
 shows = "Attract mode: the MARBLE MADNESS logo over the TROUBLEMAKERS high-score table, with a red and a blue marble on the black field. The logo, the table and its ten scores are what this pins; the two marbles are rolling and sit wherever the machine's timing has carried them by this frame, so they move whenever the CPU's clock accounting changes. They last moved when the bit operations on a data register stopped charging Table 8-8's asterisked maximum unconditionally, which changed no text and rolled the marbles a little further."
 size = [336, 240]
 frame = "sha256:e7289330dcc74eec9733a9bb78751236dfec977a40290fb9a7235acea34044f9"
 
 [[frame]]
-machine = "marble"
+machine = "marblemadness"
 id = "gameplay"
 frames = 2100
 shows = "A race in play at score 6,890 with 51 left on the countdown: the marble on the gray course where the two diagonal ramps cross, over the blue vertical-striped void, with three white cones and two small green pickups on the terrace below. Replayed from a recorded trackball session, so this pins the score, the countdown and a player-driven marble position, which the MARBLE MADNESS logo screen cannot reach."
-movie = "movies/marble-1787708076.phmi"
+movie = "movies/marblemadness-1787708076.phmi"
 size = [336, 240]
 frame = "sha256:c0f5232a34d42ebe06048297441784eb05de893474cf188ee86481db7373e347"
 
@@ -267,7 +267,7 @@ frame = "sha256:bf1c6cc0ba8b513fa5b41d46e3e8d527b8f3e4d4ee0e56b7857dd0381714d528
 vectors = "sha256:43866efb0baae88dc572c312a21797b4ac0dcbfe437ce02d15d5a80d17497c5e"
 
 [[frame]]
-machine = "mhavocrv"
+machine = "majorhavocreturntovax"
 frames = 1800
 shows = "Return to Vax's attract maze demo: magenta 1000, the maze map, OXYGEN 121 and REACTOR 25 in the header, Havoc walking below the yellow reactor, white robots in the corridors, and the 1 COIN 1 PLAY / GAME OVER / CREDITS 0 and 3 LIVES PER PLAYER / BONUS EVERY 100000 / MCMLXXXIII ATARI text. The header, walls and text are what this pins; the demo runs a little differently from revision 3's, so the timers and positions differ at this frame."
 size = [727, 630]
@@ -275,23 +275,23 @@ frame = "sha256:c2d100a78944097cd20ff94d6a02a0fe9be9369245677053e3d4439b013df3bd
 vectors = "sha256:6ced524cd460c08cdf8bbcb3721e1ae0b9d5690bca60cf9fbaa59d21632b6a0e"
 
 [[frame]]
-machine = "missile"
+machine = "missilecommand"
 frames = 1800
 shows = "Attract demo: incoming ICBM trails and three red explosions above the six cities and the DEFEND CITIES prompt."
 size = [256, 231]
 frame = "sha256:b585a3dc7bbfa1f901bc0f08adb7d3189e5b07ee10d82115d87488fa6e14d2dc"
 
 [[frame]]
-machine = "missile"
+machine = "missilecommand"
 id = "gameplay"
 frames = 1200
 shows = "A wave in play at score 125: three red ICBM trails descending, a blue anti-ballistic missile in flight with its crosshair marker on the right, and all six cities plus the bases still standing on the yellow terrain. The missile in flight is the part the attract demo cannot produce, since aiming and launching it is trackball and fire input."
-movie = "movies/missile-1787708195.phmi"
+movie = "movies/missilecommand-1787708195.phmi"
 size = [256, 231]
 frame = "sha256:0a23ffdf95e79f8ed8cf819bdde572a3dbaa5d98390497ec6b4b2cae88167970"
 
 [[frame]]
-machine = "mooncrst"
+machine = "mooncresta"
 frames = 1800
 shows = "Attract mode: DOCKING TIME 24:5 over the starfield, with the docking module above and the player ship at the bottom."
 size = [224, 256]
@@ -356,7 +356,7 @@ size = [292, 240]
 frame = "sha256:63bc0c98d060a358e943dd4ce64af6261740f100b98b99df08c2eb82d89cef99"
 
 [[frame]]
-machine = "scobra"
+machine = "supercobra"
 frames = 1800
 shows = "Attract demo: the ship over the white mountain range, with the 1-8 BASE progress bar, the fuel gauge and the score header. Upright only since the wrapper started forwarding the board's ROT90."
 size = [224, 256]
@@ -370,7 +370,7 @@ size = [224, 256]
 frame = "sha256:fa6867437bf3fbaa929ba81d82b9fc06da68499c6b8a47136be8455ea766ddad"
 
 [[frame]]
-machine = "shollow"
+machine = "satanshollow"
 frames = 1800
 shows = "Attract mode: the SHIELD instruction screen, with THE SHIELD PROTECTS THE BASE AGAINST BOMBS above the base sprite, the gauge explanation below it, and SHIELD 11 CREDITS 0 along the bottom."
 size = [480, 512]

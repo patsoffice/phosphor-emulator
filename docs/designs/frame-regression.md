@@ -104,7 +104,7 @@ That second choice is the one the epic asked to be decided and documented.
 
 #### Why vector machines pin the line list, and the raster frame too
 
-For `asteroid`, `astdelux`, `llander`, `tempest`, `quantum`, `starwars`, `esb`
+For `asteroids`, `asteroidsdeluxe`, `lunarlander`, `tempest`, `quantum`, `starwars`, `empirestrikesback`
 and `irobot`, `vector_display_list()` *is* the output: the frontend feeds it
 to GL directly, and `render_frame` is a CPU rasterisation used for headless
 capture and for the debug UI. Pinning only the raster fallback would let a
@@ -284,7 +284,7 @@ all.
 |---|---|---|
 | `b22534b` vector generator runs in emulated time | quantum, starwars, tempest | animation phase, and a different attract level from a moved RNG seed |
 | `9ba89f9` a slow Williams blit costs two cycles a byte | robotron, sinistar | colour-cycle phase, and a different moment of the same text screen |
-| `1461ee4` MCR II's dot clock is master/2 | shollow | the attract loop reaches the SHIELD screen instead of the title |
+| `1461ee4` MCR II's dot clock is master/2 | satanshollow | the attract loop reaches the SHIELD screen instead of the title |
 | `35048ac` vector renderer rework, and iitc with it | the seven vector machines | f32 display-list coordinates, the `display_size` split, beam width, dwell, halation, vertex dots, and tempest's orientation fix |
 
 Three of the four were timing fixes, and in each the picture moved because the

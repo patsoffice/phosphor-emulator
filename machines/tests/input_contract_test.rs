@@ -159,8 +159,8 @@ fn declared_players_are_one_based() {
 /// A machine with analog controls must have at least one of them reachable.
 ///
 /// Per-machine rather than per-control, for the same reason as the coin test:
-/// there is one mouse, so two-player analog cabinets (foodf's P2 stick,
-/// marble's P2 trackball) deliberately leave the second player's axes unbound.
+/// there is one mouse, so two-player analog cabinets (foodfight's P2 stick,
+/// marblemadness's P2 trackball) deliberately leave the second player's axes unbound.
 /// A machine where *no* analog axis is bound would be genuinely unplayable.
 #[test]
 fn machines_with_analog_controls_can_drive_at_least_one() {

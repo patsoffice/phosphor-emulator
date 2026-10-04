@@ -46,7 +46,7 @@ pub const P1_DOWN: &[D] = &[
 // and the digital path wins by snapping the ADC to its endpoints: the stick
 // reads as eight directions and the analog range is unreachable. Give the axis
 // control `PadControl::FullAxis(PadAxis::LeftX/LeftY)` and use these for the
-// keyboard and D-pad fallback. See `starwars.rs` and `foodf.rs`.
+// keyboard and D-pad fallback. See `starwars.rs` and `foodfight.rs`.
 pub const P1_LEFT_NO_STICK: &[D] = &[D::Key(K::Left), D::Pad(P::Button(PB::DPadLeft))];
 pub const P1_RIGHT_NO_STICK: &[D] = &[D::Key(K::Right), D::Pad(P::Button(PB::DPadRight))];
 pub const P1_UP_NO_STICK: &[D] = &[D::Key(K::Up), D::Pad(P::Button(PB::DPadUp))];

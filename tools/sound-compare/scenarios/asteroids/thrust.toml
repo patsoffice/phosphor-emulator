@@ -22,7 +22,7 @@ value = true
 # measured from 1.5 s is byte-identical whether the trigger fired at 1.0 s or
 # 1.03 s, and `sndcmp verify`'s sensitivity check fails it. Correctly. Starting
 # 50 ms early makes the ring-up part of what is measured, which is also the
-# honest thing to measure, and matches dkong/walk.
+# honest thing to measure, and matches donkeykong/walk.
 #
 # Held to the end of the run rather than released inside it. Releasing a hard
 # gate gives digital silence, and a window carrying a second of that reports the

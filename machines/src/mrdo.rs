@@ -13,7 +13,7 @@
 //! board's. What is not modelled is R101 1k, a separate Sound Amplifier Unit
 //! whose input attenuator throws away about 34 dB before an MB3730, a volume
 //! pot, and a bridge output into one speaker where this is mono. Read it beside
-//! `docastle-audio-output.md`: same manufacturer, same power amplifier part,
+//! `mrdoscastle-audio-output.md`: same manufacturer, same power amplifier part,
 //! different output stage. See `phosphor-emulator-4056`.
 //!
 //! Hardware (per MAME `src/mame/universal/mrdo.cpp`, the Taito `mrdot` set):

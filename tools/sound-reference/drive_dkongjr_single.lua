@@ -2,7 +2,7 @@
 --
 -- Capture ONE Donkey Kong Jr. discrete effect, driven the way the game drives
 -- it, on the same timeline as the matching `sndcmp` scenario in
--- tools/sound-compare/scenarios/dkongjr/.
+-- tools/sound-compare/scenarios/donkeykongjunior/.
 --
 -- Select the effect with the DKJR_EFFECT environment variable:
 --   walk, walk-hi, jump, climb, fall
@@ -20,12 +20,12 @@
 --
 -- Then compare against the Phosphor side:
 --
---   sndcmp capture dkongjr/climb --out /tmp/dkjr_climb_ours.wav
+--   sndcmp capture donkeykongjunior/climb --out /tmp/dkjr_climb_ours.wav
 --   disasm audiodiff /tmp/dkjr_climb_ours.wav /tmp/dkjr_climb_ref.wav --range-b 1.95:5.0
 --
 -- THE TRIGGER DISCIPLINE HERE IS THE GAME'S, MEASURED, NOT ASSUMED. Watching
 -- both sound latches through 3000 frames of recorded play
--- (tools/script/examples/dkongjr_sound_trace.rhai) gives:
+-- (tools/script/examples/donkeykongjunior_sound_trace.rhai) gives:
 --
 --   walk (6H bit 0)    40 assertions, each held exactly 3 frames
 --   jump (6H bit 1)     5 assertions, each held exactly 3 frames

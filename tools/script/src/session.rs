@@ -188,8 +188,7 @@ impl DebugSession {
         let movie = Movie::decode(&bytes).map_err(|e| format!("reading movie {path}: {e}"))?;
 
         // The session's own registry name, not `machine_id()`: those are two
-        // different namespaces (Missile Command registers as "missile" and
-        // reports "missile_command"), and the movie records the former.
+        // different namespaces, and the movie records the former.
         let id = match self.harness.rom_source() {
             Some(source) => source.entry.name.to_string(),
             None => self.harness.machine().machine_id().to_string(),

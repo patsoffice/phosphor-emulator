@@ -33,20 +33,20 @@ Line pitch is the short axis over the line count, against the 0.7 mm spot:
 
 | Lines | Machines | Pitch | Spot covers |
 |---|---|---|---|
-| 192 | docastle, dorunrun, dowild, mrdo | 1.406 mm | 49.8% |
-| 224 | 17 machines (pacman, galaga, dkong, xevious, ...) | 1.205 mm | 58.1% |
-| 231 | missile | 1.169 mm | 59.9% |
-| 232 | ccastles, irobot | 1.164 mm | 60.1% |
-| 240 | 8 machines (joust, marble, qbert, robotron, ...) | 1.125 mm | 62.2% |
-| 480 | shollow | 0.562 mm | 124.4% |
+| 192 | mrdoscastle, dorunrun, mrdoswildride, mrdo | 1.406 mm | 49.8% |
+| 224 | 17 machines (pacman, galaga, donkeykong, xevious, ...) | 1.205 mm | 58.1% |
+| 231 | missilecommand | 1.169 mm | 59.9% |
+| 232 | crystalcastles, irobot | 1.164 mm | 60.1% |
+| 240 | 8 machines (joust, marblemadness, qbert, robotron, ...) | 1.125 mm | 62.2% |
+| 480 | satanshollow | 0.562 mm | 124.4% |
 
 Both halves of the prediction hold. Low line counts leave real gaps between
 lines, and MCR2 at 480 lines overlaps and gets no gaps at all. That falls out of
 the arithmetic rather than being a special case, which is the point: a shader
-applying scanlines uniformly would be wrong for shollow.
+applying scanlines uniformly would be wrong for satanshollow.
 
 **The model separates one machine from the other 32.** Coverage across the whole
-library spans 49.8% to 62.2%, and then shollow. The derivation is still the right
+library spans 49.8% to 62.2%, and then satanshollow. The derivation is still the right
 construction, because gap width is then a consequence of the tube rather than a
 number someone dialed in, but it buys one binary split and not a spectrum. Do not
 build per-machine machinery whose cost only pays back against a wider spread than
@@ -68,12 +68,12 @@ One emulated pixel is the long axis over the horizontal pixel count, against the
 
 | Sweep pixels | Machines | Pixel width | Triads per pixel |
 |---|---|---|---|
-| 240 | burgertime, docastle, dorunrun, dowild, mrdo | 1.500 mm | 2.50 |
-| 256 | galaxian, dkong, foodf, ccastles, qbert, ... | 1.406 mm | 2.34 |
+| 240 | burgertime, mrdoscastle, dorunrun, mrdoswildride, mrdo | 1.500 mm | 2.50 |
+| 256 | galaxian, donkeykong, foodfight, crystalcastles, qbert, ... | 1.406 mm | 2.34 |
 | 288 | pacman, mspacman, galaga, digdug, xevious | 1.250 mm | 2.08 |
 | 292 | joust, robotron, sinistar | 1.233 mm | 2.05 |
-| 336 | marble, roadrunner | 1.071 mm | 1.79 |
-| 512 | shollow | 0.703 mm | 1.17 |
+| 336 | marblemadness, roadrunner | 1.071 mm | 1.79 |
+| 512 | satanshollow | 0.703 mm | 1.17 |
 
 Never below 1, so no board can resolve stripes. The RGB stripe look that CRT
 shaders usually reproduce comes from PC monitors at 640x480 and up, where a pixel
@@ -81,7 +81,7 @@ is roughly one triad. At arcade resolutions the mask sits below the pixel grid
 and reads as slight softening. Building visible stripes would be building a look
 these cabinets never had.
 
-shollow is again the near case at 1.17 triads per pixel, and even there a mask
+satanshollow is again the near case at 1.17 triads per pixel, and even there a mask
 would alias into moire rather than reproduce stripes. If a higher-resolution board
 is ever added, this is the calculation to redo rather than assume.
 
@@ -109,17 +109,17 @@ It does move one conclusion's confidence, and asymmetrically.
 - The 32 machines showing gaps is robust. Closing the gaps on a 224-line board
   needs a 1.20 mm spot, 1.7 times the assumed figure, which is a badly defocused
   monitor and is reachable with the `focus` knob if someone wants it.
-- **shollow being gap-free is marginal.** It needs the spot under 0.5625 mm to
+- **satanshollow being gap-free is marginal.** It needs the spot under 0.5625 mm to
   start showing gaps, only 20 percent tighter than assumed, which a well focused
   tube plausibly reaches.
 
-So shollow is the marginal case in both derivations and in opposite directions:
+So satanshollow is the marginal case in both derivations and in opposite directions:
 about 25 percent of margin on the scanline side, about 17 percent on the mask
 side, where 1.17 triads per pixel reaches 1.0 at a 0.70 mm mask pitch. The one
 machine the per-machine derivation exists to separate is the one machine whose
 answers a plausible monitor swap could flip. That does not change what gets
 built, since deriving per machine still beats a uniform shader and the knob
-covers the spread, but it is why the shollow notes are worth keeping rather than
+covers the spread, but it is why the satanshollow notes are worth keeping rather than
 rounding off.
 
 ## Color overlays are the exception to "monitor is not a property of a game"

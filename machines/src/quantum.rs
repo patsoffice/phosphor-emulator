@@ -6,7 +6,7 @@
 //! and a trackball. There is no sound CPU; the POKEYs are memory-mapped on the
 //! 68000 bus and also serve the DIP switches through their pot inputs.
 //!
-//! Structurally this mirrors [`crate::foodf`] (single 68000 + POKEY + NVRAM +
+//! Structurally this mirrors [`crate::foodfight`] (single 68000 + POKEY + NVRAM +
 //! autovectored IRQ + RMW low-byte I/O on a big-endian word bus), swapping the
 //! tilemap/sprite pipeline for a color vector pipeline driven by the shared
 //! [`Avg`] device, exactly as [`crate::tempest`] does for the 6502 AVG board.

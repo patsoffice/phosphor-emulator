@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn unit_applies_a_held_key_and_pending_motion_in_the_same_call() {
-        // ccastles moves the counter directly from the key and drains the
+        // crystalcastles moves the counter directly from the key and drains the
         // accumulator separately, so both can land in one tick.
         let mut c = unit_counter();
         c.set_held(true, true);

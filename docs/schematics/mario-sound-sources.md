@@ -75,7 +75,7 @@ ORed with the other half's output. An oscillator tuned by the counter it clocks.
 
 This is structurally Donkey Kong Jr.'s walking voice, which is worth stating
 because the two boards share no sound design otherwise. See
-[`dkongjr-sound-sources.md`](dkongjr-sound-sources.md).
+[`donkeykongjunior-sound-sources.md`](donkeykongjunior-sound-sources.md).
 
 ## Where everything meets
 
@@ -202,7 +202,7 @@ flowchart TB
 - **What the game does with these lines.** How often it strobes a footstep, and
   for how long it holds the skid, were not traced. Donkey Kong Jr.'s equivalent
   question was answered by watching a recorded movie
-  (`tools/script/examples/dkongjr_sound_trace.rhai`) and the same should be done
+  (`tools/script/examples/donkeykongjunior_sound_trace.rhai`) and the same should be done
   here.
 - **The music DAC itself.** The ladder is drawn as MXR1 / RM7 off a 374 latch at
   3K rather than the DAC-08 the Donkey Kong boards use, and the emulator still

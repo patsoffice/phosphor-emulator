@@ -3,11 +3,11 @@
 //! Three games share one PCB, differing only in their memory maps, DIP
 //! semantics and cabinet orientation:
 //!
-//! | CLI name   | Title               | Map                  | Monitor |
-//! |------------|---------------------|----------------------|---------|
-//! | `docastle` | Mr. Do's Castle     | contiguous 0000-7FFF | ROT270  |
-//! | `dorunrun` | Do! Run Run         | split 0000-1FFF + 4000-9FFF | ROT0 |
-//! | `dowild`   | Mr. Do's Wild Ride  | split (as `dorunrun`) | ROT0   |
+//! | CLI name        | Title               | Map                  | Monitor |
+//! |-----------------|---------------------|----------------------|---------|
+//! | `mrdoscastle`   | Mr. Do's Castle     | contiguous 0000-7FFF | ROT270  |
+//! | `dorunrun`      | Do! Run Run         | split 0000-1FFF + 4000-9FFF | ROT0 |
+//! | `mrdoswildride` | Mr. Do's Wild Ride  | split (as `dorunrun`) | ROT0   |
 //!
 //! # Schematics
 //!
@@ -20,7 +20,7 @@
 //! not, and sharing a family is not evidence of sharing an output stage.
 //!
 //! The audio output is transcribed in
-//! [`docs/schematics/docastle-audio-output.md`](../../docs/schematics/docastle-audio-output.md).
+//! [`docs/schematics/mrdoscastle-audio-output.md`](../../docs/schematics/mrdoscastle-audio-output.md).
 //! The four chips reach one node through four EQUAL 1.5k legs, so the 1:1 sum
 //! below is the board's. What is not modelled is what follows: a fixed low shelf
 //! worth about 22 dB between 30 Hz and 362 Hz, a 1k volume rheostat, and an
@@ -82,13 +82,13 @@ use crate::{choice, set_bit_active_low};
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
 pub(crate) enum MainRegion {
-    /// docastle: 0x0000-0x7FFF. dorunrun/dowild: 0x0000-0x1FFF.
+    /// mrdoscastle: 0x0000-0x7FFF. dorunrun/mrdoswildride: 0x0000-0x1FFF.
     RomLow = 1,
-    /// docastle: 0x8000-0x97FF. dorunrun/dowild: 0x2000-0x37FF.
+    /// mrdoscastle: 0x8000-0x97FF. dorunrun/mrdoswildride: 0x2000-0x37FF.
     WorkRam = 2,
-    /// docastle: 0x9800-0x99FF. dorunrun/dowild: 0x3800-0x39FF. 128 sprites × 4.
+    /// mrdoscastle: 0x9800-0x99FF. dorunrun/mrdoswildride: 0x3800-0x39FF. 128 sprites × 4.
     SpriteRam = 3,
-    /// dorunrun/dowild only: 0x4000-0x9FFF.
+    /// dorunrun/mrdoswildride only: 0x4000-0x9FFF.
     RomHigh = 4,
     /// 0xB000-0xB3FF — 32×32 tile codes.
     VideoRam = 5,
@@ -260,7 +260,7 @@ pub enum DocastleVariant {
 struct MapConfig {
     /// Program ROM at the bottom of the map (`0x0000..rom_low_end`).
     rom_low_end: u16,
-    /// Second program ROM window, or `None` on the contiguous docastle map.
+    /// Second program ROM window, or `None` on the contiguous mrdoscastle map.
     rom_high: Option<(u16, u16)>,
     work_ram_start: u16,
     sprite_ram_start: u16,
@@ -273,7 +273,7 @@ struct MapConfig {
     /// Tile pens drawn *behind* sprites. Bit `n` set = pen `n` is transparent
     /// in the front tilemap pass, so it stays wherever the opaque pass put it.
     fg_transmask: u16,
-    /// Video/colour RAM is mirrored 0x800 higher on the docastle map.
+    /// Video/colour RAM is mirrored 0x800 higher on the mrdoscastle map.
     video_ram_mirror: bool,
 }
 
@@ -314,9 +314,9 @@ impl DocastleVariant {
     /// CLI / save-state identifier.
     pub fn id(self) -> &'static str {
         match self {
-            Self::Docastle => "docastle",
+            Self::Docastle => "mrdoscastle",
             Self::Dorunrun => "dorunrun",
-            Self::Dowild => "dowild",
+            Self::Dowild => "mrdoswildride",
         }
     }
 
@@ -1702,7 +1702,7 @@ impl Bus for DocastleBoard {
     }
 }
 
-/// Is `addr` inside the tile-code / colour RAM window (including the docastle
+/// Is `addr` inside the tile-code / colour RAM window (including the mrdoscastle
 /// map's 0x800 mirror)?
 fn main_tile_ram_addr(cfg: &MapConfig, addr: u16) -> Option<u16> {
     let len = if cfg.video_ram_mirror { 0x1000 } else { 0x800 };
@@ -2013,13 +2013,13 @@ impl InputConfigurable for DocastleSystem {
 // DIP switches
 // ---------------------------------------------------------------------------
 
-/// docastle DSW1: Easy, rack test off, diamond bonus credit on, EXTRA easy,
+/// mrdoscastle DSW1: Easy, rack test off, diamond bonus credit on, EXTRA easy,
 /// upright, 3 lives.
 const DOCASTLE_DSW1_DEFAULT: u8 = 0xDF;
 /// dorunrun DSW1: Easy, demo sounds on, flip off, EXTRA easy, upright, special
 /// given, 3 lives.
 const DORUNRUN_DSW1_DEFAULT: u8 = 0xDF;
-/// dowild DSW1: Easy, rack test off, flip off, EXTRA easy, upright, special
+/// mrdoswildride DSW1: Easy, rack test off, flip off, EXTRA easy, upright, special
 /// given, 3 lives.
 const DOWILD_DSW1_DEFAULT: u8 = 0xDF;
 /// DSW2: 1 coin / 1 credit on both slots.
@@ -2228,7 +2228,7 @@ impl DipSwitches for DocastleSystem {
 
 crate::register_machine!(
     new = DocastleSystem::new(DocastleVariant::Docastle),
-    "docastle",
+    "mrdoscastle",
     &["docastle"],
     DOCASTLE_CONTROLS
 );
@@ -2240,14 +2240,14 @@ crate::register_machine!(
 );
 crate::register_machine!(
     new = DocastleSystem::new(DocastleVariant::Dowild),
-    "dowild",
+    "mrdoswildride",
     &["dowild"],
     DOCASTLE_CONTROLS
 );
 
 inventory::submit! {
     DisasmRegion {
-        machine: "docastle",
+        machine: "mrdoscastle",
         region: "main",
         cpu: DisasmCpu::Z80,
         org: 0x0000,
@@ -2257,7 +2257,7 @@ inventory::submit! {
 }
 inventory::submit! {
     DisasmRegion {
-        machine: "docastle",
+        machine: "mrdoscastle",
         region: "sub",
         cpu: DisasmCpu::Z80,
         org: 0x0000,
@@ -2287,7 +2287,7 @@ inventory::submit! {
 }
 inventory::submit! {
     DisasmRegion {
-        machine: "dowild",
+        machine: "mrdoswildride",
         region: "main",
         cpu: DisasmCpu::Z80,
         org: 0x0000,
@@ -2297,7 +2297,7 @@ inventory::submit! {
 }
 inventory::submit! {
     DisasmRegion {
-        machine: "dowild",
+        machine: "mrdoswildride",
         region: "sub",
         cpu: DisasmCpu::Z80,
         org: 0x0000,
@@ -2348,7 +2348,7 @@ macro_rules! gfx_regions {
 }
 
 gfx_regions!(
-    "docastle",
+    "mrdoscastle",
     DOCASTLE_TILE_ROM,
     DOCASTLE_SPRITE_ROM,
     DOCASTLE_PALETTE_PROM
@@ -2360,7 +2360,7 @@ gfx_regions!(
     DORUNRUN_PALETTE_PROM
 );
 gfx_regions!(
-    "dowild",
+    "mrdoswildride",
     DOWILD_TILE_ROM,
     DOWILD_SPRITE_ROM,
     DOWILD_PALETTE_PROM
@@ -2442,7 +2442,7 @@ mod tests {
 
     #[test]
     fn variant_maps_decode_program_rom_windows() {
-        // docastle: contiguous ROM through 0x7FFF, RAM from 0x8000.
+        // mrdoscastle: contiguous ROM through 0x7FFF, RAM from 0x8000.
         let mut castle = DocastleSystem::new(DocastleVariant::Docastle);
         castle
             .board
@@ -2783,7 +2783,7 @@ mod tests {
 
     #[test]
     fn sub_psg_writes_land_on_the_variant_ports() {
-        // docastle: 0xE000/0xE400/0xE800/0xEC00.
+        // mrdoscastle: 0xE000/0xE400/0xE800/0xEC00.
         let mut castle = DocastleSystem::new(DocastleVariant::Docastle);
         for (i, addr) in [0xE000u16, 0xE400, 0xE800, 0xEC00].into_iter().enumerate() {
             castle.bus_write(BusMaster::Cpu(1), addr, 0x80 | 0x05);

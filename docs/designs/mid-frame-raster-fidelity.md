@@ -21,7 +21,7 @@
 > the evidence: Phase 0 sampled attract-**demo** play only, so "Tier B" means
 > "no mid-frame effect appeared in the demo loop", not "this machine has none".
 > Nine machines carry that assumption with nothing tracking it. Two of the nine
-> (burgertime scroll, shollow palette) were additionally classified B on
+> (burgertime scroll, satanshollow palette) were additionally classified B on
 > *visibility* grounds despite genuine active-display writes — an argument from
 > "nobody will notice", which sits badly against `CLAUDE.md`'s
 > Correctness-first ordering. [`raster-sampling-fidelity.md`](raster-sampling-fidelity.md)
@@ -54,7 +54,7 @@ Two render strategies coexist in the codebase (see the graphics audit in
 - **Per-scanline** (williams, namco_pac, tkg04, mario_bros, congo_bongo,
   galaxian_video): the board renders each scanline *inside `tick()`* at the
   moment that scanline is reached, from live video state.
-- **Render-once** (galaga, digdug, xevious, btime, gottlieb, mrdo, foodf,
+- **Render-once** (galaga, digdug, xevious, btime, gottlieb, mrdo, foodfight,
   mcr2/satans_hollow, atari_system1): the board runs the whole CPU frame, then
   renders the entire image once from the *final* video state.
 
@@ -236,10 +236,10 @@ Initial hypotheses; the trace-based method above is authoritative.
 | xevious | A? (scrolling bg) | bg scroll register writes during display |
 | btime (burgertime) | B? | palette latch, X/Y-swap mirror |
 | mrdo | B? | fg/bg scroll, palette |
-| foodf | B? | playfield scroll, palette |
+| foodfight | B? | playfield scroll, palette |
 | gottlieb (qbert) | B? | charram re-decode, palette during display |
 | mcr2/satans_hollow | A? (MCR palette effects) | palette RAM, sprite bank mid-frame |
-| atari_system1 (marble/roadrunner) | **A (confirmed)** | already tracks per-scanline `mo_bank_changes` |
+| atari_system1 (marblemadness/roadrunner) | **A (confirmed)** | already tracks per-scanline `mo_bank_changes` |
 
 "?" = must be measured. The point of the audit is to replace these guesses with
 evidence before doing any migration.

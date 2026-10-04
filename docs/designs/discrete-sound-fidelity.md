@@ -118,7 +118,7 @@ a silent-collision hazard, and it also welds parameter identity to topology, so
 renaming a node or splitting a filter stage breaks every recorded fit.
 
 Parameters are registered explicitly by the sound constructor with stable IDs
-(`dkong.walk.c`). That also buys what auto-recording cannot: only meaningful
+(`donkeykong.walk.c`). That also buys what auto-recording cannot: only meaningful
 values enter the search space, custom components participate on equal terms,
 shared constants can deliberately map to one parameter, and bounds, tolerance
 and parameter class live beside the value.
@@ -181,7 +181,7 @@ excluded from fitting unless the reference manifest declares it trusted.
   the value is behavioral rather than physical.
 - **Calibration** — output scaling or mix trim mapping modeled voltage into
   finite PCM range. `DAC_GAIN = 0.55` and `STOMP_GAIN = 7.0` in
-  `machines/src/dkong_sound.rs` are exactly this. Fittable only when absolute
+  `machines/src/donkeykong_sound.rs` are exactly this. Fittable only when absolute
   capture level is trusted.
 
 ### 7. A fit result is machine-applicable, and write-back is classified
@@ -210,7 +210,7 @@ macro captures the value's expression with `stringify!` alongside its
   inside it, and which term is a judgment the tool does not have. Report only.
 
 This is decidable mechanically, at registration, with no source parsing and no
-guessing. It also matters more than it might sound: in `dkong_sound.rs` — the
+guessing. It also matters more than it might sound: in `donkeykong_sound.rs` — the
 first target — nearly every tunable is already a module-scope const with a
 literal initializer (`WALK_C`, `JUMP_C`, `WALK_LP_HZ`, `DAC_GAIN`,
 `STOMP_GAIN`), so the common case is the automatic one.
@@ -251,18 +251,18 @@ candidates:
 
 ```bash
 # once: prove the reference is what it claims to be
-sndcmp validate-reference $PHOSPHOR_SOUND_REFS/dkong/jump.toml
+sndcmp validate-reference $PHOSPHOR_SOUND_REFS/donkeykong/jump.toml
 
 # fit, and write the result somewhere the emulator can read
-sndcmp fit dkong/jump $PHOSPHOR_SOUND_REFS/dkong/jump.toml \
-    --params dkong.jump.c,dkong.jump.envelope_tau \
-    --out-tuning /tmp/dkong-fit.toml
+sndcmp fit donkeykong/jump $PHOSPHOR_SOUND_REFS/donkeykong/jump.toml \
+    --params donkeykong.jump.c,donkeykong.jump.envelope_tau \
+    --out-tuning /tmp/donkeykong-fit.toml
 
 # hear it in the real machine, no rebuild
-cargo run -p phosphor-frontend -- dkong $ROMS --tuning /tmp/dkong-fit.toml
+cargo run -p phosphor-frontend -- donkeykong $ROMS --tuning /tmp/donkeykong-fit.toml
 
 # land the ones that are literals; the rest come with a located report
-sndcmp writeback /tmp/dkong-fit.toml --apply
+sndcmp writeback /tmp/donkeykong-fit.toml --apply
 ```
 
 Three things are worth being precise about, because "identical, automatically"
@@ -408,7 +408,7 @@ a number to trust.
 capture.** A capture usually holds several: a walk enable held for two seconds
 gives an onset pulse and a release pulse, and gameplay gives a train of them.
 Measured across the whole capture, T20 reported the distance between the first
-and last event — 2.045 s on the `dkong/walk` capture, where the event itself has
+and last event — 2.045 s on the `donkeykong/walk` capture, where the event itself has
 a T20 of 0.055 s and a 24 ms time constant fitting at r² 0.992. That number was
 not merely imprecise; it moved when the events' relative loudness moved and
 stayed put when the envelope changed, which is the opposite of what a decay
@@ -465,10 +465,10 @@ Repository-owned, describing hardware intent rather than emulator methods or
 MAME addresses:
 
 ```toml
-# tools/sound-compare/scenarios/dkong/jump.toml
+# tools/sound-compare/scenarios/donkeykong/jump.toml
 schema = 1
-id = "dkong/jump"
-target = "dkong-discrete"
+id = "donkeykong/jump"
+target = "donkeykong-discrete"
 duration_s = 3.0
 output_rate_hz = 44100
 
@@ -556,7 +556,7 @@ and the reference is resampled to meet it, using
 `phosphor_core::audio::AudioResampler` rather than a second unrelated resampler.
 
 Constructing the circuit at whatever rate the reference WAV happens to carry
-would change the model under test. `dkong_sound.rs` builds board = sim = output
+would change the model under test. `donkeykong_sound.rs` builds board = sim = output
 = host rate by construction, so for the first target this is not hypothetical.
 Devices whose analog behavior materially changes with host rate should
 eventually move to a stable internal simulation rate — but that is a fidelity
@@ -570,7 +570,7 @@ Donkey Kong work made its absence the binding constraint — see "What the first
 board taught" below.
 
 **Per-voice solo render.** Render one voice or node to its own WAV instead of
-the mix. This is the difference between "our dkong sounds wrong" and "our dkong
+the mix. This is the difference between "our donkeykong sounds wrong" and "our donkeykong
 walk voice's RC decay is too fast", and it is the single most useful diagnostic
 here. `DiscreteCircuit::value(node)` already exposes any node's current value,
 so this is a small step: construct the circuit with the selected probe as an
@@ -1268,7 +1268,7 @@ exponential envelope, each driven off the enable *level*, so a short trigger
 truncated it and there was nothing else to do.
 
 Rebuilding the voice from the schematic made the question answerable, and it took
-one script to answer. `tools/script/examples/asteroid_fire_trace.rhai` watches
+one script to answer. `tools/script/examples/asteroids_fire_trace.rhai` watches
 every write to the 74LS259 through a real shot: the game rewrites the whole latch
 every frame and holds line 4 for **fourteen of them, about 230 ms**, whether the
 button is tapped for two frames or held for forty. It is the game's timer, not
@@ -1408,11 +1408,11 @@ A sound constructor registers what it is willing to expose:
 
 ```rust
 let walk_c = tuning.value(ParameterSpec::schematic(
-    "dkong.walk.c", "Walk 555 timing capacitor", Farads, WALK_C, tolerance(0.20),
+    "donkeykong.walk.c", "Walk 555 timing capacitor", Farads, WALK_C, tolerance(0.20),
 ));
 
 let jump_tau = tuning.value(ParameterSpec::model(
-    "dkong.jump.envelope_tau", "Jump behavioral envelope time constant",
+    "donkeykong.jump.envelope_tau", "Jump behavioral envelope time constant",
     Seconds, JUMP_TAU, bounded(0.05, 1.0),
 ));
 ```
@@ -1430,15 +1430,15 @@ no tooling branches.
 from TOML:
 
 ```toml
-# /tmp/dkong-fit.toml — written by `sndcmp fit --out-tuning`
+# /tmp/donkeykong-fit.toml — written by `sndcmp fit --out-tuning`
 schema = 1
-target = "dkong-discrete"
-fitted_against = "dkong/jump"
+target = "donkeykong-discrete"
+fitted_against = "donkeykong/jump"
 reference_sha256 = "..."
 
 [overrides]
-"dkong.jump.c" = 5.12e-8
-"dkong.jump.envelope_tau" = 0.31
+"donkeykong.jump.c" = 5.12e-8
+"donkeykong.jump.envelope_tau" = 0.31
 ```
 
 Any consumer that builds a machine can pass one in — `sndcmp`, `disasm`, and the
@@ -1503,10 +1503,10 @@ declared scale and bounds, and report which metric families move:
 
 ```text
 parameter                  shape   envelope  level   direction
-dkong.jump.c               high    medium    low     larger -> lower pitch
-dkong.jump.envelope_tau    low     high      high    larger -> longer tail
-dkong.jump.output_gain     none    low       high    larger -> louder
-dkong.walk.r1              none    none      none    unrelated
+donkeykong.jump.c               high    medium    low     larger -> lower pitch
+donkeykong.jump.envelope_tau    low     high      high    larger -> longer tail
+donkeykong.jump.output_gain     none    low       high    larger -> louder
+donkeykong.walk.r1              none    none      none    unrelated
 ```
 
 That ranking is itself a recommendation: it says which part of the model can
@@ -1665,7 +1665,7 @@ without embedding Lua or a MAME memory map into the Rust tool:
 
 ```toml
 schema = 1
-scenario = "dkong/jump"
+scenario = "donkeykong/jump"
 wav = "jump.wav"
 
 [capture]
@@ -1734,16 +1734,16 @@ concise; JSON and CSV carry the evidence.
 ### What a recommendation looks like
 
 ```text
-dkong.jump.c
+donkeykong.jump.c
   class: schematic
-  source: machines/src/dkong_sound.rs:...
+  source: machines/src/donkeykong_sound.rs:...
   schematic/default: 47 nF (tolerance ±20%)
   best continuous fit: 51.2 nF
   preferred candidate: 47 nF (E12)
   score change: 0.284 -> 0.119
   interpretation: within capacitor tolerance; plausible
 
-dkong.walk.r2
+donkeykong.walk.r2
   class: schematic
   schematic/default: 27 kOhm
   best fit: 82 kOhm  (+204%)
@@ -1764,8 +1764,8 @@ score is lower.
 parameter it emits — and with `--apply`, lands — an ordinary diff:
 
 ```diff
---- a/machines/src/dkong_sound.rs
-+++ b/machines/src/dkong_sound.rs
+--- a/machines/src/donkeykong_sound.rs
++++ b/machines/src/donkeykong_sound.rs
 @@
 -const JUMP_C: f64 = 47e-9;
 +const JUMP_C: f64 = 51e-9;
@@ -1796,8 +1796,8 @@ plan:
 
 ```toml
 [[target]]
-id = "dkong-discrete"
-machines = ["dkong"]
+id = "donkeykong-discrete"
+machines = ["donkeykong"]
 status = "implemented-needs-validation"
 adapter = "dkong"
 scenarios = ["walk", "jump", "stomp"]
@@ -2093,8 +2093,8 @@ tooling:
 - [tools/sound-reference/README.md](../../tools/sound-reference/README.md) — the
   manual rig being replaced
 - `core/src/device/discrete/` — circuit runtime and primitives
-- `machines/src/dkong_sound.rs`, `machines/src/tkg04.rs` — first target
-- `machines/src/asteroids_sound.rs`, `machines/src/llander_sound.rs`,
+- `machines/src/donkeykong_sound.rs`, `machines/src/tkg04.rs` — first target
+- `machines/src/asteroids_sound.rs`, `machines/src/lunarlander_sound.rs`,
   `machines/src/congo_sound.rs`, `core/src/device/galaxian_sound.rs` — later
   targets
 - `phosphor-emulator-audiodiff-76wx` — absorbed here (Phases 1, 2, 4)

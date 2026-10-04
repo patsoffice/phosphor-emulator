@@ -49,7 +49,7 @@ input-driven sound triggers and every code path behind a coin are unguarded.
 The second gap is that a trace which *can* be scripted today is limited to
 digital pulses. `PressSpec`/`MotionSpec` cannot express a trackball or spinner
 trace at all, which is exactly the input the ten analog machines need —
-ccastles, foodf, gridlee, irobot, marble, missile_command, quantum, roadrunner,
+crystalcastles, foodfight, gridlee, irobot, marblemadness, missilecommand, quantum, roadrunner,
 starwars, tempest.
 
 ## Goals
@@ -119,7 +119,7 @@ input path can bypass the recorder without also bypassing the trait.
 
 `release_all_inputs` is recorded as its own record rather than decomposed into
 per-control button releases. Machines holding conditioned analog state
-(ccastles, marble, missile_command) override it to clear trackball accumulators
+(crystalcastles, marblemadness, missilecommand) override it to clear trackball accumulators
 that the default loop does not touch; decomposing would silently drop that.
 
 *Alternative considered:* subscribe to `BindingSet` resolution. Rejected — it
@@ -190,7 +190,7 @@ trailer: sha256(all preceding bytes), 32 bytes
 
 ```rust
 struct MovieHeader {
-    machine: String,          // registry name, e.g. "marble"
+    machine: String,          // registry name, e.g. "marblemadness"
     rom_set: String,          // MAME set recorded on, e.g. "spacduel1" (v3+)
     rom_digest: [u8; 32],     // sha256 over the loaded set's members, name-sorted
     controls: Vec<String>,    // stable_names; records index into this
@@ -293,8 +293,8 @@ want to express.
 
 ```toml
 [[frame]]
-machine = "marble"
-movie   = "movies/marble-level1.phmi"
+machine = "marblemadness"
+movie   = "movies/marblemadness-level1.phmi"
 frames  = 4200
 shows   = "Level 1, ball mid-way up the second ramp, enemy marble closing"
 size    = [512, 384]
@@ -314,7 +314,7 @@ Two honest notes:
   raises the value of `shows` and the committed reference PNG, which carry the
   human judgement that the frame was right when pinned.
 * Not every machine needs one. Prefer gameplay pins where attract mode guards
-  least: the analog machines first (marble, tempest, missile_command, ccastles),
+  least: the analog machines first (marblemadness, tempest, missilecommand, crystalcastles),
   then machines whose attract loop is a static title screen.
 
 ## Size

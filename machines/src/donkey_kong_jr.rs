@@ -9,7 +9,7 @@ use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_macros::{BusDebug, Saveable};
 
-use crate::dkongjr_sound::DkongJrDiscreteSound;
+use crate::donkeykongjunior_sound::DkongJrDiscreteSound;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use crate::tkg04::{self, MainRegion, SoundRegion, Tkg04Board, Tkg04Bus, Tkg04Cpus};
@@ -543,7 +543,7 @@ impl InputConfigurable for DkongJrSystem {
 }
 
 impl MachineCore for DkongJrSystem {
-    crate::machine_core_metadata!("dkongjr", tkg04::TIMING, tkg04::clock_tree);
+    crate::machine_core_metadata!("donkeykongjunior", tkg04::TIMING, tkg04::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         self.board.gfx_sheets()
@@ -744,7 +744,7 @@ fn load_parent_program_rom(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
 
 crate::register_machine!(
     DkongJrSystem,
-    "dkongjr",
+    "donkeykongjunior",
     &["dkongjr", "dkongjr2"],
     crate::donkey_kong::DKONG_CONTROLS
 );

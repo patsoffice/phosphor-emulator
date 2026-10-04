@@ -1,0 +1,21 @@
+schema = 1
+id = "donkeykong/jump"
+target = "donkeykong-discrete"
+duration_s = 5.0
+description = "One jump, triggered once and allowed to decay completely"
+
+# Edge-triggered one-shot: a single narrow pulse. Re-pulsing would overlap
+# decays and make the envelope and integrated energy unmeasurable.
+[[action]]
+at_s = 2.0
+control = "jump"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "jump"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

@@ -36,7 +36,7 @@
 //! # What this does not cover
 //!
 //! The loop only. What *surrounds* it stays on the machine, because it differs:
-//! `foodf` does its watchdog and audio mixing around the frame, and the
+//! `foodfight` does its watchdog and audio mixing around the frame, and the
 //! Namco Galaga family re-forms its CPU/bus split per scanline. A board whose
 //! polygon or vector layer is not raster-driven does not implement this at all.
 

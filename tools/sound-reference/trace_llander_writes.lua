@@ -10,7 +10,7 @@
 -- latch on a scenario's timeline; this leaves the game running and reads what
 -- it does, which is the only way to learn how the game uses a circuit whose
 -- behavior the drawing leaves open. It was written to answer one question from
--- docs/schematics/llander-audio-output.md: whether a crash holds the explosion
+-- docs/schematics/lunarlander-audio-output.md: whether a crash holds the explosion
 -- at full throttle. It does not. The game sets the explosion and throttle 7
 -- together, steps the throttle down one notch every ~0.41 s to 0, holds the
 -- explosion bit about 3.5 s longer and clears it.

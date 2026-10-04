@@ -612,7 +612,7 @@ Tracked as `phosphor-emulator-williams-video-conformance-itvk`.
    same source. All three machines on `WilliamsBoard` are covered.
 
 Only then a second board. `raster-sampling-fidelity.md` W3 lists seven:
-`namco_galaga`, `btime`, `mrdo`, `foodf`, `gottlieb`, `mcr2`, `atari_system1`.
+`namco_galaga`, `btime`, `mrdo`, `foodfight`, `gottlieb`, `mcr2`, `atari_system1`.
 Williams is first because it is the only one that exposes beam position to the
 CPU through a counter register, which is what makes the ROM self-synchronising.
 

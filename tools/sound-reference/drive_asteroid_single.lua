@@ -95,7 +95,7 @@ local TRIGGER_S = 1.0
 
 -- The two fire voices are the exception, and their length is the game's own.
 -- Tracing every write to the 74LS259 through a real shot
--- (tools/script/examples/asteroid_fire_trace.rhai) shows the game rewrites the
+-- (tools/script/examples/asteroids_fire_trace.rhai) shows the game rewrites the
 -- whole latch every frame and holds line 4 for fourteen of them, about 230 ms,
 -- whether the button is tapped for two frames or held for forty.
 --

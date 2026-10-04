@@ -33,7 +33,7 @@
 //! Still unmodelled, and still the larger half: **a bucket-brigade analog delay
 //! line** clocked at 37.8 kHz, and **a stereo difference matrix** that puts the
 //! dry signal in one channel and the delayed signal in both. This output is
-//! mono. Only Star Wars's drawing was read; `esb` shares this file and had
+//! mono. Only Star Wars's drawing was read; `empirestrikesback` shares this file and had
 //! none. See `phosphor-emulator-82zr`.
 
 use phosphor_core::audio::{Biquad, DcBlocker, SampleRing};
@@ -2085,7 +2085,7 @@ impl StarWarsSystem {
             cpu: M6809::new(),
             sound_cpu: M6809::new(),
             board: StarWarsBoard::new_esb(),
-            machine_id: "esb",
+            machine_id: "empirestrikesback",
         }
     }
 
@@ -2742,7 +2742,7 @@ inventory::submit! {
 MachineEntry::new("starwars", &[Revision { names: &["starwars"], nvram_group: None }], create_machine, create_bare, create_bare_revision, STARWARS_CONTROLS) }
 
 inventory::submit! {
-MachineEntry::new("esb", &[Revision { names: &["esb"], nvram_group: None }], create_esb_machine, create_esb_bare, create_esb_bare_revision, STARWARS_CONTROLS) }
+MachineEntry::new("empirestrikesback", &[Revision { names: &["esb"], nvram_group: None }], create_esb_machine, create_esb_bare, create_esb_bare_revision, STARWARS_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

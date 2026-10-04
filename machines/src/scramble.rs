@@ -1419,7 +1419,7 @@ impl Default for ScobraSystem {
 crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation);
 
 impl MachineCore for ScobraSystem {
-    crate::machine_core_metadata!("scobra", TIMING, crate::scramble::clock_tree);
+    crate::machine_core_metadata!("supercobra", TIMING, crate::scramble::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
@@ -1475,7 +1475,7 @@ crate::impl_dip_switches!(
 
 crate::impl_board_debug_trace!(ScobraSystem, board);
 
-crate::register_machine!(ScobraSystem, "scobra", &["scobra"], SCRAMBLE_CONTROLS);
+crate::register_machine!(ScobraSystem, "supercobra", &["scobra"], SCRAMBLE_CONTROLS);
 
 #[cfg(test)]
 mod tests {
@@ -1576,7 +1576,7 @@ mod tests {
     #[test]
     fn scobra_layout_maps_ram_and_io() {
         let sys = ScobraSystem::new();
-        assert_eq!(sys.machine_id(), "scobra");
+        assert_eq!(sys.machine_id(), "supercobra");
         assert_eq!(sys.board.hw, Hw::Scobra);
         // Default DIPs (active-low): IN1 continue+3 lives, IN2 1C/1C upright.
         assert_eq!(sys.board.in1 & SCB_DIP1_MASK, 0x01);

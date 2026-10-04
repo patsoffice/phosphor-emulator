@@ -2530,7 +2530,7 @@ mod tests {
             ("digdug", 60),
             ("burgertime", 800),
             ("qbert", 200),
-            ("shollow", 200),
+            ("satanshollow", 200),
         ];
 
         for (machine, warmup) in cases {

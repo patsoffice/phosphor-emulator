@@ -59,7 +59,14 @@ fn resolve_movie(spec: &str, machine: &str) -> Result<Option<PathBuf>, String> {
 /// and the per-cycle conversion of that core
 /// (`docs/designs/cycle-accurate-i8088.md`) will cost throughput by
 /// construction, so the list has to be able to see it.
-const DEFAULT_MACHINES: &[&str] = &["pacman", "galaga", "tempest", "marble", "joust", "qbert"];
+const DEFAULT_MACHINES: &[&str] = &[
+    "pacman",
+    "galaga",
+    "tempest",
+    "marblemadness",
+    "joust",
+    "qbert",
+];
 
 /// Audio drain buffer, matching the frontend's own scratch size.
 const AUDIO_SCRATCH: usize = 2048;

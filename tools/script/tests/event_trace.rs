@@ -13,7 +13,7 @@ use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_harness::roms_dir;
 use phosphor_script::DebugSession;
 
-const MACHINE: &str = "shollow";
+const MACHINE: &str = "satanshollow";
 
 #[test]
 fn event_trace_captures_region_tagged_writes() {

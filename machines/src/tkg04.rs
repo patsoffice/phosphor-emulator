@@ -7,7 +7,7 @@
 //! conventions with each other. Their sound sections are three different
 //! designs rather than revisions of one, which is the fact this section mainly
 //! exists to record: see "Sound is per game" below before assuming anything in
-//! [`crate::dkong_sound`] generalizes.
+//! [`crate::donkeykong_sound`] generalizes.
 //!
 //! | Game | Drawing | Source | Page |
 //! |---|---|---|---|
@@ -44,7 +44,7 @@
 //!   inverter oscillators, and envelope networks on Q1-Q7 2SC1815 with 1S553
 //!   steering diodes. Music through a DAC-08 at 8K off an MB8884 (8035) at 7H,
 //!   command latch LS75 x2 at 4H/4F, two 2716 at 3H/3F. This is the drawing
-//!   behind the 555 constants in [`crate::dkong_sound`].
+//!   behind the 555 constants in [`crate::donkeykong_sound`].
 //! - Donkey Kong Jr.: digital tone sources. No NE556 and no 4049 anywhere. Two
 //!   74LS629 VCOs (5K and 8L), a 4020 ripple counter at 6L, an LS157 at 6K
 //!   selecting counter taps, and an LS123 one-shot at 4K, with only Q1/Q3/Q4
@@ -786,7 +786,7 @@ impl Tkg04Board {
                 // is not there. Wrapping models an unconnected address line:
                 // the ROM sees the low bits and repeats. Without this a sprite
                 // with attribute bit 0x40 set indexes past the cache and panics,
-                // which dkong reaches after a reset mid-session.
+                // which donkeykong reaches after a reset mid-session.
                 let spr_code = ((code_byte & 0x7F) as u16 | (((attr_byte & 0x40) as u16) << 1))
                     % sprite_cache.count().max(1) as u16;
                 let flip_y = (code_byte & 0x80) != 0;

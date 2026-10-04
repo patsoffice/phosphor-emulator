@@ -1050,7 +1050,7 @@ mod tests {
         /// transposed digit moves an axis by more than a tenth.
         #[test]
         fn each_window_is_a_four_by_three_tube() {
-            for (name, w) in [("asteroids", WINDOW), ("llander", WINDOW_LLANDER)] {
+            for (name, w) in [("asteroids", WINDOW), ("lunarlander", WINDOW_LLANDER)] {
                 let aspect = f64::from(w.width) / f64::from(w.height);
                 let off = (aspect / (4.0 / 3.0) - 1.0).abs();
                 assert!(off < 0.03, "{name}: {aspect:.4} is not 4:3 ({off:.3} off)");
@@ -1063,7 +1063,7 @@ mod tests {
         /// Only the vertical framing removes anything.
         #[test]
         fn the_field_is_cropped_vertically_and_overscanned_horizontally() {
-            for (name, w) in [("asteroids", WINDOW), ("llander", WINDOW_LLANDER)] {
+            for (name, w) in [("asteroids", WINDOW), ("lunarlander", WINDOW_LLANDER)] {
                 assert!(w.x < 0, "{name}: X should overscan, starts at {}", w.x);
                 assert!(
                     w.x + w.width as i32 > 1024,

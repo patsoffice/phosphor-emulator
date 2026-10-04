@@ -8,7 +8,7 @@
 //! revisions differ in C9 alone: 1000 uF on rev B, 3300 uF on rev E.
 //!
 //! Crystal Castles drives 035435-01 rev F (SP-241 sheet 2A), transcribed in
-//! [`docs/schematics/ccastles-audio-output.md`](../../docs/schematics/ccastles-audio-output.md):
+//! [`docs/schematics/crystalcastles-audio-output.md`](../../docs/schematics/crystalcastles-audio-output.md):
 //! the same parts in the same places, read against the table above, with C9 at
 //! 3300 uF.
 //!

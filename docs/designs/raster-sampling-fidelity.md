@@ -37,7 +37,7 @@ Two of the nine classifications are additionally judgement calls about
 | Machine | Audit finding | Classified |
 |---|---|---|
 | burgertime | "scroll written 4× total at scanlines 88–91 across 4 frames (sporadic transitions)" | B |
-| shollow (mcr2) | "palette written only in 4 of 2400 frames (screen-transition bulk reloads that span active display because the CPU rewrites 32 entries while the beam scans)" | B |
+| satanshollow (mcr2) | "palette written only in 4 of 2400 frames (screen-transition bulk reloads that span active display because the CPU rewrites 32 entries while the beam scans)" | B |
 
 Both are genuine active-display writes. On hardware those frames show the rows
 above the write with the old value and the rows below with the new one; we
@@ -87,13 +87,13 @@ Nine render-once machines from the prior audit, with their render entry points:
 | Machine | Board | Render structure | Buffer |
 |---|---|---|---|
 | qbert | gottlieb | `render_frame_internal` (`gottlieb.rs:731`) — layer-outer: fill → sprites/tiles ordered by `bg_priority` | u8 index + priority |
-| shollow | mcr2 | `render_frame_internal` (`mcr2.rs:413`) — dirty-gated per-tile, then sprites | u8 index + priority |
+| satanshollow | mcr2 | `render_frame_internal` (`mcr2.rs:413`) — dirty-gated per-tile, then sprites | u8 index + priority |
 | galaga | namco_galaga | `render_video` (`galaga.rs:590`) — fill → starfield → sprites → tilemap | u8 index |
 | digdug, xevious | namco_galaga | same shape | u8 index |
 | mrdo | mrdo | `render_frame` (`mrdo.rs:562`) — per-pixel whole-frame loop | u16 pen |
 | burgertime | btime | `render_visible` (`btime.rs:573`) → `draw_background`/`draw_chars`/`draw_sprites` | native RGB |
-| foodf | foodf | `render` (`foodf.rs:740`) — per-pixel whole-frame loop | pf_pen + RGB |
-| marble | atari_system1 | `render` — playfield then MO bands | u16 index |
+| foodfight | foodfight | `render` (`foodfight.rs:740`) — per-pixel whole-frame loop | pf_pen + RGB |
+| marblemadness | atari_system1 | `render` — playfield then MO bands | u16 index |
 
 All nine already refresh correctly under the debugger — Phase 1 of the prior
 epic (commit `e9380a3`) moved the render into a frame-boundary hook shared by
@@ -116,7 +116,7 @@ is the bulk of the labour and it is not mechanical.
 phase is inside a custom LSI and is on no drawing; the reason is at the end of
 this section.**
 
-**The cheapest real accuracy win in this doc, and it fixes the shollow case.**
+**The cheapest real accuracy win in this doc, and it fixes the satanshollow case.**
 
 `gottlieb.rs:873` and `mcr2.rs:539` have a byte-for-byte identical final pass:
 
@@ -372,13 +372,13 @@ does NOT establish", are in
 
 | Board | Machines | What drives the list address | Buffer | Verdict |
 |---|---|---|---|---|
-| `foodf` | foodf | `2H,8H,16H,32H,64H,128H,256H` via 6H/6J LS157 | odd/even, `1VX` | **Live**, 1 line ahead |
+| `foodfight` | foodfight | `2H,8H,16H,32H,64H,128H,256H` via 6H/6J LS157 | odd/even, `1VX` | **Live**, 1 line ahead |
 | `namco_galaga` | galaga | Namco 04XX, clocked by `1H`/`2H`/`HSYNC`, fed `MATCH` | not located | **Live**, 1 line ahead |
 | `btime` | burgertime | `4H..80H`+`4V..80V` via LS153, shared with the tilemap | 93425 x3 | **Live**, per line |
 | `mrdo` | mrdo | LS393 counter off `HA`, via A5/B5/C5/D5 LS153 | 6148 pairs | **Live**, per line |
-| `mcr2` | shollow | `H3..H8` + `DV0..DV2` via C7/M7/N7 LS157 | 512x4 x2, swapped on `DV0` | **Live**, ≤8-line lag |
+| `mcr2` | satanshollow | `H3..H8` + `DV0..DV2` via C7/M7/N7 LS157 | 512x4 x2, swapped on `DV0` | **Live**, ≤8-line lag |
 | `gottlieb` | qbert | `FORA0..FORA5` against `VV0..VV7`, per line | "line object select RAM" | **Live**, per line |
-| `atari_system1` | marble, roadrunner | not traced; implied by the line buffer | 2149-2 x4, `ACS`/`BCS` | **Live**, 1 line ahead |
+| `atari_system1` | marblemadness, roadrunner | not traced; implied by the line buffer | 2149-2 x4, `ACS`/`BCS` | **Live**, 1 line ahead |
 | `namco_pac` | pacman, mspacman | 3F/3H position RAM into the 2F adder | not read | **Live**, per line |
 | `mario_bros` | mariobros | `HPO0..HPO7` into the 5M/4M counter | not read | **Live**, per line |
 
@@ -394,13 +394,13 @@ vblank capture.
 * **digdug, xevious.** Same board family as galaga, and MAME treats their sprite
   RAM identically (Dig Dug carries the same "buffered and delayed by one
   scanline" comment). Family resemblance, not a transcription.
-* **tkg04 (dkong, dkongjr).** Nintendo, same family as `mario_bros`. Note that
+* **tkg04 (donkeykong, donkeykongjunior).** Nintendo, same family as `mario_bros`. Note that
   MAME documents an 8257 DMA copying sprite data from 0x6900 to the sprite banks
   at 0x7400: that is a CPU-commanded copy *into* the list, the same category as
   System 1's bank swap, not the video circuit latching what it reads.
-* **galaxian_video, congo_bongo, docastle, ccastles.** Not read, and none of
+* **galaxian_video, congo_bongo, docastle, crystalcastles.** Not read, and none of
   them is blocking anything: they already render per scanline.
-* **williams, gridlee, missile, irobot.** No sprite circuit to ask about: these
+* **williams, gridlee, missilecommand, irobot.** No sprite circuit to ask about: these
   are bitmap or framebuffer machines and the CPU draws into memory the beam
   scans.
 * **The vector machines.** No scanline hardware.
@@ -531,7 +531,7 @@ that becomes per-row for free.
 ### Estimated cost
 
 Roughly 50–100 lines per machine, nine machines. The helpers exist; the
-restructure is the work. `mrdo` and `foodf` are per-pixel whole-frame loops
+restructure is the work. `mrdo` and `foodfight` are per-pixel whole-frame loops
 rather than layer passes and will need more care.
 
 ### Explicitly out of scope
@@ -819,7 +819,7 @@ the honest reading is that nothing was measured. The generated code is
 monomorphized per game and the pins are byte-identical, which is the stronger
 argument here anyway.
 
-Three machines remain: mrdo, foodf, marble, plus the boards W5 turned up.
+Three machines remain: mrdo, foodfight, marblemadness, plus the boards W5 turned up.
 
 ### What shipped, on mrdo, 2026-08-29
 
@@ -961,7 +961,7 @@ vary along the row, and must not precompute a per-frame index of live state,
 because that is a latch and it reintroduces what per-scanline rendering exists
 to remove.
 
-### What shipped, on foodf, 2026-08-29
+### What shipped, on foodfight, 2026-08-29
 
 The seventh, the second of the two "per-pixel whole-frame loop" boards, and the
 first in the epic that is **faster** after the migration rather than slower.
@@ -1039,9 +1039,9 @@ observe the 32V interrupt latch, and now drive `begin_scanline`, where it lives.
 The frame-loop test picks up what that gave away, asserting the real loop
 reaches scanline 32 and raises the request.
 
-Two machines remain: marble, plus the boards W5 turned up.
+Two machines remain: marblemadness, plus the boards W5 turned up.
 
-### What shipped, on atari_system1 (marble and roadrunner), 2026-08-29
+### What shipped, on atari_system1 (marblemadness and roadrunner), 2026-08-29
 
 The eighth and last of this work item's own list, both machines on the board at
 once, and the one where `mo_shadow` retires. It is also the board that showed
@@ -1074,14 +1074,14 @@ published `0x117`. A three-pixel shift of the playfield is the whole 14612-pixel
 difference, and by eye the two pictures are the same scene with the canyon and
 road three pixels apart, the alpha text and the character unmoved.
 
-| comparison | marble | roadrunner |
+| comparison | marblemadness | roadrunner |
 |---|---|---|
 | new 1800 vs old 1800 | **0 / 80640** | 14612, all 240 rows |
 | new 1800 vs old 1799 | 467, in three 17-row bands | 207, rows 96-125 only |
 | control: old 1799 vs old 1800 | 467 | 14798 |
 
 The two residuals against `old 1799` are the sprite layer being one publish
-newer than *that* frame's snapshot, which is right: marble's three 17-row bands
+newer than *that* frame's snapshot, which is right: marblemadness's three 17-row bands
 are its three animating objects, and Road Runner's rows 96-125 is its character.
 Every band is accounted for.
 
@@ -1108,8 +1108,8 @@ positively, so they discriminate in the other direction. That is an independent
 confirmation of this work from a source that knew nothing about how it would be
 implemented.
 
-**Perf: about -5% on marble and -3 to -4% on Road Runner**, on two back-to-back
-A/B pairs (marble 3.265 → 3.092 and 3.225 → 3.053; roadrunner 3.456 → 3.305 and
+**Perf: about -5% on marblemadness and -3 to -4% on Road Runner**, on two back-to-back
+A/B pairs (marblemadness 3.265 → 3.092 and 3.225 → 3.053; roadrunner 3.456 → 3.305 and
 3.484 → 3.368 ms/frame), the second pair on a quiet host at ±0.7% to ±4.4%.
 Marble's -5.3% is identical across both pairs. Render collapses from 0.69 to
 0.013 ms/frame and emulation rises from 2.55 to 3.05.
@@ -1128,7 +1128,7 @@ read while the beam is on `r - 1`; but the `ypos` expression carries no such
 term, the sheets do not establish the buffers' phase, and the reference driver's
 own `+2` is documented there as a kludge over the `+1` it calls correct.
 
-### What shipped, on docastle (docastle, dorunrun, dowild), 2026-08-29
+### What shipped, on docastle (mrdoscastle, dorunrun, mrdoswildride), 2026-08-29
 
 The first of W5's five, three games on one board, and **the board that proves
 why W5 existed**. Its `render_frame` doc comment asserted:
@@ -1155,12 +1155,12 @@ reads a row rather than 240.
 
 | | new vs old N-1 | new vs old N | control (old N-1 vs old N) |
 |---|---|---|---|
-| docastle (1800) | **0 / 46080** | 122 | 122 |
+| mrdoscastle (1800) | **0 / 46080** | 122 | 122 |
 | dorunrun (2400) | **0 / 46080** | 805 | 805 |
-| dowild (1800) | 20 | 269 | 289 |
+| mrdoswildride (1800) | 20 | 269 | 289 |
 
-docastle and dorunrun are exactly one frame older, against controls that prove
-each is animating. **dowild is a third case and its 20-pixel residual is the
+mrdoscastle and dorunrun are exactly one frame older, against controls that prove
+each is animating. **mrdoswildride is a third case and its 20-pixel residual is the
 finding**, not noise. Decomposed by row band, its control has four:
 
 | band | matches |
@@ -1183,10 +1183,10 @@ when such a write lands *below* it. That is what the mid-frame test pins, and
 why the test's value does not depend on the pin having moved in that band.
 
 **Perf: nothing was measured, and the two pairs disagreeing is the reason to
-say so.** Pair 1 (900 frames, 15 reps) put docastle at +0.1%, dorunrun at +2.4%
-and dowild at **+7.0%** (2.780 → 2.975 ms/frame). Pair 2, rerunning the two that
-bracket that range, put docastle at **-1.3%** and dowild at **-0.2%** (2.805 →
-2.799). Both machines measured twice changed sign, so dowild's +7% did not
+say so.** Pair 1 (900 frames, 15 reps) put mrdoscastle at +0.1%, dorunrun at +2.4%
+and mrdoswildride at **+7.0%** (2.780 → 2.975 ms/frame). Pair 2, rerunning the two that
+bracket that range, put mrdoscastle at **-1.3%** and mrdoswildride at **-0.2%** (2.805 →
+2.799). Both machines measured twice changed sign, so mrdoswildride's +7% did not
 reproduce and this host cannot resolve a difference of that size here. dorunrun
 was measured once and is uncorroborated.
 
@@ -1230,12 +1230,12 @@ old buffer above and the new below, where the old code read the select once at
 the frame boundary. Traced: `$1140` *is* written during active display — at
 scanlines 125 and 126 of frame 1799 — but bit 1 holds the same value across
 those writes, so the selection does not change there and no seam appears. The
-swaps land in blanking, scanlines 234 to 249. That is the same shape as foodf's
+swaps land in blanking, scanlines 234 to 249. That is the same shape as foodfight's
 flip latch: a live-read register written mid-frame carrying an unchanging value.
 
 **The pin did not move, and the pin's own frames could not have shown that.**
 Old 1799 and old 1800 are byte-identical, so both cases predict the same thing
-there — foodf's trap again. Frame 1799 is the discriminator:
+there — foodfight's trap again. Frame 1799 is the discriminator:
 
 | comparison | result |
 |---|---|
@@ -1267,7 +1267,7 @@ legitimately is. It is falsified by changing the displayed buffer from
 **Perf: about +1%, and this one is actually resolved.** Two back-to-back A/B
 pairs at 15 and 21 repetitions: 2.351 → 2.376 (**+1.1%**) and 2.359 → 2.378
 (**+0.8%**), spreads ±1.2% to ±4.1%. Both pairs agree in sign *and* magnitude
-and the two before-runs are 0.3% apart, which is the opposite of docastle's
+and the two before-runs are 0.3% apart, which is the opposite of mrdoscastle's
 result and worth the contrast. Render collapses from 0.084 to 0.005 ms/frame;
 emulation rises 2.27 to 2.37.
 
@@ -1286,13 +1286,13 @@ no version of per-row rendering that avoids that, and about 1% is what it costs.
 
 All 40 registered machines are accounted for. Every board that renders a raster
 picture from live state now composites it row by row as the beam passes:
-gottlieb, btime, namco_galaga (galaga, digdug, xevious), mrdo, foodf,
-atari_system1 (marble, roadrunner), docastle (docastle, dorunrun, dowild),
-irobot's overlay and ccastles' sprite layer, on top of the 18 that already did.
+gottlieb, btime, namco_galaga (galaga, digdug, xevious), mrdo, foodfight,
+atari_system1 (marblemadness, roadrunner), docastle (mrdoscastle, dorunrun, mrdoswildride),
+irobot's overlay and crystalcastles' sprite layer, on top of the 18 that already did.
 `mcr2` stays out by `phosphor-emulator-raster-sampling-6kae.6`, and the seven
 vector machines have no scanline hardware.
 
-### What shipped, on ccastles, 2026-08-29
+### What shipped, on crystalcastles, 2026-08-29
 
 W5's "lesser finding", and the cleanest result in the epic. This board already
 composited its **bitmap** per scanline, but rendered all 40 sprites once at

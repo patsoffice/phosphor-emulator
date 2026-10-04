@@ -82,12 +82,12 @@ No `fn draw_sprite_row` remains anywhere in `machines/`.
 Rev 1 claimed this "captures 4 machines". It captures 2, and the two it missed
 were never good fits — a claim rev 1 made without reading their renderers:
 
-* **`missile_command`** (`missile_command.rs:718`) is not a packed-nibble
+* **`missilecommand`** (`missile_command.rs:718`) is not a packed-nibble
   unpack. It is bit-planar (`((pix >> 2) & 4) | ((pix << 1) & 2)`) with the
   third colour bit fetched from a *separate scattered address* for scanlines
   ≥ 224 via `get_bit3_addr`. No `(pixels_per_byte, high_first)` description
   covers that.
-* **`ccastles`** (`ccastles.rs:839`) applies per-pixel horizontal scroll
+* **`crystalcastles`** (`crystalcastles.rs:839`) applies per-pixel horizontal scroll
   (`hscroll.wrapping_add(x ^ flip)`), so source x is not linear in destination
   x, and composites per pixel against a sprite buffer through a priority PROM.
   The helper assumes a contiguous source row and a linear x mapping.
@@ -115,8 +115,8 @@ predictable cost of adding RGB and indexed siblings of everything rather than on
 demand, and both should be resolved rather than left:
 
 * **`render_scrolled_tilemap_scanline`** (non-indexed) — 0 callers; only the
-  `_indexed` sibling is used. `foodf` is the one plausible adopter (see below).
-  Migrate foodf onto it, or delete it.
+  `_indexed` sibling is used. `foodfight` is the one plausible adopter (see below).
+  Migrate foodfight onto it, or delete it.
 * **`compute_resistor_net`** (`resistor.rs:63`) — 0 production callers, exercised
   only by its own unit tests. Rev 1 proposed expressing the DK-family Darlington
   DAC through it; that didn't happen (`compute_tkg04_channel` models the TTL
@@ -136,15 +136,15 @@ render paths. An explicit call on each, from reading the renderers:
 | Machine | Verdict | Why |
 |---|---|---|
 | **`congo_bongo`** fg tilemap (`congo_bongo.rs:970`) | **Migrate** | The one clean remaining fit. Already per-scanline, 32 columns of 8×8, `tiles.pixel(code, px, py)` + palette lookup with pixel-0 transparency. `fg_bank`/`pal_offset` capture into the closures. Sprites already use `draw_sprite_row`. |
-| **`foodf`** (`foodf.rs:740`) | **Migrate if it retires the dead helper** | Column-scan tile order (`col * rows + row`) expresses fine in `tile_info_fn`; the −8 scroll needs `render_scrolled_tilemap_scanline`, which currently has no users. Do these two together or not at all. |
+| **`foodfight`** (`foodfight.rs:740`) | **Migrate if it retires the dead helper** | Column-scan tile order (`col * rows + row`) expresses fine in `tile_info_fn`; the −8 scroll needs `render_scrolled_tilemap_scanline`, which currently has no users. Do these two together or not at all. |
 | **`atari_system1`** playfield/MO (`:806`, `:853`) | **Do not migrate** | Two independent blockers. Its index buffer is `[u16]` (10-bit pens, 0x000–0x3FF) and the helper writes `u8`; and it selects a *different `GfxCache` per tile* (`self.playfield.banks.get(bank_id)`) while the helper takes one `&GfxCache`. Supporting either would contort the helper — Closed Decision 4. |
 | **`mcr2`** (`:424`) | **Do not migrate** | Confirms rev 1's hedge. Renders per *tile*, gated on `tile_dirty.is_dirty()`, at 2× upscale, writing pixel and priority buffers as 2×2 blocks. The scanline helper's shape (iterate columns of one scanline) is simply the wrong loop. |
 | **`galaxian_video`** tilemap (`:490`) | **Do not migrate** | **Per-column independent vertical scroll** — `eff_y = (mame_y + objram[col*2]) & 0xff`, so `tile_row` and `py` differ per column. The helper computes both once, outside the column loop. Structural mismatch. Its sprites already use `draw_sprite_row`. |
 | **`mrdo`** (`:562`) | **Do not migrate** | Per-*pixel* whole-frame loop into a `[u16]` pen buffer, sampling two scrolled tilemaps with per-pixel flip mirroring and a `TILE_FORCE_LAYER0` opacity rule. Same `u16` blocker as atari_system1, plus per-pixel geometry. |
-| **`missile_command`**, **`ccastles`** bitmap | **Do not migrate** | See Feature 3. |
+| **`missilecommand`**, **`crystalcastles`** bitmap | **Do not migrate** | See Feature 3. |
 | **`btime`** (`:648`) | **Leave alone** | Its local `blit_tile` already serves chars, sprites and background from one place — the right factoring for this machine. Its tilemap is stored transposed (`x = 31 - off/32`) and drawn tile-wise, not scanline-wise. Nothing to gain. |
 
-Net remaining work: **congo_bongo's fg tilemap**, and **foodf paired with
+Net remaining work: **congo_bongo's fg tilemap**, and **foodfight paired with
 retiring `render_scrolled_tilemap_scanline`**. Everything else is closed.
 
 ## Remaining plan
@@ -152,7 +152,7 @@ retiring `render_scrolled_tilemap_scanline`**. Everything else is closed.
 1. Delete the stray `</content>` artifact and this doc's stale rotation section
    *(done in rev 2)*.
 2. Migrate `congo_bongo` fg to `render_tilemap_scanline`; frameshot-compare.
-3. Decide foodf: migrate to `render_scrolled_tilemap_scanline`, or delete that
+3. Decide foodfight: migrate to `render_scrolled_tilemap_scanline`, or delete that
    helper. Do not leave it unused.
 4. Decide `compute_resistor_net`: delete, or document as a reference model.
 5. Move `compute_tkg04_channel` from `tkg04.rs` to `resistor.rs`, dropping the
@@ -208,7 +208,7 @@ Added with `phosphor-emulator-nx2p`:
     `present()` and a uniform refresh hook. By the time it was picked up, about
     fifteen raster boards resolved color into RGB24 as each scanline was drawn,
     and about ten of those read a palette that the game can rewrite mid-frame
-    (williams, atari_system1, toobin, btime, ccastles among them), so a deferred
+    (williams, atari_system1, toobin, btime, crystalcastles among them), so a deferred
     `present()` would lose the split the hardware shows. The `u16` users hold
     one row on the stack and resolve it at once, against a RAM-decoded palette
     or a 320-entry one, so `Indexed16` would have no adopter (and Decision 7

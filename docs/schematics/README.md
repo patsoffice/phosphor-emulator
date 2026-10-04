@@ -154,7 +154,7 @@ section is there so that is obvious.
   coupled per chip and summed in an op-amp, and its amplifier is a separate unit
   behind a 34 dB attenuator. Read with the Mr. Do's Castle file: same
   manufacturer, same power amplifier part, different output stage.
-- [`docastle-audio-output.md`](docastle-audio-output.md) — Mr. Do's Castle mixes
+- [`mrdoscastle-audio-output.md`](mrdoscastle-audio-output.md) — Mr. Do's Castle mixes
   its four SN76489As through four equal resistors, which confirms the model's
   plain sum and answers the question its catalog row asked. What follows is a
   fixed 22 dB low shelf, a volume rheostat that for once does not move it, and a
@@ -175,13 +175,13 @@ section is there so that is obvious.
   differently, so they do not share a volume law: one linear multiply cannot be
   right for both. Also where the sample ladder's one large nonlinearity sits,
   which is at the waveform's zero crossing.
-- [`llander-audio-output.md`](llander-audio-output.md) — Lunar Lander's four
+- [`lunarlander-audio-output.md`](lunarlander-audio-output.md) — Lunar Lander's four
   sounds, and the thing a netlist comparison cannot see: the three resistors that
   set the thrust volume are the same three that set the noise filter's corner, so
   quieter thrust is darker thrust. Also derives the 89.5 Hz / Q 7.6 band-pass
   from its six component values, which is what confirms the reference's two magic
   numbers are the circuit rather than a fit.
-- [`foodf-audio-output.md`](foodf-audio-output.md) — Food Fight's three POKEYs are
+- [`foodfight-audio-output.md`](foodfight-audio-output.md) — Food Fight's three POKEYs are
   summed through equal 330k legs, which confirms the model's `/ 3.0`, into the
   same gain-of-11 stage Tempest uses. Its POKEY load is 910 ohm where Tempest and
   Missile Command use 10k. Also carries the cross-board table: six different Atari
@@ -190,18 +190,18 @@ section is there so that is obvious.
   not reach the mixer through the same circuit. One passes an extra inverting
   stage that is a low-pass at 32.9 Hz, so it arrives inverted and about 30 dB down
   at 1 kHz, where the model mixes the pair equally.
-- [`ccastles-audio-output.md`](ccastles-audio-output.md) — Crystal Castles mixes
+- [`crystalcastles-audio-output.md`](crystalcastles-audio-output.md) — Crystal Castles mixes
   its two POKEYs 1:1 with a coupling capacitor per chip, which by superposition
   makes the model's single DC block right in position as well as in ratio. What is
   missing is a gain of 4.55 per chip, an antiphase pair, and two speakers.
-- [`dkong-effect-chain.md`](dkong-effect-chain.md), the path from an effect's
+- [`donkeykong-effect-chain.md`](donkeykong-effect-chain.md), the path from an effect's
   oscillator to Donkey Kong's summing bus, read twice because the board carries
-  it twice. It settles the topology claim `dkong_sound.rs` rests on, that the
+  it twice. It settles the topology claim `donkeykong_sound.rs` rests on, that the
   effects are diode-mixed with their source rather than multiplied by it: two
   diodes meet at one node feeding an emitter follower, and nothing on the path
   multiplies. It also names the parts behind the DAC's 100 ms decay, which are
   `C32` and `R20` rather than the `R37` that had been cited.
-- [`dkongjr-sound-sources.md`](dkongjr-sound-sources.md), what generates Donkey
+- [`donkeykongjunior-sound-sources.md`](donkeykongjunior-sound-sources.md), what generates Donkey
   Kong Jr.'s effect tones. Four voices off five 74LS629 VCO halves, a 4020 tap
   mux and a 16-bit LFSR, sharing not one source with the 555s the emulator plays
   for it today. Three of the four are transcribed as netlists. The one thing

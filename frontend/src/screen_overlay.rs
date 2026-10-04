@@ -45,7 +45,10 @@ use serde::Deserialize;
 /// does not depend on the working directory and a stray copy cannot shadow the
 /// committed one. A file in the user's overlay directory still wins; see
 /// [`ScreenOverlay::for_machine`].
-const BUILT_IN: &[(&str, &str)] = &[("astdelux", include_str!("../overlays/astdelux.toml"))];
+const BUILT_IN: &[(&str, &str)] = &[(
+    "asteroidsdeluxe",
+    include_str!("../overlays/asteroidsdeluxe.toml"),
+)];
 
 /// Edge length of the rasterized sheet, in texels.
 ///
@@ -295,8 +298,9 @@ mod tests {
     /// half, green and blue untouched. It draws in white only, so this is the
     /// entire reason its picture is not white.
     #[test]
-    fn astdelux_cuts_red_across_the_whole_tube() {
-        let o = ScreenOverlay::for_machine("astdelux").expect("astdelux has an overlay");
+    fn asteroidsdeluxe_cuts_red_across_the_whole_tube() {
+        let o =
+            ScreenOverlay::for_machine("asteroidsdeluxe").expect("asteroidsdeluxe has an overlay");
         for (u, v) in [(0.01, 0.01), (0.5, 0.5), (0.99, 0.99), (0.99, 0.01)] {
             let [r, g, b] = texel(&o, u, v);
             assert!((r - 0.5333).abs() < 0.01, "red at ({u},{v}) is {r}");
@@ -309,7 +313,7 @@ mod tests {
     /// difference matters: `None` lets the renderers skip the sample entirely.
     #[test]
     fn a_machine_without_an_overlay_has_none() {
-        assert!(ScreenOverlay::for_machine("asteroid").is_none());
+        assert!(ScreenOverlay::for_machine("asteroids").is_none());
         assert!(ScreenOverlay::for_machine("no_such_machine").is_none());
     }
 

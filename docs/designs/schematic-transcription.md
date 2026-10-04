@@ -494,7 +494,7 @@ question and a part-property question is still blocking a board.
 
 Everything above was built against one schematic, so none of it was known to
 generalize. Lunar Lander's audio output is the first test, at
-`docs/schematics/netlists/llander-audio.toml`, and it was chosen because
+`docs/schematics/netlists/lunarlander-audio.toml`, and it was chosen because
 `phosphor-emulator-b72s` names three open residuals that are all
 passive-network questions and because the first of them **cannot be reached by
 comparison at all**: the throttle's volume law is wrong in our model and wrong
@@ -523,7 +523,7 @@ is a different network per scenario.
 
 The reading order that worked on Zaxxon worked again: draft from the prose,
 then check part by part against the scan. Everything
-`llander-audio-output.md` established held. What it did not have:
+`lunarlander-audio-output.md` established held. What it did not have:
 
 - **`C14` and `C28` are on the sheet and in none of the prose and none of the
   device.** Two supply bypass capacitors. Both are electrically inert for the
@@ -556,7 +556,7 @@ then check part by part against the scan. Everything
 
 `lint --device` learns which parts a device models by reading its constants'
 *names*. On Zaxxon that is 125 designators and the check is the epic's headline.
-On Lunar Lander it returns **zero**: `llander_sound.rs` holds eight constants
+On Lunar Lander it returns **zero**: `lunarlander_sound.rs` holds eight constants
 and not one is named for a part, because that device was built from a reference
 emulator's measured levels rather than from the drawing. Every part on the sheet
 comes back unmodeled, which is true and is one fact rather than 23.
@@ -695,9 +695,9 @@ two things the shot did not.
   displacement per volt of a drive, found by solving twice a volt apart.
 
 Eight scenarios, one per setting, write sixteen constants to
-`llander_sound_derived.rs`; every mode keeps 98.9 percent or more of its energy
+`lunarlander_sound_derived.rs`; every mode keeps 98.9 percent or more of its energy
 in `C15`. The device measured afterwards is in
-[the board's transcription](../schematics/llander-audio-output.md). That device
+[the board's transcription](../schematics/lunarlander-audio-output.md). That device
 was the one "One thing does not generalize" found naming no part at all, and
 `lint --device` now counts one, `C15`, through the generated names. The three
 throttle resistors still come back as not modeled, for the reason `C88` would
@@ -735,7 +735,7 @@ band-pass flat at `C91/C27` from 159 Hz to 2258 Hz, within 1 percent of the
 device's formula at four frequencies. It also found two things no analysis had:
 the explosion switch's 80 ohms in series with `R21`, worth 2.6 percent at the top
 of the leg's band, and the switch loading the common node by about 0.35 dB when
-it closes. The device models neither. `tools/netlist/tests/llander_ac_test.rs`
+it closes. The device models neither. `tools/netlist/tests/lunarlander_ac_test.rs`
 pins all of it.
 
 **`derive` gained nothing here, deliberately.** The issue proposed a

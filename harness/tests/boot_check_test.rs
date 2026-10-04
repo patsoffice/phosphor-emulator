@@ -271,7 +271,7 @@ fn star_wars_boots_into_a_live_vector_display() {
 #[test]
 fn empire_strikes_back_boots_past_its_slapstic() {
     let Some(dir) = roms() else { return };
-    assert_vector_display_is_live(&dir, "esb");
+    assert_vector_display_is_live(&dir, "empirestrikesback");
 }
 
 /// Xevious holds its sub and sound Z80s in reset until the main CPU releases
@@ -362,7 +362,7 @@ fn assert_atari_system1_booted(
 #[test]
 fn marble_madness_boots_its_68010_and_fills_video_ram() {
     let Some(dir) = roms() else { return };
-    let Some(rom_set) = rom_set(&dir, "marble") else {
+    let Some(rom_set) = rom_set(&dir, "marblemadness") else {
         return;
     };
     use phosphor_core::core::machine::MachineCore;
@@ -377,7 +377,7 @@ fn marble_madness_boots_its_68010_and_fills_video_ram() {
         sys.run_frame();
     }
     assert_atari_system1_booted(
-        "marble",
+        "marblemadness",
         reset_pc,
         sys.get_cpu_state().pc,
         sys.clock(),
@@ -505,7 +505,7 @@ fn toobin_runs_its_sound_board_and_makes_sound() {
 fn the_galaxian_family_draws_a_populated_frame() {
     let Some(dir) = roms() else { return };
 
-    for machine in ["galaxian", "mooncrst", "pisces", "uniwars"] {
+    for machine in ["galaxian", "mooncresta", "pisces", "uniwars"] {
         let entry =
             registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
         for rev in 0..entry.revisions.len() {

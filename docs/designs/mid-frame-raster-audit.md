@@ -46,9 +46,9 @@ render-once, end-of-frame sample is already pixel-correct.
 | Category | Meaning | Machines |
 |---|---|---|
 | **Render-once → Tier A** | needs per-scanline rendering | atari_system1 (**Road Runner** MO-bank) |
-| **Render-once → Tier B** | static per frame; only needs the `ifs0` frame-boundary fix | digdug, galaga, xevious, mrdo, burgertime, foodf, qbert, shollow, marble |
-| **Per-scanline (already correct)** | renders each scanline in `tick()` from live state; no `ifs0` bug, no migration | joust, robotron, sinistar, pacman, mspacman, dkong, dkongjr, mariobros, congobongo, galaxian, scramble, scobra, frogger, mooncrst, pisces, uniwars, gridlee, ccastles, missile, irobot |
-| **Vector (N/A)** | DVG/AVG display list rasterized whole-frame; no scanline hardware | asteroid, astdelux, llander, tempest, starwars, quantum, esb |
+| **Render-once → Tier B** | static per frame; only needs the `ifs0` frame-boundary fix | digdug, galaga, xevious, mrdo, burgertime, foodfight, qbert, satanshollow, marblemadness |
+| **Per-scanline (already correct)** | renders each scanline in `tick()` from live state; no `ifs0` bug, no migration | joust, robotron, sinistar, pacman, mspacman, donkeykong, donkeykongjunior, mariobros, congobongo, galaxian, scramble, supercobra, frogger, mooncresta, pisces, uniwars, gridlee, crystalcastles, missilecommand, irobot |
+| **Vector (N/A)** | DVG/AVG display list rasterized whole-frame; no scanline hardware | asteroids, asteroidsdeluxe, lunarlander, tempest, starwars, quantum, empirestrikesback |
 
 ## Render-once machines — evidence
 
@@ -63,10 +63,10 @@ writes outside it.
 | **xevious** | namco_galaga | scroll `0xD000/0xD020` (bg X/Y, **cpu 1**), flip `0xD070` | scroll = exactly 1 write/frame at scanline ~8 (vblank-IRQ-handler latency, not a split); flip = vblank only | **B** |
 | **mrdo** | mrdo | scroll `0xF000-0xFFFF`, flip `0x9800` | written only at init (frames 1–3); static during demo (2100–2900); code: "single VBLANK IRQ, no mid-frame raster" | **B** |
 | **burgertime** | btime | flip `0x4002`, scroll `0x4004`, palette `0x0C00-0x0C0F` | scroll written 4× total at scanlines 88–91 across 4 frames (sporadic transitions); palette/flip vblank | **B** |
-| **foodf** | foodf | palette `0x950000-0x9501FF`, flip `0x948000` | palette = 179 200 writes, **all vblank**; `0x948000` written in active display but flip **bit 0 constant = 0** (values 0x06/0x10/0x14 are IRQ acks on bits 2/3) | **B** |
+| **foodfight** | foodfight | palette `0x950000-0x9501FF`, flip `0x948000` | palette = 179 200 writes, **all vblank**; `0x948000` written in active display but flip **bit 0 constant = 0** (values 0x06/0x10/0x14 are IRQ acks on bits 2/3) | **B** |
 | **qbert** | gottlieb | video_ctrl `0x5803`, sprite_bank `0x5804`, palette `0x5000-0x57FF` | 800 video_ctrl + 25 600 palette writes, **all vblank** (0 in active display) | **B** |
-| **shollow** | mcr2 | palette RAM `0xEF80-0xEFFF` (+ `0xFF80` mirror) | palette written only in 4 of 2400 frames (screen-transition bulk reloads that span active display because the CPU rewrites 32 entries while the beam scans); no repeating per-frame raster color-bar | **B** |
-| **marble** | atari_system1 | H/V scroll `0x800000/0x820000`, bank `0x860001`, priority `0x840001` | scroll = ~1 write/frame, **all vblank**; no mid-frame bank switching in Marble Madness | **B** |
+| **satanshollow** | mcr2 | palette RAM `0xEF80-0xEFFF` (+ `0xFF80` mirror) | palette written only in 4 of 2400 frames (screen-transition bulk reloads that span active display because the CPU rewrites 32 entries while the beam scans); no repeating per-frame raster color-bar | **B** |
+| **marblemadness** | atari_system1 | H/V scroll `0x800000/0x820000`, bank `0x860001`, priority `0x840001` | scroll = ~1 write/frame, **all vblank**; no mid-frame bank switching in Marble Madness | **B** |
 | **roadrunner** | atari_system1 | motion-object bank `0x860001` bits 5–3 | **Tier A.** The game reprograms the MO bank mid-frame from its programmable scanline (SLIP) interrupt; `bankselect_w` logs `(scanline, mo_bank)` and `render_motion_objects` renders each scanline band with its live bank, clipping sprites at the boundary. Confirmed by code + tests `bankselect_logs_midframe_mo_bank_changes`, `motion_objects_follow_midframe_bank_switch`. Board already implements the per-band mitigation. | **A** |
 
 Notes:
@@ -86,12 +86,12 @@ No action.
 
 - **williams** (joust, robotron, sinistar): `render_scanline` at each scanline
   boundary (`williams.rs:472`).
-- **namco_pac** (pacman, mspacman), **tkg04** (dkong, dkongjr),
+- **namco_pac** (pacman, mspacman), **tkg04** (donkeykong, donkeykongjunior),
   **mario_bros**, **congo_bongo**, **galaxian_video** (galaxian, scramble,
-  scobra, frogger, mooncrst, pisces, uniwars): same per-scanline hook.
-- **gridlee, ccastles, missile, irobot**: raster bitmap/framebuffer games that
+  supercobra, frogger, mooncresta, pisces, uniwars): same per-scanline hook.
+- **gridlee, crystalcastles, missilecommand, irobot**: raster bitmap/framebuffer games that
   already latch and render per-scanline (gridlee palette-bank per scanline;
-  ccastles hscroll/vscroll/palette per scanline; missile 8-entry palette per
+  crystalcastles hscroll/vscroll/palette per scanline; missilecommand 8-entry palette per
   scanline; irobot polygon framebuffer + 64-entry palette with a 32V scanline
   IRQ). All Tier-A-equivalent and already satisfied.
 
@@ -101,8 +101,8 @@ DVG/AVG games render a vector display list, rasterized once per frame from an
 atomically-generated list; `total_scanlines = 1`, no scanline hardware, so the
 raster Tier A/B split does not apply.
 
-- **asteroid, astdelux, llander** (Atari DVG), **tempest, quantum, starwars,
-  esb** (Atari AVG). `esb` (Empire Strikes Back) runs on **Star Wars AVG vector
+- **asteroids, asteroidsdeluxe, lunarlander** (Atari DVG), **tempest, quantum, starwars,
+  empirestrikesback** (Atari AVG). `empirestrikesback` (Empire Strikes Back) runs on **Star Wars AVG vector
   hardware**, not Williams.
 
 ## Follow-ups filed

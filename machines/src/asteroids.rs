@@ -719,7 +719,7 @@ crate::impl_board_debug_trace!(AsteroidsSystem, board);
 
 crate::register_machine!(
     AsteroidsSystem,
-    "asteroid",
+    "asteroids",
     &["asteroid"],
     ASTEROIDS_CONTROLS
 );

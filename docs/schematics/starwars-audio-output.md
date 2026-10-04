@@ -300,7 +300,7 @@ test; the section above it is what keeps that honest.
 | Document | `THE EMPIRE STRIKES BACK: Instructions to Convert STAR WARS Cockpit and Upright Games`, Atari Games, (c) 1985 |
 | Read from | `arcade-museum.com/manuals-videogames/S/StarWarsESBAtariarcademanual.pdf`, PDF p15-17, section `E. MODIFY THE SOUND PCB` |
 
-Checked for `phosphor-emulator-20f3`, because `esb` rides this row and no ESB
+Checked for `phosphor-emulator-20f3`, because `empirestrikesback` rides this row and no ESB
 drawing had been read. **There is no ESB audio schematic to read, and there does
 not need to be one.** ESB shipped only as a conversion kit for a Star Wars
 cabinet, so the Sound PCB is this Sound PCB, and the kit's own instructions say

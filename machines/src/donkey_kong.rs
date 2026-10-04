@@ -11,7 +11,7 @@ use phosphor_macros::{BusDebug, Saveable};
 
 use phosphor_core::gfx::decode::GfxLayout;
 
-use crate::dkong_sound::DkongDiscreteSound;
+use crate::donkeykong_sound::DkongDiscreteSound;
 use crate::gfx_registry::GfxRegion;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -201,7 +201,7 @@ static DKONG_SPRITE_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
 
 inventory::submit! {
     GfxRegion {
-        machine: "dkong",
+        machine: "donkeykong",
         region: "tiles",
         count: 256,
         width: 8,
@@ -213,7 +213,7 @@ inventory::submit! {
 }
 inventory::submit! {
     GfxRegion {
-        machine: "dkong",
+        machine: "donkeykong",
         region: "sprites",
         count: 128,
         width: 16,
@@ -755,7 +755,7 @@ impl InputConfigurable for DkongSystem {
 }
 
 impl MachineCore for DkongSystem {
-    crate::machine_core_metadata!("dkong", tkg04::TIMING, tkg04::clock_tree);
+    crate::machine_core_metadata!("donkeykong", tkg04::TIMING, tkg04::clock_tree);
 
     fn run_frame(&mut self) {
         let (mut cpus, mut bus) = self.split();
@@ -903,7 +903,7 @@ crate::impl_board_debug_trace!(DkongSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-crate::register_machine!(DkongSystem, "dkong", &["dkong"], DKONG_CONTROLS);
+crate::register_machine!(DkongSystem, "donkeykong", &["dkong"], DKONG_CONTROLS);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1035,17 +1035,17 @@ mod tests {
 
     #[test]
     fn gfx_regions_registered_with_expected_geometry() {
-        let regions = crate::gfx_registry::regions_for("dkong");
+        let regions = crate::gfx_registry::regions_for("donkeykong");
         assert_eq!(
             regions.iter().map(|r| r.region).collect::<Vec<_>>(),
             vec!["sprites", "tiles"],
         );
 
-        let tiles = crate::gfx_registry::find("dkong", "tiles").unwrap();
+        let tiles = crate::gfx_registry::find("donkeykong", "tiles").unwrap();
         assert_eq!((tiles.count, tiles.width, tiles.height), (256, 8, 8));
         assert!(tiles.palette.is_some(), "tiles carry the PROM palette");
 
-        let sprites = crate::gfx_registry::find("dkong", "sprites").unwrap();
+        let sprites = crate::gfx_registry::find("donkeykong", "sprites").unwrap();
         assert_eq!(
             (sprites.count, sprites.width, sprites.height),
             (128, 16, 16)
@@ -1069,11 +1069,11 @@ mod tests {
         }
         sys.board.decode_gfx_roms();
 
-        let tiles = crate::gfx_registry::find("dkong", "tiles").unwrap();
+        let tiles = crate::gfx_registry::find("donkeykong", "tiles").unwrap();
         let via_region = decode_gfx(&sys.board.tile_rom, 0, tiles.count as usize, tiles.layout);
         assert_caches_eq(&via_region, &sys.board.tile_cache);
 
-        let sprites = crate::gfx_registry::find("dkong", "sprites").unwrap();
+        let sprites = crate::gfx_registry::find("donkeykong", "sprites").unwrap();
         let via_region = decode_gfx(
             &sys.board.sprite_rom,
             0,

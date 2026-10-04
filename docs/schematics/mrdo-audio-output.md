@@ -4,7 +4,7 @@ What Universal's 8201 board and its Sound Amplifier Unit do between two SN76489s
 and the cabinet. Read for `phosphor-emulator-discrete-sound-fidelity-l5r3.10`,
 the project-wide audit. The model is `machines/src/mrdo.rs`.
 
-Read straight after `docastle-audio-output.md`, and the pair is the point. **Mr.
+Read straight after `mrdoscastle-audio-output.md`, and the pair is the point. **Mr.
 Do and Mr. Do's Castle are the same manufacturer, one year apart, and end in the
 same MB3730 power amplifier, and their output stages are not the same circuit.**
 Mr. Do's Castle mixes passively into a shelf on the main board. Mr. Do mixes in

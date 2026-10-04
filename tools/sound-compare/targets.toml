@@ -49,7 +49,7 @@ schema = 1
 
 [[target]]
 id = "asteroids-discrete"
-machines = ["asteroid"]
+machines = ["asteroids"]
 device = "machines/src/asteroids_sound.rs"
 adapter = "asteroids-discrete"
 status = "implemented-needs-validation"
@@ -105,12 +105,12 @@ tolerance above 150 Hz only, with a low-frequency pedestal the board has and
 the reference does not, as before."""
 
 [[target]]
-id = "dkong-discrete"
-machines = ["dkong"]
-device = "machines/src/dkong_sound.rs"
-adapter = "dkong-discrete"
+id = "donkeykong-discrete"
+machines = ["donkeykong"]
+device = "machines/src/donkeykong_sound.rs"
+adapter = "donkeykong-discrete"
 status = "implemented-needs-validation"
-scenarios = ["dkong/walk", "dkong/jump", "dkong/stomp"]
+scenarios = ["donkeykong/walk", "donkeykong/jump", "donkeykong/stomp"]
 notes = """
 All three effects and the music built from the board rather than fitted. Walk
 carries a labelled trade: closing a 13-point gap below 150 Hz cost brightness in
@@ -118,17 +118,17 @@ the band a previously fitted filter had been holding up. Shipped labelled rather
 than re-fitted."""
 
 [[target]]
-id = "dkongjr-discrete"
-machines = ["dkongjr"]
-device = "machines/src/dkongjr_sound.rs"
-adapter = "dkongjr-discrete"
+id = "donkeykongjunior-discrete"
+machines = ["donkeykongjunior"]
+device = "machines/src/donkeykongjunior_sound.rs"
+adapter = "donkeykongjunior-discrete"
 status = "implemented-needs-validation"
 scenarios = [
-  "dkongjr/walk",
-  "dkongjr/walk-hi",
-  "dkongjr/jump",
-  "dkongjr/climb",
-  "dkongjr/fall",
+  "donkeykongjunior/walk",
+  "donkeykongjunior/walk-hi",
+  "donkeykongjunior/jump",
+  "donkeykongjunior/climb",
+  "donkeykongjunior/fall",
 ]
 notes = """
 Four voices where the board previously played Donkey Kong's three. Walk and jump
@@ -241,21 +241,21 @@ phosphor-emulator-qf2x for the full elimination. The skid's reference figure was
 separately disputed and settled at 156.6 (phosphor-emulator-87r8)."""
 
 [[target]]
-id = "llander-discrete"
-machines = ["llander"]
-device = "machines/src/llander_sound.rs"
-adapter = "llander-discrete"
+id = "lunarlander-discrete"
+machines = ["lunarlander"]
+device = "machines/src/lunarlander_sound.rs"
+adapter = "lunarlander-discrete"
 status = "implemented-needs-validation"
 scenarios = [
-  "llander/thrust",
-  "llander/thrust-low",
-  "llander/explosion",
-  "llander/crash",
-  "llander/tone-3k",
-  "llander/tone-6k",
+  "lunarlander/thrust",
+  "lunarlander/thrust-low",
+  "lunarlander/explosion",
+  "lunarlander/crash",
+  "lunarlander/tone-3k",
+  "lunarlander/tone-6k",
 ]
 notes = """
-Built from the drawing, transcribed at docs/schematics/llander-audio-output.md,
+Built from the drawing, transcribed at docs/schematics/lunarlander-audio-output.md,
 with nothing fitted. The throttle's time constants and gains are solved from the
 transcription by `netlist derive`; everything after it is in volts from the
 parts, with full scale the LM324's swing. Two levels are taken on trust, the
@@ -266,7 +266,7 @@ says why: it gives the explosion the thrust leg's 6.8k at a flat gain, calls its
 thrust level a tweak, and has a fixed throttle corner with a linear volume. The
 tones agree within 0.9 dB. The thrust is 4.6 dB quieter against them; throttle 1
 is darker and relatively louder; the explosion sits 11.75 dB under the thrust
-where the reference has it 15 dB over; and nothing clips. llander/crash replays
+where the reference has it 15 dB over; and nothing clips. lunarlander/crash replays
 the game's traced crash, the explosion over a throttle stepped from 7 to 0, and
 is the scenario to listen to: it is about 21 dB under the reference's. Table in
 the doc, under "Built as drawn". Closes phosphor-emulator-b72s."""
@@ -468,7 +468,7 @@ rather than resolved."""
 
 [[target]]
 id = "atari-system1-audio"
-machines = ["marble", "roadrunner"]
+machines = ["marblemadness", "roadrunner"]
 device = "machines/src/atari_system1_sound.rs"
 status = "implemented-unvalidated"
 notes = """
@@ -519,8 +519,8 @@ different mixer and is now its own entry; Scramble and Scobra are not on this
 board at all."""
 
 [[target]]
-id = "mooncrst-mixer"
-machines = ["mooncrst"]
+id = "mooncresta-mixer"
+machines = ["mooncresta"]
 device = "core/src/device/galaxian_sound.rs"
 adapter = "galaxian-discrete"
 status = "partial"
@@ -558,11 +558,11 @@ mixer difference the moment the device models it. phosphor-emulator-3m0n."""
 # ---------------------------------------------------------------------------
 
 [[target]]
-id = "astdelux-discrete"
-machines = ["astdelux"]
+id = "asteroidsdeluxe-discrete"
+machines = ["asteroidsdeluxe"]
 status = "partial"
 notes = """
-MODELED 2026-09-19 in machines/src/astdelux_sound.rs, from sheet 2 side B of the
+MODELED 2026-09-19 in machines/src/asteroidsdeluxe_sound.rs, from sheet 2 side B of the
 Cabaret drawing package. Thrust and explosion, which are the two sounds the POKEY
 at M7/8 does not make; before this the 0x3600 and 0x3E00 writes were stubs and
 audio-latch Q3 was discarded, so both were silent.
@@ -683,7 +683,7 @@ change what this row sounds like."""
 
 [[target]]
 id = "konami-output-filters"
-machines = ["scramble", "scobra", "frogger"]
+machines = ["scramble", "supercobra", "frogger"]
 status = "missing"
 notes = """
 The discrete output-filter controls. Filter selection is latched but nothing
@@ -806,8 +806,8 @@ archive.org/items/arcademanual_BurgerTime/BurgerTime.pdf, sheet 9-3 across PDF
 pages 68-70, with the audio on page 69."""
 
 [[target]]
-id = "ccastles-output"
-machines = ["ccastles"]
+id = "crystalcastles-output"
+machines = ["crystalcastles"]
 status = "partial"
 notes = """
 MODELED under phosphor-emulator-fd0d: each POKEY's open-drain output against
@@ -832,7 +832,7 @@ The device law at a 220 ohm load is the data sheet's rows extrapolated.
 What follows is the reading that row was built from.
 
 EXAMINED. Atari SP-241 sheet 8B, block `Audio Output`, and sheet 2A for the
-amplifier board, transcribed at docs/schematics/ccastles-audio-output.md. The
+amplifier board, transcribed at docs/schematics/crystalcastles-audio-output.md. The
 row's own guess was right: there IS a summing amplifier after the POKEYs, and it
 is now read.
 
@@ -868,8 +868,8 @@ one page. Crystal-Castles-2board-schematic.pdf is a different two-page drawing o
 the two-board revision and carries no audio. Both were checked."""
 
 [[target]]
-id = "docastle-output"
-machines = ["docastle", "dorunrun", "dowild"]
+id = "mrdoscastle-output"
+machines = ["mrdoscastle", "dorunrun", "mrdoswildride"]
 status = "missing"
 notes = """
 EXAMINED, ALL THREE MACHINES. Off `unexamined` as `missing`. Universal 8302
@@ -888,7 +888,7 @@ fed through 51k with 10k to ground, where the 8302's is a rheostat, and one of
 their speaker terminals reaches the speaker through a 470 uF where the 8302 has
 no coupling capacitor at all. The chip is shared, the level and the
 low-frequency corner are not. Written up in the conversion-kit section of
-docs/schematics/docastle-audio-output.md.
+docs/schematics/mrdoscastle-audio-output.md.
 
 Galaga and Dig Dug turned out not to share their output stage despite sharing a
 board family, and this row has now gone the same way. Note which guess would
@@ -917,7 +917,7 @@ The `DcBlocker`'s position after the sum is right again; its corner cannot be
 computed from this sheet, because 4.7 uF works against the MB3730's input
 impedance and that is not on it.
 
-Transcribed at docs/schematics/docastle-audio-output.md. Tracked as
+Transcribed at docs/schematics/mrdoscastle-audio-output.md. Tracked as
 phosphor-emulator-2926."""
 
 [[target]]
@@ -1169,7 +1169,7 @@ the mistake this file exists to make visible rather than to commit."""
 
 [[target]]
 id = "atari-vector-pokey-output"
-machines = ["starwars", "esb"]
+machines = ["starwars", "empirestrikesback"]
 status = "missing"
 notes = """
 EXAMINED, AND IT IS THE LARGEST GAP THIS SWEEP HAS FOUND. Off `unexamined` as
@@ -1221,8 +1221,8 @@ phosphor-emulator-82zr. The schematics are PDF pages 114-147 of the
 arcade-museum StarWars.pdf, with all the audio on 142 and 143."""
 
 [[target]]
-id = "foodf-output"
-machines = ["foodf"]
+id = "foodfight-output"
+machines = ["foodfight"]
 status = "partial"
 notes = """
 MODELED under phosphor-emulator-034y, on Tempest's pattern: each POKEY's
@@ -1251,7 +1251,7 @@ EXAMINED. THE ROW'S OWN QUESTION IS ANSWERED: SP-229 does carry the audio sheet.
 The same package whose sheets 7B, 8A and 8B were read for this board's VIDEO
 under phosphor-emulator-aih3 carries sheet 10A, `Food Fight Sound`, which is the
 whole of the game PCB's audio, and sheet 2B for the amplifier board. Nothing else
-had to be fetched. Transcribed at docs/schematics/foodf-audio-output.md.
+had to be fetched. Transcribed at docs/schematics/foodfight-audio-output.md.
 
 CONFIRMED: the three POKEYs are mixed 1:1:1. R70, R69 and R71 are all 330k into
 one node with R68 22k to ground, so each chip reaches the node at exactly 1/18
@@ -1433,7 +1433,7 @@ an assumption; and any comparison against hardware or the reference."""
 
 [[target]]
 id = "majorhavoc-output"
-machines = ["majorhavoc", "mhavocrv"]
+machines = ["majorhavoc", "majorhavocreturntovax"]
 status = "partial"
 notes = """
 MODELED from the drawing when the machine was added (phosphor-emulator-r7pa,
@@ -1459,8 +1459,8 @@ resistor the drawing marks and does not fit (SPEECH_WEIGHT is a level, not a
 reading); and any comparison against hardware."""
 
 [[target]]
-id = "missile-output"
-machines = ["missile"]
+id = "missilecommand-output"
+machines = ["missilecommand"]
 status = "partial"
 notes = """
 MODELED under phosphor-emulator-hd8n: POKEY's open-drain output against R38 10k
@@ -1625,7 +1625,7 @@ the AC results. No measurement."""
 
 [[target]]
 id = "mcr2-output"
-machines = ["shollow"]
+machines = ["satanshollow"]
 device = "core/src/device/ssio.rs"
 status = "partial"
 notes = """

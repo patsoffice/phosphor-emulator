@@ -13,7 +13,7 @@ Three Atari POKEY boards read after this one — Quantum, Food Fight and Crystal
 Castles — all end in the same Regulator/Audio II PCB, and all three load pin 37
 differently again. The amplifier half below is therefore the shared one, worth
 modelling once; the table of the six interfaces is in
-[`foodf-audio-output.md`](foodf-audio-output.md).
+[`foodfight-audio-output.md`](foodfight-audio-output.md).
 
 ## Provenance
 
@@ -54,9 +54,9 @@ with no filter and no DC removal at all. Neither has anything else.
 
 ## Missile Command, one POKEY
 
-![missile audio output](missile-audio-output.svg)
+![missile audio output](missilecommand-audio-output.svg)
 
-[`missile-audio-output.json`](missile-audio-output.json).
+[`missilecommand-audio-output.json`](missilecommand-audio-output.json).
 
 - **POKEY pin 37, `AUD`, sits on R38 10k to +5 V and C70 0.1 uF to ground.** This
   is a low-pass and it is the first thing the model does not have.

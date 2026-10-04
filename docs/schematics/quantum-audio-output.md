@@ -160,7 +160,7 @@ speaker is a high-pass at **6.0 Hz**. Two channels, two speakers, and the model
 is mono.
 
 This is the third game in the sweep on that board. The set is tabulated under
-[`foodf-audio-output.md`](foodf-audio-output.md), which is also where the six
+[`foodfight-audio-output.md`](foodfight-audio-output.md), which is also where the six
 different POKEY interfaces are collected.
 
 ## What it establishes

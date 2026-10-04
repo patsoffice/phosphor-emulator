@@ -515,7 +515,7 @@ impl AtariSystem1SoundBus {
     /// stay unmapped, which is what they read back as.
     ///
     /// ROM fills with `0xFF` rather than the zeroes an allocation gives,
-    /// because that is what an unpopulated socket reads back as (marble leaves
+    /// because that is what an unpopulated socket reads back as (marblemadness leaves
     /// `0x4000-0x7FFF` empty) and what a board built before its ROM is loaded
     /// has to boot through.
     fn build_map(speech: bool) -> AddressSpace16 {
@@ -538,7 +538,7 @@ impl AtariSystem1SoundBus {
         .mirror(0x2000, 0x0000, 0x1000)
         .mirror(0x3800, 0x1800, 0x0800);
         // Only a board that fits the TMS5220 and its VIA decodes the window; on
-        // marble it is open bus, and saying so is the point of leaving it out.
+        // marblemadness it is open bus, and saying so is the point of leaving it out.
         if speech {
             map.region(
                 Region::Speech,

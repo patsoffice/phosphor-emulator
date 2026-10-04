@@ -472,7 +472,7 @@ impl InputConfigurable for SatansHollowSystem {
 }
 
 impl MachineCore for SatansHollowSystem {
-    crate::machine_core_metadata!("shollow", mcr2::TIMING, mcr2::clock_tree);
+    crate::machine_core_metadata!("satanshollow", mcr2::TIMING, mcr2::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
@@ -601,7 +601,7 @@ crate::impl_map_debug_trace!(SatansHollowSystem, board.map);
 
 crate::register_machine!(
     SatansHollowSystem,
-    "shollow",
+    "satanshollow",
     &["shollow"],
     SHOLLOW_CONTROLS
 );

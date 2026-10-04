@@ -7,7 +7,7 @@ elsewhere:
 
 ```bash
 # Phosphor side: drive the device through a committed scenario
-cargo run -p phosphor-sound-compare -- capture llander/thrust --out /tmp/ours.wav
+cargo run -p phosphor-sound-compare -- capture lunarlander/thrust --out /tmp/ours.wav
 
 # Reference side: the matching Lua driver, at 192 kHz, resampled to meet it
 LL_EFFECT=thrust mame llander -rompath ~/ws/mame-runtime/roms -nothrottle \

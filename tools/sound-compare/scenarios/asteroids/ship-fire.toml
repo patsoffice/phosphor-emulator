@@ -11,7 +11,7 @@ description = "One ship fire chirp, its enable held the fourteen frames the game
 #
 # The voice is now the board's, which made the question answerable rather than
 # awkward. Tracing every write to the 74LS259 through a real shot
-# (tools/script/examples/asteroid_fire_trace.rhai) shows the game rewrites the
+# (tools/script/examples/asteroids_fire_trace.rhai) shows the game rewrites the
 # whole latch every frame and holds line 4 for fourteen of them, about 230 ms,
 # whether the button is tapped for two frames or held for forty. It is the
 # game's timer and not the player's finger.

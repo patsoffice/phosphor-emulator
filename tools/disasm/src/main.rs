@@ -1872,7 +1872,7 @@ mod tests {
         // A few known machines and their ROM-set names appear, sorted.
         assert!(out.contains("joust"), "{out}");
         assert!(out.contains("mariobros"), "{out}");
-        assert!(out.contains("esb"), "{out}");
+        assert!(out.contains("empirestrikesback"), "{out}");
         assert!(out.contains("registered machines"), "{out}");
         // Names are alphabetized.
         let names: Vec<&str> = out
@@ -1889,7 +1889,7 @@ mod tests {
     #[test]
     fn list_regions_reports_detail_without_roms() {
         // Listing works with no ROM path (uses the registry's size field).
-        let out = list_regions("ccastles");
+        let out = list_regions("crystalcastles");
         assert!(out.contains("bank0"), "{out}");
         assert!(out.contains("bank1"), "{out}");
         assert!(out.contains("fixed"), "{out}");

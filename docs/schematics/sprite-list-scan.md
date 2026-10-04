@@ -34,7 +34,7 @@ flowchart LR
   H(["H counter"]) --> MUX
 ```
 
-The address mux is what settles the question, where it was read: on `foodf`,
+The address mux is what settles the question, where it was read: on `foodfight`,
 `btime` and `mrdo` the object list RAM's address is multiplexed between the CPU
 bus and the **horizontal** counter, so the list is walked once per scanline in
 step with the beam. On `namco_galaga` the mux is inside the Namco 04XX, whose
@@ -66,7 +66,7 @@ picture.
 
 ---
 
-## Food Fight (`foodf`)
+## Food Fight (`foodfight`)
 
 ### Provenance
 
@@ -610,7 +610,7 @@ draws from the next line on.
 ## Mario Bros (`mario_bros`)
 
 Read for completeness. Nintendo's TMA1 board, and the same family as the TKG-04
-boards (`dkong`, `dkongjr`), which were not read.
+boards (`donkeykong`, `donkeykongjunior`), which were not read.
 
 ### Provenance
 

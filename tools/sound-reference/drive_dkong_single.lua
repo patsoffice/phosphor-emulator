@@ -1,7 +1,7 @@
 -- drive_dkong_single.lua
 --
 -- Capture ONE Donkey Kong discrete effect, triggered ONCE, on the same timeline
--- as the matching `sndcmp` scenario in tools/sound-compare/scenarios/dkong/.
+-- as the matching `sndcmp` scenario in tools/sound-compare/scenarios/donkeykong/.
 --
 -- Why this exists alongside drive_dkong_sound.lua: that driver re-pulses jump
 -- and stomp every 0.5 s inside a 2 s window. Overlapping decays hide the
@@ -20,7 +20,7 @@
 -- Then compare against the Phosphor side. `sndcmp capture` writes only the
 -- scenario's analysis window, so trim the reference to the same span:
 --
---   sndcmp capture dkong/stomp --out /tmp/dk_stomp_ours.wav
+--   sndcmp capture donkeykong/stomp --out /tmp/dk_stomp_ours.wav
 --   disasm audiodiff /tmp/dk_stomp_ours.wav /tmp/dk_stomp_ref.wav --range-b 1.95:5.0
 --
 -- Timelines are the scenario files', kept identical on purpose:
@@ -37,7 +37,7 @@ local BITS = { walk = 0, jump = 1, stomp = 2 }
 -- DK_PULSE_TRAIN=1 drives walk the way the game actually does instead of the
 -- single assert below: a 3-frame pulse every 12 frames, which a watchpoint on
 -- the 74LS259 shows is exactly what the Z80 writes while Mario walks (see
--- tools/script/examples/dkong_walk_trace.rhai). The single-assert timeline is
+-- tools/script/examples/donkeykong_walk_trace.rhai). The single-assert timeline is
 -- still right for jump and stomp, which really are one-shots, but it puts walk
 -- in a state gameplay never produces — a two-second hold — and a model fitted
 -- to that sounds wrong in play while measuring well in isolation.
