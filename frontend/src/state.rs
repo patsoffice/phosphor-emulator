@@ -242,19 +242,29 @@ impl State {
         // Renamed machines adopt the settings entry filed under a former
         // name, the first present one in adoption order. Like the legacy
         // folds above this only fills a gap: an entry already under the new
-        // name wins, and the stale former key is dropped either way, since
-        // nothing writes it anymore.
+        // name wins.
+        //
+        // Unlike NVRAM and save files, which are copied and leave the
+        // original behind, the former key is removed. state.toml is
+        // rewritten on every exit, so a kept key would persist as dead
+        // clutter, and the legacy maps above are drained the same way.
+        // The original plan kept the old key for downgrade safety, but a
+        // downgrade that reads the old key would then write it back,
+        // forking settings; an auto-generated file resets instead.
         for entry in phosphor_machines::registry::all() {
             if !self.machines.contains_key(entry.name) {
                 for old in entry.former_names {
                     if let Some(settings) = self.machines.remove(*old) {
+                        log::info!("adopted settings for '{}' from '{old}'", entry.name);
                         self.machines.insert(entry.name.to_string(), settings);
                         break;
                     }
                 }
             }
             for old in entry.former_names {
-                self.machines.remove(*old);
+                if self.machines.remove(*old).is_some() {
+                    log::info!("dropped settings filed under former name '{old}'");
+                }
             }
         }
     }

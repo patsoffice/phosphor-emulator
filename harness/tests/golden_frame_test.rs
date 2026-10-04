@@ -133,12 +133,14 @@ struct Entry {
     /// instead of running the machine input-free.
     ///
     /// This is what lets an entry pin a frame of *gameplay* rather than one of
-    /// attract mode. A movie carries its own starting conditions — ROM set and
-    /// digest, power-on DIP bytes, NVRAM, host sample rate — so it is mutually
+    /// attract mode. A movie carries its own starting conditions (ROM set and
+    /// digest, power-on DIP bytes, NVRAM, host sample rate), so it is mutually
     /// exclusive with `press` and `nvram`; combining them would leave the
-    /// entry's provenance ambiguous. It combines with `rom_set`, which then
-    /// overrides which revision boots exactly as `--rom-set` does on replay:
-    /// the movie's digest check still verifies the booted dump.
+    /// entry's provenance ambiguous. It combines with `rom_set` only when the
+    /// two agree: a v3 movie names its revision, and a set naming another is
+    /// refused before anything boots, exactly as `--rom-set` is on replay. A
+    /// v2 movie names nothing, so `rom_set` selects there. Either way the
+    /// movie's digest check still verifies the booted dump.
     movie: Option<String>,
     /// Oriented display dimensions, pinned separately from the hash because a
     /// geometry change is legible in a diff and a hash change is not.
@@ -471,9 +473,9 @@ fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
         // A movie carries its own ROM digest, DIP bytes, NVRAM and sample rate.
         // Accepting `press` or `nvram` alongside would leave two sources of
         // truth for the starting conditions and no way to tell which won.
-        // `rom_set` is the exception: it overrides which revision boots, as
-        // `--rom-set` does on replay, and the movie's digest check still
-        // verifies the dump.
+        // `rom_set` is the exception, and only when it agrees with the movie:
+        // a contradicting set is refused, as `--rom-set` is on replay, and
+        // the movie's digest check still verifies the dump.
         assert!(
             entry.press.is_empty() && entry.nvram.is_none(),
             "{name}: `movie` is mutually exclusive with `press` and `nvram` — \

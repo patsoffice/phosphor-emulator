@@ -371,13 +371,19 @@ fn main() {
     let save_path = save_path_for(&config, per_game.save_path.as_deref(), &machine_name);
     // A renamed machine adopts the save filed under a former name,
     // retargeting its machine id; a file that will not retarget (foreign,
-    // corrupt) is left behind with a warning, never copied as-is.
+    // corrupt) is left behind with a warning, never copied as-is. When the
+    // former name is one of the machine's revision sets, an untagged save is
+    // tagged with it, so an old mhavoc2 save refuses on mhavoc instead of
+    // loading anywhere.
     if let Some((old_stem, old)) = former_file_to_adopt(&save_path, entry.former_names, &[]) {
+        let set_revision = (entry.revisions.len() > 1 && entry.find_revision(old_stem).is_some())
+            .then_some(old_stem);
         match std::fs::read(&old).ok().and_then(|bytes| {
             phosphor_core::core::save_state::retarget_save_machine_id(
                 &bytes,
                 old_stem,
                 &machine_name,
+                set_revision,
             )
             .ok()
         }) {
@@ -563,12 +569,22 @@ fn save_path_for(
 /// missing. Returns the former stem and its path. One-shot by construction:
 /// once the caller copies the file over, the new path exists and this finds
 /// nothing.
+///
+/// A new path whose own stem is a former name never adopts: that is a
+/// revision-specific file reusing a dead name (the prototype's
+/// `mhavocp.nvram`), already correctly named, and the other former names
+/// are other revisions' files rather than its own past.
 fn former_file_to_adopt<'a>(
     new_path: &std::path::Path,
     former_names: &[&'a str],
     live_stems: &[&str],
 ) -> Option<(&'a str, std::path::PathBuf)> {
     if new_path.exists() || former_names.is_empty() {
+        return None;
+    }
+    if let Some(stem) = new_path.file_stem().and_then(|s| s.to_str())
+        && former_names.contains(&stem)
+    {
         return None;
     }
     let dir = new_path.parent()?;
@@ -678,6 +694,27 @@ mod tests {
         assert!(
             former_file_to_adopt(&dir.join("majorhavoc.nvram"), &[], &[]).is_none(),
             "machines that never moved find nothing"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_revision_file_named_for_its_former_self_never_adopts() {
+        // The prototype's NVRAM stem is mhavocp, itself a former name of the
+        // folded machine. Its file is already correctly named; adopting
+        // mhavoc.nvram into it would mix another revision's EEPROM in.
+        let dir = scratch();
+        std::fs::write(dir.join("mhavoc.nvram"), [1]).unwrap();
+        std::fs::write(dir.join("mhavoc2.nvram"), [2]).unwrap();
+
+        assert!(
+            former_file_to_adopt(
+                &dir.join("mhavocp.nvram"),
+                &["mhavoc", "mhavoc2", "mhavocp"],
+                &["majorhavoc", "mhavocp"],
+            )
+            .is_none(),
+            "mhavocp.nvram must not adopt another revision's file"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -66,7 +66,11 @@ pub enum SaveError {
     /// Save file was created by a different machine.
     MachineMismatch { expected: String, found: String },
     /// Save file was taken on a different ROM revision of the same machine.
-    RevisionMismatch { expected: String, found: String },
+    RevisionMismatch {
+        machine: String,
+        expected: String,
+        found: String,
+    },
     /// A failure inside a named component chunk. Nests, so the message reads as
     /// a path from the machine down to the component that actually failed.
     Component {
@@ -93,10 +97,14 @@ impl std::fmt::Display for SaveError {
             SaveError::MachineMismatch { expected, found } => {
                 write!(f, "machine mismatch: expected {expected}, found {found}")
             }
-            SaveError::RevisionMismatch { expected, found } => {
+            SaveError::RevisionMismatch {
+                machine,
+                expected,
+                found,
+            } => {
                 write!(
                     f,
-                    "revision mismatch: machine booted '{expected}', save is from '{found}'; \
+                    "revision mismatch for '{machine}': booted '{expected}', save is from '{found}'; \
                      boot with --rom-set '{found}' to load this save"
                 )
             }
@@ -838,6 +846,7 @@ pub fn read_header<'a>(
         && found_revision != expected_revision
     {
         return Err(SaveError::RevisionMismatch {
+            machine: expected_id.to_string(),
             expected: expected_revision.to_string(),
             found: found_revision.to_string(),
         });
@@ -846,12 +855,28 @@ pub fn read_header<'a>(
     Ok(r)
 }
 
-/// Retarget a save file's machine id from `from` to `to`, preserving its
-/// envelope version, revision tag and body. Renamed machines adopt saves
-/// recorded under their former names this way; anything else (a file from
-/// another machine, an unsupported version) is refused unchanged.
-pub fn retarget_save_machine_id(data: &[u8], from: &str, to: &str) -> Result<Vec<u8>, SaveError> {
-    let mut r = StateReader::new(data);
+/// Retarget a save file's machine id from `from` to `to`, adopting a save
+/// recorded under a former machine name.
+///
+/// The checksum is verified first, so a corrupt file is refused rather than
+/// copied, and the output carries a fresh checksum over its rewritten header.
+/// The body is copied through unchanged.
+///
+/// `set_revision` tags an untagged save with its provenance: when the former
+/// name is one of the new machine's revision sets (the mhavoc fold), an empty
+/// revision becomes that set, so the adopted save refuses on the revisions it
+/// did not come from instead of loading anywhere. A save that already carries
+/// a revision keeps it, and `None` (a plain rename) leaves the tag alone.
+/// Version 13 files, which carry no tag, upgrade to 14 here; the body format
+/// did not change between the two, so this only adds the header field.
+pub fn retarget_save_machine_id(
+    data: &[u8],
+    from: &str,
+    to: &str,
+    set_revision: Option<&str>,
+) -> Result<Vec<u8>, SaveError> {
+    let body = verify_crc(data)?;
+    let mut r = StateReader::new(body);
 
     let magic = r.take(4)?;
     if magic != SAVE_MAGIC {
@@ -880,22 +905,28 @@ pub fn retarget_save_machine_id(data: &[u8], from: &str, to: &str) -> Result<Vec
         });
     }
 
-    // The revision tag arrived with envelope 14; validate it the way
-    // `read_header` does, then copy tag and body through unchanged.
-    let tag_start = data.len() - r.remaining();
-    if version >= 14 {
+    let found_revision = if version >= 14 {
         let rev_len = r.read_u32_le()? as usize;
         let rev_bytes = r.take(rev_len)?;
         std::str::from_utf8(rev_bytes)
-            .map_err(|_| SaveError::InvalidFormat("non-UTF8 revision".into()))?;
-    }
+            .map_err(|_| SaveError::InvalidFormat("non-UTF8 revision".into()))?
+    } else {
+        ""
+    };
 
-    let mut out = Vec::with_capacity(data.len() + to.len());
-    out.extend_from_slice(SAVE_MAGIC);
-    out.extend_from_slice(&version.to_le_bytes());
-    out.extend_from_slice(&(to.len() as u32).to_le_bytes());
-    out.extend_from_slice(to.as_bytes());
-    out.extend_from_slice(&data[tag_start..]);
+    let revision = if found_revision.is_empty() {
+        set_revision.unwrap_or("")
+    } else {
+        found_revision
+    };
+
+    let payload_start = body.len() - r.remaining();
+    let mut w = StateWriter::new();
+    write_header(&mut w, to, revision);
+    w.data.extend_from_slice(&body[payload_start..]);
+    let mut out = w.into_vec();
+    let sum = crc32(&out);
+    out.extend_from_slice(&sum.to_le_bytes());
     Ok(out)
 }
 
@@ -1099,28 +1130,54 @@ mod tests {
             "the message should name both revisions: {err}"
         );
         assert!(
+            err.to_string().contains("'joust'"),
+            "the message should name the machine: {err}"
+        );
+        assert!(
             err.to_string().contains("--rom-set 'joust1'"),
             "the message should say which set boots this save: {err}"
         );
     }
 
+    /// Append the trailing checksum, turning header plus body into a file.
+    fn with_crc(mut body: Vec<u8>) -> Vec<u8> {
+        let sum = crc32(&body);
+        body.extend_from_slice(&sum.to_le_bytes());
+        body
+    }
+
+    /// The covered bytes of a file, for `read_header` checks that stop at the
+    /// header rather than loading through `load_machine`.
+    fn without_crc(file: &[u8]) -> &[u8] {
+        &file[..file.len() - 4]
+    }
+
+    struct Dummy(u32);
+    impl Saveable for Dummy {
+        fn save_state(&self, w: &mut StateWriter) {
+            w.write_u32_le(self.0);
+        }
+        fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+            self.0 = r.read_u32_le()?;
+            Ok(())
+        }
+    }
+
     #[test]
     fn retarget_save_machine_id_rewrites_the_header_only() {
-        let mut w = StateWriter::new();
-        write_header(&mut w, "dkong", "dkong");
-        w.write_u32_le(0x1234_5678);
-        let data = w.into_vec();
+        let data = save_machine(&Dummy(0x1234_5678), "dkong", "dkong");
 
-        let out = retarget_save_machine_id(&data, "dkong", "donkeykong").unwrap();
-        let mut r = read_header(&out, "donkeykong", "dkong").unwrap();
+        let out = retarget_save_machine_id(&data, "dkong", "donkeykong", None).unwrap();
+        let mut loaded = Dummy(0);
+        load_machine(&mut loaded, "donkeykong", "dkong", &out)
+            .expect("the retargeted file loads under the new id");
         assert_eq!(
-            r.read_u32_le().unwrap(),
-            0x1234_5678,
+            loaded.0, 0x1234_5678,
             "revision tag and body survive the retarget"
         );
         assert!(
             matches!(
-                read_header(&out, "dkong", "dkong").unwrap_err(),
+                read_header(without_crc(&out), "dkong", "dkong").unwrap_err(),
                 SaveError::MachineMismatch { .. }
             ),
             "the old id no longer matches"
@@ -1129,42 +1186,103 @@ mod tests {
 
     #[test]
     fn retarget_save_machine_id_handles_untagged_v13() {
-        let mut data = Vec::new();
-        data.extend_from_slice(SAVE_MAGIC);
-        data.extend_from_slice(&13u32.to_le_bytes());
-        data.extend_from_slice(&5u32.to_le_bytes());
-        data.extend_from_slice(b"dkong");
-        data.extend_from_slice(&[9, 9, 9]);
+        let mut body = Vec::new();
+        body.extend_from_slice(SAVE_MAGIC);
+        body.extend_from_slice(&13u32.to_le_bytes());
+        body.extend_from_slice(&5u32.to_le_bytes());
+        body.extend_from_slice(b"dkong");
+        body.extend_from_slice(&[9, 9, 9]);
+        let data = with_crc(body);
 
-        let out = retarget_save_machine_id(&data, "dkong", "donkeykong").unwrap();
-        let r = read_header(&out, "donkeykong", "").unwrap();
+        let out = retarget_save_machine_id(&data, "dkong", "donkeykong", None).unwrap();
+        let r = read_header(without_crc(&out), "donkeykong", "").unwrap();
         assert_eq!(r.remaining(), 3, "the v13 body survives the retarget");
     }
 
     #[test]
-    fn retarget_save_machine_id_refuses_foreign_files() {
-        let mut w = StateWriter::new();
-        write_header(&mut w, "joust", "");
-        let data = w.into_vec();
+    fn retarget_tags_an_untagged_fold_save_with_its_provenance() {
+        // An old mhavoc2 save carries no revision; adopted, it becomes a
+        // majorhavoc save tagged mhavoc2, refusing on the other revisions.
+        let data = save_machine(&Dummy(7), "mhavoc2", "");
+
+        let out =
+            retarget_save_machine_id(&data, "mhavoc2", "majorhavoc", Some("mhavoc2")).unwrap();
+        let mut loaded = Dummy(0);
+        load_machine(&mut loaded, "majorhavoc", "mhavoc2", &out)
+            .expect("tagged with its own revision, it loads there");
+        assert_eq!(loaded.0, 7);
         assert!(
             matches!(
-                retarget_save_machine_id(&data, "dkong", "donkeykong").unwrap_err(),
+                load_machine(&mut Dummy(0), "majorhavoc", "mhavoc", &out).unwrap_err(),
+                SaveError::RevisionMismatch { .. }
+            ),
+            "and it refuses on the revision it did not come from"
+        );
+    }
+
+    #[test]
+    fn retarget_leaves_a_tagged_save_and_a_plain_rename_alone() {
+        // A save that already carries a revision keeps it even when a tag is
+        // offered; a plain rename passes none and preserves the empty tag.
+        let tagged = save_machine(&Dummy(1), "mhavoc2", "mhavoc2");
+        let out = retarget_save_machine_id(&tagged, "mhavoc2", "majorhavoc", Some("mhavoc"))
+            .expect("a tagged save still retargets");
+        let mut loaded = Dummy(0);
+        load_machine(&mut loaded, "majorhavoc", "mhavoc2", &out)
+            .expect("the kept tag still matches its own revision");
+        assert!(
+            load_machine(&mut Dummy(0), "majorhavoc", "mhavoc", &out).is_err(),
+            "the offered tag did not overwrite the carried one"
+        );
+
+        let plain = save_machine(&Dummy(2), "dkong", "");
+        let out = retarget_save_machine_id(&plain, "dkong", "donkeykong", None).unwrap();
+        load_machine(&mut Dummy(0), "donkeykong", "", &out)
+            .expect("a plain rename stays untagged and loads");
+    }
+
+    #[test]
+    fn retarget_save_machine_id_refuses_foreign_files() {
+        let data = save_machine(&Dummy(0), "joust", "");
+        assert!(
+            matches!(
+                retarget_save_machine_id(&data, "dkong", "donkeykong", None).unwrap_err(),
                 SaveError::MachineMismatch { .. }
             ),
             "a save from another machine is not adopted"
         );
 
+        // Corrupt the body after the checksum was computed, so the file fails
+        // its own checksum rather than parsing as a different header.
+        let mut corrupt = data.clone();
+        let last_body = corrupt.len() - 5;
+        corrupt[last_body] ^= 0xFF;
+        assert!(
+            matches!(
+                retarget_save_machine_id(&corrupt, "joust", "joust", None).unwrap_err(),
+                SaveError::InvalidFormat(_)
+            ),
+            "a corrupt file is refused, not copied"
+        );
+
         let mut bad_magic = data.clone();
         bad_magic[0] = b'X';
+        // Re-checksum so the failure is the magic, not the checksum.
+        let sum = crc32(&bad_magic[..bad_magic.len() - 4]);
+        let n = bad_magic.len();
+        bad_magic[n - 4..].copy_from_slice(&sum.to_le_bytes());
         assert!(matches!(
-            retarget_save_machine_id(&bad_magic, "joust", "joust").unwrap_err(),
+            retarget_save_machine_id(&bad_magic, "joust", "joust", None).unwrap_err(),
             SaveError::InvalidFormat(_)
         ));
 
-        let mut too_new = data.clone();
+        let mut too_new = data;
         too_new[4..8].copy_from_slice(&(SAVE_VERSION + 1).to_le_bytes());
+        let sum = crc32(&too_new[..too_new.len() - 4]);
+        let n = too_new.len();
+        too_new[n - 4..].copy_from_slice(&sum.to_le_bytes());
         assert!(matches!(
-            retarget_save_machine_id(&too_new, "joust", "joust").unwrap_err(),
+            retarget_save_machine_id(&too_new, "joust", "joust", None).unwrap_err(),
             SaveError::InvalidFormat(_)
         ));
     }

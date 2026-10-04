@@ -305,6 +305,59 @@ fn truncated_saves_are_rejected() {
     }
 }
 
+/// A snapshot taken on one revision refuses on another, since the game code
+/// it resumes differs from the code in the booted ROMs. The same snapshot
+/// still loads on its own revision.
+///
+/// ROM-less counterpart of the harness test of the same name, using blank
+/// builds that carry their revision's identity without needing its ROMs.
+#[test]
+fn a_snapshot_from_one_revision_refuses_on_another() {
+    use phosphor_core::core::save_state::SaveError;
+
+    let mut checked = 0;
+    for entry in registry::all() {
+        if entry.revisions.len() < 2 {
+            continue;
+        }
+        let mut first = (entry.create_bare_revision)(0);
+        first.reset();
+        let snapshot = first
+            .save_state()
+            .unwrap_or_else(|| panic!("{}: save_state() returned None", entry.name));
+
+        let mut second = (entry.create_bare_revision)(1);
+        second.reset();
+        let err = match second.load_state(&snapshot) {
+            Ok(()) => panic!(
+                "{}: accepted a save from '{}' on '{}'",
+                entry.name,
+                entry.revisions[0].set(),
+                entry.revisions[1].set()
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, SaveError::RevisionMismatch { .. }),
+            "{}: unexpected error for a cross-revision load: {err}",
+            entry.name
+        );
+
+        // Same revision still loads: a second instance, so no state lingers
+        // from the save.
+        let mut again = (entry.create_bare_revision)(0);
+        again.reset();
+        again
+            .load_state(&snapshot)
+            .unwrap_or_else(|e| panic!("{}: same-revision load failed: {e:?}", entry.name));
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no multi-revision machine found: this test would pass vacuously"
+    );
+}
+
 /// Guard against a vacuous suite: every test here iterates `registry::all()`.
 #[test]
 fn the_registry_is_not_empty() {
