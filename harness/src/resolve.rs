@@ -260,6 +260,30 @@ pub fn movie_boot_set(machine: &str, path: &str, movie: &Movie) -> Result<Option
     }
 }
 
+/// Refuse an explicit `--rom-set` that names another revision than a v3
+/// movie's recorded set, before anything boots. Agreement is by revision, so
+/// an alias of the recorded set passes; a v2 movie records nothing to
+/// contradict, and unknown names are left for the resolver's own errors.
+pub fn check_movie_rom_set(machine: &str, rom_set: &str, movie: &Movie) -> Result<(), String> {
+    if movie.header.rom_set.is_empty() {
+        return Ok(());
+    }
+    let entry = match phosphor_machines::registry::find(machine) {
+        Some(entry) => entry,
+        None => return Ok(()),
+    };
+    match (
+        entry.find_revision(rom_set),
+        entry.find_revision(&movie.header.rom_set),
+    ) {
+        (Some(wanted), Some(recorded)) if wanted != recorded => Err(format!(
+            "--rom-set '{rom_set}' contradicts movie recorded for ROM set '{}'",
+            movie.header.rom_set
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn resolve_explicit(
     entry: &'static MachineEntry,
     path: &str,
@@ -788,6 +812,36 @@ mod tests {
         };
         assert!(err.contains("not found in"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn movie_check_refuses_a_contradicting_rom_set() {
+        let movie = movie_with("mhavoc", [0; 32]);
+        let Err(err) = check_movie_rom_set("majorhavoc", "mhavocp", &movie) else {
+            panic!("a --rom-set from another revision than the movie must fail");
+        };
+        assert!(
+            err.contains("mhavocp") && err.contains("mhavoc"),
+            "the error names both sets: {err}"
+        );
+    }
+
+    #[test]
+    fn movie_check_accepts_agreement_aliases_and_v2() {
+        // Same revision, whether named canonically or by alias.
+        let movie = movie_with("mhavoc", [0; 32]);
+        check_movie_rom_set("majorhavoc", "mhavoc", &movie).unwrap();
+        let movie = movie_with("quantum", [0; 32]);
+        check_movie_rom_set("quantum", "quantum1", &movie).unwrap();
+        // A v2 movie records nothing to contradict.
+        let movie = movie_with("", [0xEE; 32]);
+        check_movie_rom_set("majorhavoc", "mhavocp", &movie).unwrap();
+        // Unknown names are left for the resolver's own errors.
+        let movie = movie_with("mhavoc", [0; 32]);
+        check_movie_rom_set("majorhavoc", "nope", &movie).unwrap();
+        let movie = movie_with("nope", [0; 32]);
+        check_movie_rom_set("majorhavoc", "mhavocp", &movie).unwrap();
+        check_movie_rom_set("no-such-machine", "mhavocp", &movie).unwrap();
     }
 
     #[test]

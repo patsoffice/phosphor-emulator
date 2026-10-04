@@ -18,7 +18,7 @@ use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
 
 use crate::movie::{Movie, MovieError, MoviePlayer};
-use crate::resolve::{ReplayBoot, RomSource, replay_boot, resolve};
+use crate::resolve::{ReplayBoot, RomSource, check_movie_rom_set, replay_boot, resolve};
 
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
@@ -185,8 +185,9 @@ impl Harness {
     /// The machine name comes from the movie, not the caller — a movie knows
     /// what it was recorded against, and letting the caller assert a different
     /// one would only create a way to be wrong. `rom_set` optionally overrides
-    /// which revision boots; without it, the movie's recorded set (v3) or its
-    /// digest-inferred revision (v2) decides.
+    /// which revision boots, unless it contradicts a v3 movie's recorded set;
+    /// without it, the movie's recorded set (v3) or its digest-inferred
+    /// revision (v2) decides.
     pub fn build_with_movie(
         roms_path: &str,
         movie_path: &Path,
@@ -230,7 +231,10 @@ impl Harness {
         // a game can legitimately have handed the recording and this replay
         // different ones, and naming the choice is what makes that diagnosable.
         let (boot, why) = match rom_set {
-            Some(choice) => (Some(choice), format!("explicit --rom-set '{choice}'")),
+            Some(choice) => {
+                check_movie_rom_set(&name, choice, &movie)?;
+                (Some(choice), format!("explicit --rom-set '{choice}'"))
+            }
             None => match replay_boot(entry, roms_path, &movie)? {
                 ReplayBoot::Recorded(set) => {
                     (Some(set), format!("the movie's recorded set '{set}'"))

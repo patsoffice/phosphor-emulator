@@ -263,6 +263,12 @@ fn main() {
                 );
                 std::process::exit(1);
             }
+            if let Some(set) = &cli.rom_set
+                && let Err(e) = phosphor_harness::check_movie_rom_set(&machine_name, set, &movie)
+            {
+                eprintln!("movie {}: {e}", path.display());
+                std::process::exit(1);
+            }
             match phosphor_harness::movie_boot_set(&machine_name, &rom_path, &movie) {
                 Ok(set) => set,
                 Err(e) => {

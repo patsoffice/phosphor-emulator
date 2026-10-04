@@ -20,8 +20,8 @@ pub use movie::{
     Movie, MovieError, MovieHeader, MoviePlayer, MovieRecord, MovieRecorder, rom_digest,
 };
 pub use resolve::{
-    ReplayBoot, Resolved, RomSource, infer_rom_set, load_revision_set, movie_boot_set,
-    present_archive, present_revisions, replay_boot, resolve, stem_revision,
+    ReplayBoot, Resolved, RomSource, check_movie_rom_set, infer_rom_set, load_revision_set,
+    movie_boot_set, present_archive, present_revisions, replay_boot, resolve, stem_revision,
 };
 pub use rom_path::load_rom_set;
 

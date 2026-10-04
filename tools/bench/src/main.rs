@@ -223,9 +223,15 @@ fn bench_machine(name: &str, roms: &Path, args: &Args) -> Result<MachineResult, 
 
     // A replay measures the recording's revision, not the default: without an
     // explicit --rom-set the boot follows the movie (its recorded set, or v2
-    // digest inference), and the bind below still verifies the dump.
+    // digest inference), an explicit one contradicting the recording is
+    // refused, and the bind below still verifies the dump.
     let boot_set: Option<String> = match (&args.rom_set, &movie) {
-        (Some(set), _) => Some(set.clone()),
+        (Some(set), Some(m)) => {
+            phosphor_harness::check_movie_rom_set(name, set, m)
+                .map_err(|e| format!("{name}: {e}"))?;
+            Some(set.clone())
+        }
+        (Some(set), None) => Some(set.clone()),
         (None, Some(m)) => {
             phosphor_harness::movie_boot_set(name, roms, m).map_err(|e| format!("{name}: {e}"))?
         }

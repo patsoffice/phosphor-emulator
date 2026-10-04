@@ -804,6 +804,31 @@ fn replay_boots_the_recorded_revision() {
     );
 }
 
+/// An explicit `--rom-set` from another revision than a v3 movie's recorded
+/// set is refused before anything boots, naming both sets.
+#[test]
+fn replay_refuses_a_rom_set_contradicting_the_movie() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let Some((entry, set_a, set_b)) = two_revision_machine(&dir) else {
+        eprintln!("skipping: no machine has two bootable revisions");
+        return;
+    };
+
+    let movie = record_on(&dir, entry, &set_b);
+    assert_eq!(movie.header.rom_set, set_b);
+    let err = match Harness::from_movie(dir.to_str().unwrap(), movie, Some(&set_a)) {
+        Ok(_) => panic!("a --rom-set contradicting the movie must be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains(&set_a) && err.contains(&set_b),
+        "the error names both sets: {err}"
+    );
+}
+
 /// A v2 movie names no set, so replay infers the revision by digest — and an
 /// explicit `--rom-set` still wins over the inference.
 #[test]
