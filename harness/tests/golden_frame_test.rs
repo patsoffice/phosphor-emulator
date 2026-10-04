@@ -110,7 +110,7 @@ struct Entry {
     /// with one, so adding ids to new entries renames nothing that exists.
     id: Option<String>,
     /// ROM revision this pin runs: a MAME set name or alias. `None` is the
-    /// machine's default revision — or the movie's own, when `movie` is set.
+    /// machine's default revision, or the movie's own when `movie` is set.
     /// The PNG slug gains the set whenever this is `Some`, so a revision pin
     /// never collides with the default one.
     rom_set: Option<String>,

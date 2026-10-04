@@ -7,7 +7,7 @@
 //!
 //! A revision is only ever built from its own archives: the set's ZIP, then
 //! its aliases. An explicit choice is strict: it builds that revision or
-//! errors, never silently a neighbour. With no choice the revisions are
+//! errors, never silently a neighbor. With no choice the revisions are
 //! tried in declaration order and the first build wins; when the winner is
 //! not the default, that fallback is logged with the reason the default was
 //! skipped.
@@ -19,7 +19,7 @@
 //!   built; otherwise each revision is tried against it in order.
 //! * Pointed at a directory, each revision's archives are tried in order and
 //!   the first build wins. The first candidate's error is the one reported,
-//!   because it is the dump the old behaviour would have chosen and so the
+//!   because it is the dump the old behavior would have chosen and so the
 //!   one a reader is most likely asking about.
 //! * A directory holding no archive at all falls back to its loose files, the
 //!   way it always has.
@@ -147,7 +147,7 @@ pub fn load_revision_set(entry: &MachineEntry, path: &str, rev: usize) -> Result
 //
 // A replay boots what the recording booted: the movie's recorded set (v3), or
 // the revision its digest identifies (v2 inference). An explicit `--rom-set`
-// still wins over both — the callers apply it before calling here.
+// still wins over both: the callers apply it before calling here.
 
 /// First archive of revision `rev` present in `path`, in preference order.
 ///
@@ -180,7 +180,7 @@ pub fn stem_revision(entry: &MachineEntry, path: &str) -> Option<usize> {
 /// Which revision a version 2 movie names by digest: the first archive on
 /// disk, in declaration order, whose dump fingerprints to `digest`.
 ///
-/// A tie — two revisions digesting identically — goes to the earlier revision,
+/// A tie (two revisions digesting identically) goes to the earlier revision,
 /// matching default order. Pointed at anything but a directory there is only
 /// one dump to compare and the default boot already checks it, so this
 /// declines and the caller boots the default.
@@ -206,7 +206,7 @@ pub fn infer_rom_set(entry: &MachineEntry, path: &str, digest: &[u8; 32]) -> Opt
 
 /// Which set a movie replay boots, and why (for mismatch diagnostics).
 pub enum ReplayBoot {
-    /// The v3 movie's recorded set, present on disk — possibly under an alias
+    /// The v3 movie's recorded set, present on disk, possibly under an alias
     /// archive, which names the same revision.
     Recorded(&'static str),
     /// The v2 movie's digest matched this set's dump.
@@ -220,7 +220,7 @@ pub enum ReplayBoot {
 /// the revision its digest identifies (v2 inference).
 ///
 /// Errors only when the movie names a set this machine does not know or that
-/// is not on disk — both are strict failures, never a silent neighbouring
+/// is not on disk: both are strict failures, never a silent neighboring
 /// revision. A v2 digest matching nothing returns [`ReplayBoot::Default`]: the
 /// default boot plus the digest check reports that better than this function
 /// can.
@@ -477,7 +477,7 @@ mod tests {
     ];
 
     /// A toy entry whose revisions accept disjoint marker members. The built
-    /// box is a real bare machine — resolution never runs it, so any box
+    /// box is a real bare machine. Resolution never runs it, so any box
     /// will do.
     static TOY: MachineEntry = MachineEntry::new(
         "toy",

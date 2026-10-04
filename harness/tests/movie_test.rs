@@ -858,7 +858,7 @@ fn bind_movie_refuses_a_movie_from_another_revision() {
     hb.bind_movie(movie).expect("a matching dump binds");
 }
 
-/// A v2 movie names no set, so replay infers the revision by digest — and an
+/// A v2 movie names no set, so replay infers the revision by digest. An
 /// explicit `--rom-set` still wins over the inference.
 #[test]
 fn replay_infers_the_revision_of_a_set_less_movie() {
