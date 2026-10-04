@@ -214,9 +214,19 @@ fn bench_machine(name: &str, roms: &Path, args: &Args) -> Result<MachineResult, 
         None => None,
     };
 
+    // A replay measures the recording's revision, not the default: without an
+    // explicit --rom-set the boot follows the movie (its recorded set, or v2
+    // digest inference), and the bind below still verifies the dump.
+    let boot_set: Option<String> = match (&args.rom_set, &movie) {
+        (Some(set), _) => Some(set.clone()),
+        (None, Some(m)) => {
+            phosphor_harness::movie_boot_set(name, roms, m).map_err(|e| format!("{name}: {e}"))?
+        }
+        (None, None) => None,
+    };
+
     for _ in 0..args.reps {
-        let mut harness =
-            Harness::build(name, roms, args.rom_set.as_deref(), None, None, &[], &[])?;
+        let mut harness = Harness::build(name, roms, boot_set.as_deref(), None, None, &[], &[])?;
         if let Some(m) = &movie {
             // Bound per repetition, because a player carries its own position
             // and every rep has to replay the same frames from the same start.

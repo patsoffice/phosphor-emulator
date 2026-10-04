@@ -110,8 +110,9 @@ struct Entry {
     /// with one, so adding ids to new entries renames nothing that exists.
     id: Option<String>,
     /// ROM revision this pin runs: a MAME set name or alias. `None` is the
-    /// machine's default revision. The PNG slug gains the set whenever this
-    /// is `Some`, so a revision pin never collides with the default one.
+    /// machine's default revision — or the movie's own, when `movie` is set.
+    /// The PNG slug gains the set whenever this is `Some`, so a revision pin
+    /// never collides with the default one.
     rom_set: Option<String>,
     /// Frames from reset before the frame is sampled.
     frames: usize,
@@ -132,10 +133,12 @@ struct Entry {
     /// instead of running the machine input-free.
     ///
     /// This is what lets an entry pin a frame of *gameplay* rather than one of
-    /// attract mode. A movie carries its own starting conditions — ROM digest,
-    /// power-on DIP bytes, NVRAM, host sample rate — so it is mutually exclusive
-    /// with `press` and `nvram`; combining them would leave the entry's
-    /// provenance ambiguous.
+    /// attract mode. A movie carries its own starting conditions — ROM set and
+    /// digest, power-on DIP bytes, NVRAM, host sample rate — so it is mutually
+    /// exclusive with `press` and `nvram`; combining them would leave the
+    /// entry's provenance ambiguous. It combines with `rom_set`, which then
+    /// overrides which revision boots exactly as `--rom-set` does on replay:
+    /// the movie's digest check still verifies the booted dump.
     movie: Option<String>,
     /// Oriented display dimensions, pinned separately from the hash because a
     /// geometry change is legible in a diff and a hash change is not.
@@ -342,6 +345,8 @@ const FRAMES_TOML_HEADER: &str = "\
 # human-authored fields round-trip and the machine-authored ones do not:
 #
 #   machine  registry name
+#   id       optional pin name, for several pins on one machine (human)
+#   rom_set  optional ROM revision; the movie's own when movie is set (human)
 #   frames   frames from reset before the frame is sampled  (human)
 #   shows    what the pinned frame depicts, in prose        (human)
 #   press    optional scripted input, as disasm --press     (human)
@@ -463,13 +468,12 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
 /// unreproducible, not that this collection is short a ROM.
 fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
     if let Some(mv) = &entry.movie {
-        assert!(
-            entry.rom_set.is_none(),
-            "{name}: `movie` with `rom_set` is not supported yet"
-        );
         // A movie carries its own ROM digest, DIP bytes, NVRAM and sample rate.
         // Accepting `press` or `nvram` alongside would leave two sources of
         // truth for the starting conditions and no way to tell which won.
+        // `rom_set` is the exception: it overrides which revision boots, as
+        // `--rom-set` does on replay, and the movie's digest check still
+        // verifies the dump.
         assert!(
             entry.press.is_empty() && entry.nvram.is_none(),
             "{name}: `movie` is mutually exclusive with `press` and `nvram` — \
@@ -481,7 +485,8 @@ fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
             "{name}: `movie = {mv:?}` but {} does not exist",
             path.display()
         );
-        let harness = Harness::build_with_movie(dir.to_str().unwrap(), &path)?;
+        let harness =
+            Harness::build_with_movie(dir.to_str().unwrap(), &path, entry.rom_set.as_deref())?;
         // `build_with_movie` takes the machine from the movie, so a mislabelled
         // entry would silently pin a different game against this machine's hash.
         //
@@ -1194,17 +1199,18 @@ fn a_movie_entry_replays_and_is_reproducible() {
 
     const FRAMES: usize = 400;
     let mut h = Harness::build(name, roms, None, None, None, &[], &[]).expect("build");
-    // The digest of the set this harness actually booted: recomputing it from
-    // the first archive present would pin the movie to a dump it never ran.
-    let digest = h
+    // The identity of the set this harness actually booted: recomputing it
+    // from the first archive present would pin the movie to a dump it never
+    // ran.
+    let source = h
         .rom_source()
-        .expect("a built harness records its ROM source")
-        .digest;
+        .expect("a built harness records its ROM source");
+    let (set, digest) = (source.set(), source.digest);
     let controls = h.machine().input_controls();
     let dip: Vec<u8> = (0..h.machine().dip_banks().len())
         .map(|b| h.machine().dip_bank_value(b))
         .collect();
-    let mut rec = phosphor_harness::MovieRecorder::new(name, digest, controls, dip, None);
+    let mut rec = phosphor_harness::MovieRecorder::new(name, set, digest, controls, dip, None);
     for frame in 0..FRAMES {
         // Coin repeatedly: on every machine in the roster that visibly changes
         // the screen (credits, attract interruption) well inside 400 frames.

@@ -19,7 +19,10 @@ pub use harness::{Harness, MotionSpec, PressSpec};
 pub use movie::{
     Movie, MovieError, MovieHeader, MoviePlayer, MovieRecord, MovieRecorder, rom_digest,
 };
-pub use resolve::{Resolved, RomSource, load_revision_set, present_revisions, resolve};
+pub use resolve::{
+    ReplayBoot, Resolved, RomSource, infer_rom_set, load_revision_set, movie_boot_set,
+    present_archive, present_revisions, replay_boot, resolve,
+};
 pub use rom_path::load_rom_set;
 
 /// Locate a ROM directory for ROM-gated integration tests: `PHOSPHOR_ROMS` if

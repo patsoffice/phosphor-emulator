@@ -311,6 +311,11 @@ enum Command {
         /// Movie file (`.phmi`) to replay.
         #[arg(long)]
         movie: PathBuf,
+        /// ROM revision to boot, overriding the movie's own (its recorded
+        /// set, or v2 digest inference). The movie's digest check still
+        /// verifies the booted dump.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         /// Frames to run. Defaults to the movie's own span; running longer is
         /// allowed and simply continues with no further input.
         #[arg(long)]
@@ -477,6 +482,11 @@ enum MovieCommand {
     Check {
         /// Movie file (`.phmi`).
         movie: PathBuf,
+        /// ROM revision to boot, overriding the movie's own (its recorded
+        /// set, or v2 digest inference). The movie's digest check still
+        /// verifies the booted dump.
+        #[arg(long, value_name = "NAME")]
+        rom_set: Option<String>,
         /// Frames to run (default: the movie's own span).
         #[arg(long)]
         frames: Option<usize>,
@@ -691,6 +701,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
         }),
         Command::Replay {
             movie,
+            rom_set,
             frames,
             out,
             compare,
@@ -698,6 +709,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             path,
         } => run_replay(
             &movie,
+            rom_set.as_deref(),
             frames,
             out.as_deref(),
             compare.as_deref(),
@@ -708,9 +720,10 @@ fn run_command(cmd: Command) -> Result<String, String> {
             MovieCommand::Info { movie } => run_movie_info(&movie),
             MovieCommand::Check {
                 movie,
+                rom_set,
                 frames,
                 path,
-            } => run_movie_check(&movie, frames, &path),
+            } => run_movie_check(&movie, rom_set.as_deref(), frames, &path),
             MovieCommand::Retarget {
                 movie,
                 machine,
@@ -924,6 +937,7 @@ fn load_movie(path: &Path) -> Result<Movie, String> {
 /// so the only thing the caller supplies is where the ROMs live.
 fn run_replay(
     movie_path: &Path,
+    rom_set: Option<&str>,
     frames: Option<usize>,
     out: Option<&Path>,
     compare: Option<&Path>,
@@ -938,7 +952,7 @@ fn run_replay(
     // into a few seconds later.
     let frames = frames.unwrap_or(span);
 
-    let mut harness = Harness::from_movie(roms, movie)?;
+    let mut harness = Harness::from_movie(roms, movie, rom_set)?;
     let (audio, rate, channels) = run_capturing_audio(&mut harness, frames);
 
     let machine_box = harness.machine_mut();
@@ -1041,6 +1055,7 @@ fn run_movie_info(movie_path: &Path) -> Result<String, String> {
     let mut out = format!(
         "{}\n\
          machine:     {}\n\
+         rom set:     {}\n\
          rom digest:  {}\n\
          frames:      {}\n\
          host rate:   {} Hz\n\
@@ -1050,6 +1065,11 @@ fn run_movie_info(movie_path: &Path) -> Result<String, String> {
          records:     {} total\n",
         movie_path.display(),
         h.machine,
+        if h.rom_set.is_empty() {
+            "(none recorded; matched by digest at replay)".to_string()
+        } else {
+            h.rom_set.clone()
+        },
         hex(&h.rom_digest),
         h.frames,
         h.host_sample_rate,
@@ -1122,13 +1142,18 @@ fn run_movie_info(movie_path: &Path) -> Result<String, String> {
 
 /// Replay a movie and print the frame fingerprint, for CI without a reference
 /// PNG. The hash is the one `frames.toml` pins, so it compares directly.
-fn run_movie_check(movie_path: &Path, frames: Option<usize>, roms: &str) -> Result<String, String> {
+fn run_movie_check(
+    movie_path: &Path,
+    rom_set: Option<&str>,
+    frames: Option<usize>,
+    roms: &str,
+) -> Result<String, String> {
     let movie = load_movie(movie_path)?;
     let machine = movie.header.machine.clone();
     let span = movie.header.frames as usize;
     let frames = frames.unwrap_or(span);
 
-    let mut harness = Harness::from_movie(roms, movie)?;
+    let mut harness = Harness::from_movie(roms, movie, rom_set)?;
     for _ in 0..frames {
         harness.run_frame();
     }

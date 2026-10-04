@@ -76,7 +76,16 @@ pub const MOVIE_MAGIC: [u8; 4] = *b"PHMI";
 /// is no way to recompute the old value from the new inputs, so such a file is
 /// rejected outright rather than replayed against a guess. A movie is a log of
 /// inputs and nothing else, so the remedy is to record it again.
-pub const MOVIE_VERSION: u16 = 2;
+///
+/// Version 3 adds the header's `rom_set` field: the MAME set name the session
+/// was recorded on, so replay boots that revision directly. Version 2 files
+/// stay readable; they carry no set, so replay infers the revision by matching
+/// their digest against the revisions on disk.
+pub const MOVIE_VERSION: u16 = 3;
+
+/// Oldest movie envelope this build can read. Version 1's digest cannot be
+/// recomputed from anything on disk (see above), so the floor stays at 2.
+pub const MIN_SUPPORTED_MOVIE_VERSION: u16 = 2;
 
 /// Ceiling on a decompressed record block, so a corrupt or hostile file cannot
 /// make the decoder allocate without bound. 64 MiB is roughly six million
@@ -126,7 +135,8 @@ impl fmt::Display for MovieError {
             Self::BadMagic => write!(f, "not a movie file (bad magic)"),
             Self::UnsupportedVersion(v) => write!(
                 f,
-                "movie format version {v}, this build understands {MOVIE_VERSION}"
+                "movie format version {v}, this build reads versions \
+                 {MIN_SUPPORTED_MOVIE_VERSION} through {MOVIE_VERSION}"
             ),
             Self::Truncated => write!(f, "movie file ends mid-field"),
             Self::ChecksumMismatch => {
@@ -237,6 +247,10 @@ pub fn hex(digest: &[u8; 32]) -> String {
 pub struct MovieHeader {
     /// Registry name, e.g. `"marble"`.
     pub machine: String,
+    /// MAME set name the session was recorded on, e.g. `"spacduel1"`. Empty
+    /// when unknown: version 2 files predate the field, and replay infers the
+    /// revision from [`rom_digest`](Self::rom_digest) instead.
+    pub rom_set: String,
     /// [`rom_digest`] of the ROM set at record time.
     pub rom_digest: [u8; 32],
     /// Stable control names. Records address controls by index into this table
@@ -424,6 +438,7 @@ impl<'a> Cursor<'a> {
 fn encode_header(h: &MovieHeader) -> Vec<u8> {
     let mut out = Vec::new();
     put_str(&mut out, &h.machine);
+    put_str(&mut out, &h.rom_set);
     out.extend_from_slice(&h.rom_digest);
     put_u32(&mut out, h.controls.len() as u32);
     for c in &h.controls {
@@ -442,8 +457,15 @@ fn encode_header(h: &MovieHeader) -> Vec<u8> {
     out
 }
 
-fn decode_header(c: &mut Cursor<'_>) -> Result<MovieHeader, MovieError> {
+fn decode_header(c: &mut Cursor<'_>, version: u16) -> Result<MovieHeader, MovieError> {
     let machine = c.string()?;
+    // The set field arrived with version 3; older files end the identity at
+    // the machine name and replay infers the revision from the digest.
+    let rom_set = if version >= 3 {
+        c.string()?
+    } else {
+        String::new()
+    };
     let rom_digest = c.digest()?;
     let control_count = c.u32()? as usize;
     // A machine's control table is tens of entries. Reject an absurd count
@@ -465,6 +487,7 @@ fn decode_header(c: &mut Cursor<'_>) -> Result<MovieHeader, MovieError> {
     let frames = c.u32()?;
     Ok(MovieHeader {
         machine,
+        rom_set,
         rom_digest,
         controls,
         dip,
@@ -633,12 +656,12 @@ impl Movie {
             return Err(MovieError::BadMagic);
         }
         let version = c.u16()?;
-        if version != MOVIE_VERSION {
+        if !(MIN_SUPPORTED_MOVIE_VERSION..=MOVIE_VERSION).contains(&version) {
             return Err(MovieError::UnsupportedVersion(version));
         }
 
         let header_bytes = c.bytes()?;
-        let header = decode_header(&mut Cursor::new(header_bytes))?;
+        let header = decode_header(&mut Cursor::new(header_bytes), version)?;
 
         let raw_len = c.u32()? as usize;
         let packed = c.bytes()?;
@@ -743,6 +766,7 @@ impl Movie {
 /// it the durability that makes committing one worthwhile.
 pub struct MovieRecorder {
     machine: String,
+    rom_set: String,
     rom_digest: [u8; 32],
     controls: Vec<String>,
     /// `InputId` → index into `controls`. Built once from the machine's control
@@ -763,12 +787,15 @@ pub struct MovieRecorder {
 impl MovieRecorder {
     /// Start a recording against a machine that has just been reset.
     ///
-    /// `controls` is the machine's `input_controls()` table, `dip` its power-on
-    /// bank bytes in bank order, and `nvram` the image loaded after reset (if
-    /// any). All three are captured now because replay must reconstruct the same
-    /// starting conditions before delivering a single record.
+    /// `rom_set` is the MAME set the machine was built from, so replay boots
+    /// the same revision. `controls` is the machine's `input_controls()`
+    /// table, `dip` its power-on bank bytes in bank order, and `nvram` the
+    /// image loaded after reset (if any). All three are captured now because
+    /// replay must reconstruct the same starting conditions before delivering
+    /// a single record.
     pub fn new(
         machine: impl Into<String>,
+        rom_set: impl Into<String>,
         rom_digest: [u8; 32],
         controls: &[InputControl],
         dip: Vec<u8>,
@@ -776,6 +803,7 @@ impl MovieRecorder {
     ) -> Self {
         Self {
             machine: machine.into(),
+            rom_set: rom_set.into(),
             rom_digest,
             controls: controls.iter().map(|c| c.stable_name.to_owned()).collect(),
             index_of: controls
@@ -923,6 +951,7 @@ impl MovieRecorder {
         Movie {
             header: MovieHeader {
                 machine: self.machine,
+                rom_set: self.rom_set,
                 rom_digest: self.rom_digest,
                 controls: self.controls,
                 dip: self.dip,
@@ -1070,6 +1099,7 @@ mod tests {
     fn header() -> MovieHeader {
         MovieHeader {
             machine: "marble".into(),
+            rom_set: "marble".into(),
             rom_digest: [0xAB; 32],
             controls: vec!["track_x".into(), "coin".into()],
             dip: vec![0x40, 0x00],
@@ -1189,6 +1219,71 @@ mod tests {
             Movie::decode(&bytes),
             Err(MovieError::UnsupportedVersion(99))
         );
+    }
+
+    #[test]
+    fn rejects_a_version_1_file() {
+        // v1's digest hashed the registry's name list, which no longer exists
+        // as an input, so there is nothing to infer from: refuse outright.
+        let mut bytes = movie().encode();
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        restamp(&mut bytes);
+        assert_eq!(
+            Movie::decode(&bytes),
+            Err(MovieError::UnsupportedVersion(1))
+        );
+    }
+
+    /// A version 2 file, laid out exactly as the v2 encoder wrote it: the
+    /// header ends the identity at the machine name, with no set field.
+    fn encode_v2(movie: &Movie) -> Vec<u8> {
+        let h = &movie.header;
+        let mut header = Vec::new();
+        put_str(&mut header, &h.machine);
+        header.extend_from_slice(&h.rom_digest);
+        put_u32(&mut header, h.controls.len() as u32);
+        for c in &h.controls {
+            put_str(&mut header, c);
+        }
+        put_bytes(&mut header, &h.dip);
+        match &h.nvram {
+            Some(nv) => {
+                put_u8(&mut header, 1);
+                put_bytes(&mut header, nv);
+            }
+            None => put_u8(&mut header, 0),
+        }
+        put_u32(&mut header, h.host_sample_rate);
+        put_u32(&mut header, h.frames);
+
+        let mut raw = Vec::new();
+        put_u32(&mut raw, movie.records.len() as u32);
+        for r in &movie.records {
+            encode_record(&mut raw, r);
+        }
+        let packed = deflate(&raw);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&MOVIE_MAGIC);
+        put_u16(&mut out, 2);
+        put_bytes(&mut out, &header);
+        put_u32(&mut out, raw.len() as u32);
+        put_bytes(&mut out, &packed);
+        let mut hsh = Sha256::new();
+        hsh.update(&out);
+        let digest: [u8; 32] = hsh.finalize().into();
+        out.extend_from_slice(&digest);
+        out
+    }
+
+    #[test]
+    fn a_version_2_file_decodes_with_an_unknown_set() {
+        let m = movie();
+        let decoded = Movie::decode(&encode_v2(&m)).expect("v2 stays readable");
+        assert_eq!(decoded.header.machine, m.header.machine);
+        assert_eq!(decoded.header.rom_set, "");
+        assert_eq!(decoded.header.rom_digest, m.header.rom_digest);
+        assert_eq!(decoded.records, m.records);
     }
 
     #[test]
@@ -1340,7 +1435,7 @@ mod tests {
     ];
 
     fn recorder() -> MovieRecorder {
-        MovieRecorder::new("marble", [7; 32], CONTROLS, vec![0x40], None)
+        MovieRecorder::new("marble", "marble", [7; 32], CONTROLS, vec![0x40], None)
     }
 
     /// Stopping with input on a frame that never completed still yields a

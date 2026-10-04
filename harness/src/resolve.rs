@@ -38,7 +38,7 @@ use phosphor_core::core::machine::FrontendMachine;
 use phosphor_machines::registry::MachineEntry;
 use phosphor_machines::rom_loader::{RomLoadError, RomSet};
 
-use crate::movie::rom_digest;
+use crate::movie::{Movie, rom_digest};
 use crate::rom_path::load_rom_set;
 
 /// Where a running machine's ROMs came from: the entry, which of its
@@ -139,6 +139,112 @@ pub fn load_revision_set(entry: &MachineEntry, path: &str, rev: usize) -> Result
     }
     // No archive of this revision: the loose-file fallback, as in `resolve`.
     load_rom_set(path, revision.names).map_err(|e| format!("loading ROM set {path}: {e}"))
+}
+
+// -- Movie replay boot selection -------------------------------------------------
+//
+// A replay boots what the recording booted: the movie's recorded set (v3), or
+// the revision its digest identifies (v2 inference). An explicit `--rom-set`
+// still wins over both — the callers apply it before calling here.
+
+/// First archive of revision `rev` present in `path`, in preference order.
+///
+/// A directory names the archive to load. Anything else (a direct ZIP, a
+/// loose-file directory) loads by path rather than by name, so the revision's
+/// canonical set is returned and only selects which `create` runs.
+pub fn present_archive(entry: &MachineEntry, path: &str, rev: usize) -> Option<&'static str> {
+    let revision = entry.revisions.get(rev)?;
+    if !Path::new(path).is_dir() {
+        return Some(revision.set());
+    }
+    revision
+        .names
+        .iter()
+        .find(|n| Path::new(path).join(format!("{n}.zip")).exists())
+        .copied()
+}
+
+/// Which revision a version 2 movie names by digest: the first archive on
+/// disk, in declaration order, whose dump fingerprints to `digest`.
+///
+/// A tie — two revisions digesting identically — goes to the earlier revision,
+/// matching default order. Pointed at anything but a directory there is only
+/// one dump to compare and the default boot already checks it, so this
+/// declines and the caller boots the default.
+pub fn infer_rom_set(entry: &MachineEntry, path: &str, digest: &[u8; 32]) -> Option<&'static str> {
+    if !Path::new(path).is_dir() {
+        return None;
+    }
+    for revision in entry.revisions {
+        for &name in revision.names {
+            if !Path::new(path).join(format!("{name}.zip")).exists() {
+                continue;
+            }
+            let Ok(set) = load_rom_set(path, &[name]) else {
+                continue;
+            };
+            if rom_digest(&set) == *digest {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Which set a movie replay boots, and why (for mismatch diagnostics).
+pub enum ReplayBoot {
+    /// The v3 movie's recorded set, present on disk — possibly under an alias
+    /// archive, which names the same revision.
+    Recorded(&'static str),
+    /// The v2 movie's digest matched this set's dump.
+    Inferred(&'static str),
+    /// The movie says nothing usable: boot the default and let the digest
+    /// check report the mismatch.
+    Default,
+}
+
+/// The set a movie replay should boot: the movie's recorded revision (v3), or
+/// the revision its digest identifies (v2 inference).
+///
+/// Errors only when the movie names a set this machine does not know or that
+/// is not on disk — both are strict failures, never a silent neighbouring
+/// revision. A v2 digest matching nothing returns [`ReplayBoot::Default`]: the
+/// default boot plus the digest check reports that better than this function
+/// can.
+pub fn replay_boot(entry: &MachineEntry, path: &str, movie: &Movie) -> Result<ReplayBoot, String> {
+    if !movie.header.rom_set.is_empty() {
+        let rev = entry.find_revision(&movie.header.rom_set).ok_or_else(|| {
+            format!(
+                "movie names unknown ROM set '{}' for '{}'; known sets: {}",
+                movie.header.rom_set,
+                entry.name,
+                entry.archive_names().join(", ")
+            )
+        })?;
+        let name = present_archive(entry, path, rev).ok_or_else(|| {
+            format!(
+                "ROM set '{}' for '{}' not found in {path}",
+                movie.header.rom_set, entry.name
+            )
+        })?;
+        return Ok(ReplayBoot::Recorded(name));
+    }
+    Ok(match infer_rom_set(entry, path, &movie.header.rom_digest) {
+        Some(name) => ReplayBoot::Inferred(name),
+        None => ReplayBoot::Default,
+    })
+}
+
+/// [`replay_boot`] by machine name, for callers without the entry to hand. The
+/// owned name feeds [`resolve`] or [`Harness::build`](crate::Harness::build)
+/// directly; `None` means boot the default.
+pub fn movie_boot_set(machine: &str, path: &str, movie: &Movie) -> Result<Option<String>, String> {
+    let entry = phosphor_machines::registry::find(machine)
+        .ok_or_else(|| format!("unknown machine '{machine}'"))?;
+    match replay_boot(entry, path, movie)? {
+        ReplayBoot::Recorded(name) | ReplayBoot::Inferred(name) => Ok(Some(name.to_string())),
+        ReplayBoot::Default => Ok(None),
+    }
 }
 
 fn resolve_explicit(
@@ -441,6 +547,124 @@ mod tests {
         let resolved = resolve(&TOY, dir.to_str().unwrap(), None).unwrap();
         let expected = rom_digest(&load_rom_set(dir.to_str().unwrap(), &["rev1a"]).unwrap());
         assert_eq!(resolved.source.digest, expected);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn movie_with(rom_set: &str, digest: [u8; 32]) -> Movie {
+        Movie {
+            header: crate::movie::MovieHeader {
+                machine: "toy".into(),
+                rom_set: rom_set.into(),
+                rom_digest: digest,
+                controls: Vec::new(),
+                dip: Vec::new(),
+                nvram: None,
+                host_sample_rate: 44_100,
+                frames: 0,
+            },
+            records: Vec::new(),
+        }
+    }
+
+    fn digest_of(dir: &Path, name: &str) -> [u8; 32] {
+        rom_digest(&load_rom_set(dir.to_str().unwrap(), &[name]).unwrap())
+    }
+
+    #[test]
+    fn inference_finds_the_revision_whose_dump_matches() {
+        let dir = scratch();
+        write_zip(&dir, "rev0a", &[("rev0.bin", &[1, 2, 3])]);
+        write_zip(&dir, "rev1a", &[("rev1.bin", &[4, 5, 6])]);
+        let path = dir.to_str().unwrap();
+        assert_eq!(
+            infer_rom_set(&TOY, path, &digest_of(&dir, "rev1a")),
+            Some("rev1a")
+        );
+        assert_eq!(
+            infer_rom_set(&TOY, path, &digest_of(&dir, "rev0a")),
+            Some("rev0a")
+        );
+        assert_eq!(infer_rom_set(&TOY, path, &[0xEE; 32]), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn inference_tie_goes_to_the_earlier_revision() {
+        // Two revisions whose dumps are byte-identical: inference cannot tell
+        // them apart, so default order decides.
+        let dir = scratch();
+        write_zip(&dir, "rev0a", &[("shared.bin", &[1, 2])]);
+        write_zip(&dir, "rev1a", &[("shared.bin", &[1, 2])]);
+        let found = infer_rom_set(&TOY, dir.to_str().unwrap(), &digest_of(&dir, "rev1a"));
+        assert_eq!(found, Some("rev0a"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn inference_declines_outside_directories() {
+        // One dump, no choice to make: the default boot plus the digest check
+        // already covers it.
+        let dir = scratch();
+        write_zip(&dir, "rev1a", &[("rev1.bin", &[7])]);
+        let zip = dir.join("rev1a.zip");
+        let digest = digest_of(&dir, "rev1a");
+        assert_eq!(infer_rom_set(&TOY, zip.to_str().unwrap(), &digest), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replay_boot_uses_the_recorded_set() {
+        let dir = scratch();
+        write_zip(&dir, "rev1a", &[("rev1.bin", &[4, 5, 6])]);
+        let path = dir.to_str().unwrap();
+        let boot = replay_boot(&TOY, path, &movie_with("rev1a", [0; 32])).unwrap();
+        assert!(matches!(boot, ReplayBoot::Recorded("rev1a")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replay_boot_accepts_an_alias_archive_for_the_recorded_set() {
+        // Recorded against rev0's canonical set, replayed from a collection
+        // holding only its alias: same revision, so it boots.
+        let dir = scratch();
+        write_zip(&dir, "rev0alias", &[("rev0.bin", &[1])]);
+        let path = dir.to_str().unwrap();
+        let boot = replay_boot(&TOY, path, &movie_with("rev0a", [0; 32])).unwrap();
+        assert!(matches!(boot, ReplayBoot::Recorded("rev0alias")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replay_boot_rejects_unknown_and_missing_sets() {
+        let dir = scratch();
+        write_zip(&dir, "rev1a", &[("rev1.bin", &[4, 5, 6])]);
+        let path = dir.to_str().unwrap();
+        let Err(err) = replay_boot(&TOY, path, &movie_with("nope", [0; 32])) else {
+            panic!("unknown recorded set must fail");
+        };
+        assert!(
+            err.contains("unknown ROM set") && err.contains("rev0a"),
+            "unexpected error: {err}"
+        );
+        let Err(err) = replay_boot(&TOY, path, &movie_with("rev0a", [0; 32])) else {
+            panic!("missing recorded set must fail");
+        };
+        assert!(err.contains("not found in"), "unexpected error: {err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replay_boot_falls_back_to_default_when_nothing_matches() {
+        let dir = scratch();
+        write_zip(&dir, "rev1a", &[("rev1.bin", &[4, 5, 6])]);
+        let path = dir.to_str().unwrap();
+        // v2 digest matching nothing on disk: boot the default and let the
+        // digest check report it.
+        let boot = replay_boot(&TOY, path, &movie_with("", [0xEE; 32])).unwrap();
+        assert!(matches!(boot, ReplayBoot::Default));
+        // ...while a matching digest infers instead of defaulting.
+        let boot = replay_boot(&TOY, path, &movie_with("", digest_of(&dir, "rev1a"))).unwrap();
+        assert!(matches!(boot, ReplayBoot::Inferred("rev1a")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

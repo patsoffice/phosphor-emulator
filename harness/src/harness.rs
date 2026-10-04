@@ -18,7 +18,7 @@ use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
 
 use crate::movie::{Movie, MovieError, MoviePlayer};
-use crate::resolve::{RomSource, resolve};
+use crate::resolve::{ReplayBoot, RomSource, replay_boot, resolve};
 
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
@@ -184,13 +184,19 @@ impl Harness {
     ///
     /// The machine name comes from the movie, not the caller — a movie knows
     /// what it was recorded against, and letting the caller assert a different
-    /// one would only create a way to be wrong.
-    pub fn build_with_movie(roms_path: &str, movie_path: &Path) -> Result<Self, String> {
+    /// one would only create a way to be wrong. `rom_set` optionally overrides
+    /// which revision boots; without it, the movie's recorded set (v3) or its
+    /// digest-inferred revision (v2) decides.
+    pub fn build_with_movie(
+        roms_path: &str,
+        movie_path: &Path,
+        rom_set: Option<&str>,
+    ) -> Result<Self, String> {
         let bytes = std::fs::read(movie_path)
             .map_err(|e| format!("reading movie {}: {e}", movie_path.display()))?;
         let movie = Movie::decode(&bytes)
             .map_err(|e| format!("reading movie {}: {e}", movie_path.display()))?;
-        Self::from_movie(roms_path, movie)
+        Self::from_movie(roms_path, movie, rom_set)
     }
 
     /// Boot and bind an already-decoded movie. The seam tests use to replay a
@@ -201,7 +207,11 @@ impl Harness {
     /// (devices derive their resampler ratios at construction, so setting it
     /// afterwards would leave the chips disagreeing), then reset, NVRAM, and the
     /// power-on DIP bytes.
-    pub fn from_movie(roms_path: &str, movie: Movie) -> Result<Self, String> {
+    pub fn from_movie(
+        roms_path: &str,
+        movie: Movie,
+        rom_set: Option<&str>,
+    ) -> Result<Self, String> {
         let name = movie.header.machine.clone();
         let entry = registry::find(&name).ok_or_else(|| {
             let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
@@ -213,37 +223,52 @@ impl Harness {
 
         phosphor_core::audio::set_host_sample_rate(movie.header.host_sample_rate);
 
-        let resolved = resolve(entry, roms_path, None)?;
+        // Boot what the recording booted: an explicit choice wins, then the
+        // movie's own recorded set, then v2 digest inference, then the default.
+        // The `why` phrase exists for the mismatch error below, which must say
+        // how this build chose its dump: a collection holding several dumps of
+        // a game can legitimately have handed the recording and this replay
+        // different ones, and naming the choice is what makes that diagnosable.
+        let (boot, why) = match rom_set {
+            Some(choice) => (Some(choice), format!("explicit --rom-set '{choice}'")),
+            None => match replay_boot(entry, roms_path, &movie)? {
+                ReplayBoot::Recorded(set) => {
+                    (Some(set), format!("the movie's recorded set '{set}'"))
+                }
+                ReplayBoot::Inferred(set) => {
+                    (Some(set), format!("digest inference matched '{set}'"))
+                }
+                ReplayBoot::Default => {
+                    let why = if roms_path.to_ascii_lowercase().ends_with(".zip") {
+                        "the archive it was pointed at".to_string()
+                    } else {
+                        format!("default order over {}", entry.archive_names().join(", "))
+                    };
+                    (None, why)
+                }
+            },
+        };
+        let resolved = resolve(entry, roms_path, boot)?;
         let mut machine_box = resolved.machine;
 
         // A movie replayed against a different dump boots fine and then diverges
         // silently, so this check is the difference between a clear error and a
         // golden hash that moved for no visible reason.
-        //
-        // Report both digests and how this build chose its dump. Pointed at a
-        // directory, more than one of `archive_names()` can have an archive there, so
-        // a collection holding several dumps of a game can legitimately have
-        // handed the recording and this replay different ones, and naming the
-        // order is what makes that diagnosable. Pointed straight at an archive
-        // it consults no names at all, and saying it "tried" any would be a
-        // fabrication.
         let actual = resolved.source.digest;
         if actual != movie.header.rom_digest {
-            let chose = if roms_path.to_ascii_lowercase().ends_with(".zip") {
+            let recorded = if movie.header.rom_set.is_empty() {
                 String::new()
             } else {
-                format!(
-                    " (of {}, the first in {roms_path} this machine accepted was used)",
-                    entry.archive_names().join(", ")
-                )
+                format!(" (recorded on '{}')", movie.header.rom_set)
             };
             return Err(format!(
-                "{}: movie expects {}, this build computes {} for '{name}' revision '{}'{chose}. \
-                 This digest covers the member files of the dump that was loaded, so a \
-                 mismatch means the bytes differ: a different revision of the set, or \
-                 a different archive of the same game.",
+                "{}: movie expects {}{}, this build computes {} for '{name}' booted \
+                 from '{}' ({why}). This digest covers the member files of the dump \
+                 that was loaded, so a mismatch means the bytes differ: a different \
+                 revision of the set, or a different archive of the same game.",
                 MovieError::RomMismatch,
                 crate::movie::hex(&movie.header.rom_digest),
+                recorded,
                 crate::movie::hex(&actual),
                 resolved.source.set(),
             ));

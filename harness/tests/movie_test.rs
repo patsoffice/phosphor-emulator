@@ -158,7 +158,7 @@ fn record_session(
     let mut h = Harness::from_machine(machine);
     let controls = h.machine().input_controls();
     let dip = dip_bytes(h.machine());
-    let mut rec = MovieRecorder::new(name, [0u8; 32], controls, dip, None);
+    let mut rec = MovieRecorder::new(name, h.machine().revision(), [0u8; 32], controls, dip, None);
 
     for frame_events in plan {
         for &event in frame_events {
@@ -443,6 +443,7 @@ fn binding_rejects_a_control_the_machine_does_not_expose() {
     let movie = Movie {
         header: phosphor_harness::MovieHeader {
             machine: entry.name.into(),
+            rom_set: String::new(),
             rom_digest: [0; 32],
             controls: vec!["definitely_not_a_control".into()],
             dip: Vec::new(),
@@ -587,10 +588,11 @@ fn a_recorded_session_replays_identically_on_a_booted_machine() {
 
         let controls = machine.input_controls();
         let plan = input_plan(controls, BOOTED_FRAMES, 0x5EED_0004);
+        let revision = machine.revision().to_string();
 
         let mut h = Harness::from_machine(machine);
         let dip = dip_bytes(h.machine());
-        let mut rec = MovieRecorder::new(name, [0u8; 32], controls, dip, None);
+        let mut rec = MovieRecorder::new(name, revision, [0u8; 32], controls, dip, None);
         // The recorder's frame numbering starts at the recording, not at
         // power-on, so replay must warm up by the same amount before binding.
         for frame_events in &plan {
@@ -656,6 +658,7 @@ fn replay_refuses_a_rom_set_the_movie_was_not_recorded_against() {
     let movie = Movie {
         header: phosphor_harness::MovieHeader {
             machine: entry.name.into(),
+            rom_set: String::new(),
             rom_digest: [0xEE; 32],
             controls: machine
                 .input_controls()
@@ -671,7 +674,7 @@ fn replay_refuses_a_rom_set_the_movie_was_not_recorded_against() {
     };
     assert_ne!(real, movie.header.rom_digest, "fixture digest must differ");
 
-    let err = match Harness::from_movie(dir.to_str().unwrap(), movie) {
+    let err = match Harness::from_movie(dir.to_str().unwrap(), movie, None) {
         Ok(_) => panic!("a mismatched ROM digest must be refused"),
         Err(e) => e,
     };
@@ -690,6 +693,7 @@ fn replay_refuses_a_movie_naming_an_unregistered_machine() {
     let movie = Movie {
         header: phosphor_harness::MovieHeader {
             machine: "not_a_real_machine".into(),
+            rom_set: String::new(),
             rom_digest: [0; 32],
             controls: Vec::new(),
             dip: Vec::new(),
@@ -699,13 +703,142 @@ fn replay_refuses_a_movie_naming_an_unregistered_machine() {
         },
         records: Vec::new(),
     };
-    let err = match Harness::from_movie(dir.to_str().unwrap(), movie) {
+    let err = match Harness::from_movie(dir.to_str().unwrap(), movie, None) {
         Ok(_) => panic!("an unregistered machine name must be refused"),
         Err(e) => e,
     };
     assert!(
         err.contains("unknown machine"),
         "expected an unknown-machine error, got: {err}"
+    );
+}
+
+/// First machine with two bootable revisions, or `None` when the collection
+/// has none. Both revision tests below run on it, so a partial collection
+/// still runs them when it can.
+fn two_revision_machine(dir: &Path) -> Option<(&'static registry::MachineEntry, String, String)> {
+    for entry in registry::all() {
+        let present: Vec<usize> = entry
+            .revisions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.names
+                    .iter()
+                    .any(|n| dir.join(format!("{n}.zip")).exists())
+            })
+            .map(|(rev, _)| rev)
+            .collect();
+        if present.len() < 2 {
+            continue;
+        }
+        // Both must actually boot: a present archive with the wrong dump is a
+        // collection problem, not a replay to test. And their dumps must
+        // differ, or the pinned-foreign case below has nothing to refuse.
+        let dir_str = dir.to_str().unwrap();
+        let a = entry.revisions[present[0]].set().to_string();
+        let b = entry.revisions[present[1]].set().to_string();
+        let Ok(ha) = Harness::build(entry.name, dir_str, Some(&a), None, None, &[], &[]) else {
+            continue;
+        };
+        let Ok(hb) = Harness::build(entry.name, dir_str, Some(&b), None, None, &[], &[]) else {
+            continue;
+        };
+        let (Some(sa), Some(sb)) = (ha.rom_source(), hb.rom_source()) else {
+            continue;
+        };
+        if sa.digest == sb.digest {
+            continue;
+        }
+        return Some((entry, a, b));
+    }
+    None
+}
+
+/// Record a real movie on `set`: boot it strictly, capture the starting
+/// conditions, run a few frames, and finish. The bytes round-trip through the
+/// encoder so the replay below reads a file, not a struct.
+fn record_on(dir: &Path, entry: &registry::MachineEntry, set: &str) -> Movie {
+    let dir_str = dir.to_str().unwrap();
+    let mut h = Harness::build(entry.name, dir_str, Some(set), None, None, &[], &[])
+        .expect("revision booted a moment ago");
+    let source = h.rom_source().expect("build records its source");
+    let mut rec = MovieRecorder::new(
+        entry.name,
+        source.set(),
+        source.digest,
+        h.machine().input_controls(),
+        dip_bytes(h.machine()),
+        None,
+    );
+    for _ in 0..4 {
+        h.run_frame();
+        rec.advance_frame();
+    }
+    let bytes = rec.finish().encode();
+    Movie::decode(&bytes).expect("a recording must decode")
+}
+
+/// A v3 movie boots the revision it names, even when that is not the default.
+#[test]
+fn replay_boots_the_recorded_revision() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let Some((entry, _, set_b)) = two_revision_machine(&dir) else {
+        eprintln!("skipping: no machine has two bootable revisions");
+        return;
+    };
+
+    let movie = record_on(&dir, entry, &set_b);
+    assert_eq!(movie.header.rom_set, set_b);
+    let replay = Harness::from_movie(dir.to_str().unwrap(), movie, None)
+        .expect("replay of a just-recorded movie");
+    let source = replay.rom_source().expect("replay records its source");
+    assert_eq!(
+        source.set(),
+        set_b,
+        "replay booted {} instead of the recorded {set_b}",
+        source.set()
+    );
+}
+
+/// A v2 movie names no set, so replay infers the revision by digest — and an
+/// explicit `--rom-set` still wins over the inference.
+#[test]
+fn replay_infers_the_revision_of_a_set_less_movie() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let Some((entry, set_a, set_b)) = two_revision_machine(&dir) else {
+        eprintln!("skipping: no machine has two bootable revisions");
+        return;
+    };
+
+    // The v2 shape: a real digest, no recorded set.
+    let mut movie = record_on(&dir, entry, &set_b);
+    movie.header.rom_set.clear();
+    let replay = Harness::from_movie(dir.to_str().unwrap(), movie.clone(), None)
+        .expect("inference over two present revisions");
+    let source = replay.rom_source().expect("replay records its source");
+    assert_eq!(
+        source.set(),
+        set_b,
+        "inference booted {} instead of the digest's {set_b}",
+        source.set()
+    );
+
+    // ...unless the caller pins a revision: then that boots, and the digest
+    // check refuses the foreign dump.
+    let err = match Harness::from_movie(dir.to_str().unwrap(), movie, Some(&set_a)) {
+        Ok(_) => panic!("a pinned foreign revision must be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("different ROM set"),
+        "expected a ROM mismatch error, got: {err}"
     );
 }
 

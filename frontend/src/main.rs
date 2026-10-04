@@ -240,13 +240,47 @@ fn main() {
         std::process::exit(1);
     }
 
-    let resolved = match phosphor_harness::resolve(entry, &rom_path, cli.rom_set.as_deref()) {
+    // A replay boots what the recording booted. With --movie and no explicit
+    // --rom-set, the set comes from the movie (its recorded set, or v2 digest
+    // inference) rather than the default, so a movie recorded on another
+    // revision replays instead of failing its digest check at bind time.
+    let movie_boot_set: Option<String> = match &cli.movie {
+        None => None,
+        Some(path) => {
+            let bytes = std::fs::read(path).unwrap_or_else(|e| {
+                eprintln!("reading movie {}: {e}", path.display());
+                std::process::exit(1);
+            });
+            let movie = phosphor_harness::Movie::decode(&bytes).unwrap_or_else(|e| {
+                eprintln!("reading movie {}: {e}", path.display());
+                std::process::exit(1);
+            });
+            if movie.header.machine != machine_name {
+                eprintln!(
+                    "movie {} was recorded for '{}', not '{machine_name}'",
+                    path.display(),
+                    movie.header.machine
+                );
+                std::process::exit(1);
+            }
+            match phosphor_harness::movie_boot_set(&machine_name, &rom_path, &movie) {
+                Ok(set) => set,
+                Err(e) => {
+                    eprintln!("movie {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let rom_set_choice = cli.rom_set.clone().or(movie_boot_set);
+
+    let resolved = match phosphor_harness::resolve(entry, &rom_path, rom_set_choice.as_deref()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Could not load {machine_name} from {rom_path}: {e}");
             // The explicit-choice error already names the set and the path;
             // only the default-order failure needs the tried list restated.
-            if cli.rom_set.is_none() {
+            if rom_set_choice.is_none() {
                 eprintln!(
                     "  Tried ROM set names: {}",
                     entry.archive_names().join(", ")
@@ -286,9 +320,9 @@ fn main() {
         machine.load_nvram(&data);
     }
 
-    // Confirm an explicit --rom-set: which set booted and which NVRAM file it
-    // uses. Default boots stay quiet; the fallback warn covers surprises.
-    if cli.rom_set.is_some() {
+    // Confirm a pinned boot: which set booted and which NVRAM file it uses.
+    // Default boots stay quiet; the fallback warn covers surprises.
+    if rom_set_choice.is_some() {
         log::info!(
             "'{}' booted from ROM set '{}' (NVRAM {})",
             entry.name,
@@ -378,6 +412,7 @@ fn main() {
         &screenshot_dir,
         &movie_dir(),
         rom_digest,
+        resolved.source.set(),
         &machine_name,
         cli.debug,
         cli.profile,
@@ -386,7 +421,7 @@ fn main() {
         cli.movie.as_deref(),
         cli.record.as_deref(),
         &|| {
-            phosphor_harness::resolve(entry, &rom_path, cli.rom_set.as_deref())
+            phosphor_harness::resolve(entry, &rom_path, rom_set_choice.as_deref())
                 .map(|r| r.machine)
                 .unwrap_or_else(|e| {
                     eprintln!("Could not rebuild {machine_name} from {rom_path}: {e}");

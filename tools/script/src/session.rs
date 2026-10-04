@@ -748,7 +748,7 @@ mod tests {
 
         let (machine, rec) = stub_machine(true);
         let controls = machine.input_controls();
-        let mut r = MovieRecorder::new("stub", [0u8; 32], controls, Vec::new(), None);
+        let mut r = MovieRecorder::new("stub", "stub", [0u8; 32], controls, Vec::new(), None);
         for frame in 0..6 {
             if frame == 2 || frame == 4 {
                 r.push_event(InputEvent::Button {
@@ -788,6 +788,7 @@ mod tests {
 
         let (machine, _rec) = stub_machine(true);
         let r = MovieRecorder::new(
+            "not_the_stub",
             "not_the_stub",
             [0u8; 32],
             machine.input_controls(),

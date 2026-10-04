@@ -191,6 +191,7 @@ trailer: sha256(all preceding bytes), 32 bytes
 ```rust
 struct MovieHeader {
     machine: String,          // registry name, e.g. "marble"
+    rom_set: String,          // MAME set recorded on, e.g. "spacduel1" (v3+)
     rom_digest: [u8; 32],     // sha256 over the loaded set's members, name-sorted
     controls: Vec<String>,    // stable_names; records index into this
     dip: Vec<u8>,             // power-on dip_bank_value() in bank order
@@ -209,8 +210,14 @@ enum MovieRecord {
 }
 ```
 
-Four header fields deserve their rationale:
+Five header fields deserve their rationale:
 
+* **`rom_set`** says which revision to boot, so a replay starts from the
+  recorded dump rather than the default and the digest check confirms it.
+  Version 2 files predate the field: they replay by *inference*, matching
+  their digest against each revision on disk in declaration order (a tie goes
+  to the earlier revision), and a digest matching nothing boots the default
+  so the digest check reports the mismatch.
 * **`rom_digest`** is the check that matters most. A movie recorded against one
   dump replayed against another must fail loudly rather than desync into a
   plausible-but-wrong frame hash. It hashes the **member files** of the loaded
@@ -247,18 +254,24 @@ truncation. `disasm movie info` is the human view.
 ## Replay
 
 ```rust
-// harness/src/harness.rs, additive
+// harness/src/harness.rs
 impl Harness {
-    pub fn build_with_movie(machine: &str, path: &str, movie: &Path) -> Result<Self, String>;
+    pub fn build_with_movie(
+        roms_path: &str,
+        movie_path: &Path,
+        rom_set: Option<&str>,
+    ) -> Result<Self, String>;
 }
 ```
 
-`build_with_movie` reads the header, verifies `machine` and `rom_digest`, calls
-`set_host_sample_rate`, builds and resets the machine, loads inline NVRAM,
-applies `dip`, resolves `controls` to `InputId`s through the machine's own
-control table, and seeks a cursor to frame 0. `run_frame()` drains records while
-`records[cursor].frame == self.frame`, delivering in order, then steps the
-machine.
+`build_with_movie` reads the header, verifies `machine`, picks the revision
+(an explicit `rom_set` wins, then the header's recorded set, then v2 digest
+inference, then the default), verifies `rom_digest` against the booted dump,
+calls `set_host_sample_rate`, builds and resets the machine, loads inline
+NVRAM, applies `dip`, resolves `controls` to `InputId`s through the machine's
+own control table, and seeks a cursor to frame 0. `run_frame()` drains records
+while `records[cursor].frame == self.frame`, delivering in order, then steps
+the machine.
 
 The existing `PressSpec`/`MotionSpec` path is untouched and stays as CLI sugar.
 

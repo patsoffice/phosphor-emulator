@@ -341,7 +341,7 @@ fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
     // is a skip, not a failure — the same judgement `boot_check_test` makes
     // about a ROM set the local collection cannot supply.
     let (mut harness, fixture, frames) = match movie_for(machine) {
-        Some(path) => match Harness::build_with_movie(roms, &path) {
+        Some(path) => match Harness::build_with_movie(roms, &path, None) {
             Ok(h) => {
                 let span = h
                     .movie()

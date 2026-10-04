@@ -56,6 +56,7 @@ fn disasm(args: &[&str]) -> Output {
 fn synthetic_movie() -> Movie {
     let mut rec = MovieRecorder::new(
         "mrdo",
+        "mrdo",
         [0x5A; 32],
         &[],
         vec![0x3F, 0x00],
@@ -82,6 +83,7 @@ fn movie_info_describes_a_movie_without_a_rom_set() {
 
     for expected in [
         "machine:     mrdo",
+        "rom set:     mrdo",
         "frames:      3",
         "0x3f",
         "3 bytes",
@@ -218,11 +220,12 @@ fn record_against_roms(dir: &Path) -> Option<(String, PathBuf)> {
     let digest = rom_digest(&set);
 
     let mut h = Harness::build(entry.name, roms, None, None, None, &[], &[]).ok()?;
+    let set = h.rom_source().expect("build records its source").set();
     let controls = h.machine().input_controls();
     let dip: Vec<u8> = (0..h.machine().dip_banks().len())
         .map(|b| h.machine().dip_bank_value(b))
         .collect();
-    let mut rec = MovieRecorder::new(entry.name, digest, controls, dip, None);
+    let mut rec = MovieRecorder::new(entry.name, set, digest, controls, dip, None);
 
     // A short, entirely unremarkable session: the point is that replay
     // reproduces it, not that it reaches anything in particular.
@@ -326,6 +329,7 @@ fn replay_refuses_a_movie_recorded_against_other_roms() {
     let movie = Movie {
         header: MovieHeader {
             machine: entry.name.to_string(),
+            rom_set: String::new(),
             rom_digest: [0xEE; 32],
             controls: Vec::new(),
             dip: Vec::new(),

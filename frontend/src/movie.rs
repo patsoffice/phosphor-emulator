@@ -74,6 +74,7 @@ pub struct SavedMovie {
 pub struct MovieCapture {
     dir: PathBuf,
     machine_name: String,
+    rom_set: String,
     rom_digest: [u8; 32],
     recorder: Option<MovieRecorder>,
     /// Where `--record` was told to put the file, overriding the generated name
@@ -83,10 +84,11 @@ pub struct MovieCapture {
 }
 
 impl MovieCapture {
-    pub fn new(dir: &Path, machine_name: &str, rom_digest: [u8; 32]) -> Self {
+    pub fn new(dir: &Path, machine_name: &str, rom_set: &str, rom_digest: [u8; 32]) -> Self {
         Self {
             dir: dir.to_path_buf(),
             machine_name: machine_name.to_string(),
+            rom_set: rom_set.to_string(),
             rom_digest,
             recorder: None,
             output: None,
@@ -155,6 +157,7 @@ impl MovieCapture {
         Self::adopt_conditions(machine, nvram.as_deref(), &dip);
         self.recorder = Some(MovieRecorder::new(
             self.machine_name.clone(),
+            self.rom_set.clone(),
             self.rom_digest,
             machine.input_controls(),
             dip,
@@ -268,9 +271,10 @@ impl MoviePlayback {
     /// Bind a decoded movie to a machine that is about to be reset to power-on.
     ///
     /// Reproduces the same starting conditions `Harness::from_movie` does, minus
-    /// the two it cannot reach from here — the host sample rate and the ROM set,
-    /// both fixed when the frontend built the machine. The caller must have
-    /// verified the ROM digest before getting here.
+    /// the host sample rate, which was fixed when the frontend built the
+    /// machine. The ROM set is not one of those anymore: `main` boots the
+    /// movie's set before getting here. The caller must have verified the ROM
+    /// digest before getting here.
     pub fn bind(
         movie: phosphor_harness::Movie,
         machine: &mut dyn FrontendMachine,
@@ -385,7 +389,7 @@ mod tests {
     #[test]
     fn the_tee_forwards_and_records_every_call() {
         let mut spy = Spy::default();
-        let mut rec = MovieRecorder::new("t", [0; 32], CONTROLS, Vec::new(), None);
+        let mut rec = MovieRecorder::new("t", "t", [0; 32], CONTROLS, Vec::new(), None);
         {
             let mut tee = Recording::new(&mut spy, &mut rec);
             tee.handle_input(InputEvent::Button {
@@ -409,7 +413,7 @@ mod tests {
     #[test]
     fn the_tee_exposes_the_machines_own_control_table() {
         let mut spy = Spy::default();
-        let mut rec = MovieRecorder::new("t", [0; 32], CONTROLS, Vec::new(), None);
+        let mut rec = MovieRecorder::new("t", "t", [0; 32], CONTROLS, Vec::new(), None);
         let tee = Recording::new(&mut spy, &mut rec);
         assert_eq!(tee.input_controls().len(), 1);
         assert_eq!(tee.input_controls()[0].stable_name, "coin");
@@ -431,9 +435,10 @@ mod tests {
         let wanted = base.join("nested").join("session.phmi");
 
         // Explicit path: lands there, and the nested parent is created.
-        let mut cap = MovieCapture::new(&movies, "toobin", [7; 32]);
+        let mut cap = MovieCapture::new(&movies, "toobin", "toobin", [7; 32]);
         cap.set_output_path(&wanted);
         cap.recorder = Some(MovieRecorder::new(
+            "toobin",
             "toobin",
             [7; 32],
             CONTROLS,
@@ -451,8 +456,9 @@ mod tests {
         assert!(!wanted.with_extension("phmi.tmp").exists());
 
         // No explicit path: a generated name under the movies directory.
-        let mut cap = MovieCapture::new(&movies, "toobin", [7; 32]);
+        let mut cap = MovieCapture::new(&movies, "toobin", "toobin", [7; 32]);
         cap.recorder = Some(MovieRecorder::new(
+            "toobin",
             "toobin",
             [7; 32],
             CONTROLS,

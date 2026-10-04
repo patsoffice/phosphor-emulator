@@ -238,6 +238,7 @@ pub fn run(
     screenshot_dir: &Path,
     movie_dir: &Path,
     rom_digest: [u8; 32],
+    rom_set: &str,
     machine_name: &str,
     start_in_debug: bool,
     start_in_profile: bool,
@@ -500,7 +501,8 @@ pub fn run(
     let mut console_scope = rhai::Scope::new();
     console_scope.push("m", Rc::clone(&session));
 
-    let mut movie_capture = crate::movie::MovieCapture::new(movie_dir, machine_name, rom_digest);
+    let mut movie_capture =
+        crate::movie::MovieCapture::new(movie_dir, machine_name, rom_set, rom_digest);
     if let Some(path) = record_movie_path {
         movie_capture.set_output_path(path);
     }
