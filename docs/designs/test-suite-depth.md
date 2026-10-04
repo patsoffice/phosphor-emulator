@@ -69,9 +69,10 @@ They `println!` their verdict, and nothing runs them.
 ```rust
 pub struct MachineEntry {
     pub name: &'static str,
-    pub rom_names: &'static [&'static str],
-    pub create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
+    pub revisions: &'static [Revision],
+    pub create: CreateFn,   // (&RomSet, rev) -> machine
     pub create_bare: fn() -> Box<dyn FrontendMachine>,   // new
+    pub create_bare_revision: fn(usize) -> Box<dyn FrontendMachine>,   // new
     pub controls: &'static [InputControl],
 }
 ```
