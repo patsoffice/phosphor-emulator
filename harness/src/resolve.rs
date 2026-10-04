@@ -15,7 +15,8 @@
 //! Three source shapes:
 //!
 //! * Pointed straight at an archive there is nothing to choose between: it is
-//!   loaded and each revision tried against it in order.
+//!   loaded and, when its stem names an accepted archive, that revision is
+//!   built; otherwise each revision is tried against it in order.
 //! * Pointed at a directory, each revision's archives are tried in order and
 //!   the first build wins. The first candidate's error is the one reported,
 //!   because it is the dump the old behaviour would have chosen and so the
@@ -79,7 +80,8 @@ pub struct Resolved {
 /// `rom_set` names a set or alias and is strict: it builds that revision or
 /// errors, and an unknown name lists what the machine accepts. `None` tries
 /// the revisions in declaration order with the fallback logging the module
-/// docs describe.
+/// docs describe, except a direct archive whose stem names an accepted set
+/// pins that revision before any loader runs.
 pub fn resolve(
     entry: &'static MachineEntry,
     path: &str,
@@ -162,6 +164,17 @@ pub fn present_archive(entry: &MachineEntry, path: &str, rev: usize) -> Option<&
         .iter()
         .find(|n| Path::new(path).join(format!("{n}.zip")).exists())
         .copied()
+}
+
+/// Revision named by a direct archive's stem, when the stem names an archive
+/// the entry accepts. A directory is never consulted: its archives name their
+/// revisions one by one already.
+pub fn stem_revision(entry: &MachineEntry, path: &str) -> Option<usize> {
+    if Path::new(path).is_dir() {
+        return None;
+    }
+    let stem = Path::new(path).file_stem()?.to_str()?;
+    entry.find_revision(stem)
 }
 
 /// Which revision a version 2 movie names by digest: the first archive on
@@ -259,19 +272,38 @@ fn resolve_explicit(
             entry.archive_names().join(", ")
         )
     })?;
-    // An explicit choice names a set, and sets are archives: loose files have
-    // no set identity, so a directory without that archive is simply missing
-    // it. (A direct ZIP path still loads whatever it points at.)
-    if Path::new(path).is_dir() && !Path::new(path).join(format!("{name}.zip")).exists() {
-        return Err(format!(
-            "ROM set '{name}' for '{}' not found in {path}",
-            entry.name
-        ));
-    }
-    let set = load_rom_set(path, &[name]).map_err(|e| format!("loading ROM set {name}: {e}"))?;
+    // An explicit choice names a set, and sets come in aliases: a directory
+    // loads the canonical archive first, then each alias in turn. Loose
+    // files have no set identity, so a directory holding none of the
+    // revision's archives is simply missing it, and the error lists every
+    // archive tried. (A direct ZIP path still loads whatever it points at.)
+    let revision = &entry.revisions[rev];
+    let archive = if Path::new(path).is_dir() {
+        revision
+            .names
+            .iter()
+            .find(|n| Path::new(path).join(format!("{n}.zip")).exists())
+            .copied()
+            .ok_or_else(|| {
+                let tried = revision
+                    .names
+                    .iter()
+                    .map(|n| format!("{n}.zip"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "ROM set '{name}' for '{}' not found in {path} (tried {tried})",
+                    entry.name
+                )
+            })?
+    } else {
+        name
+    };
+    let set =
+        load_rom_set(path, &[archive]).map_err(|e| format!("loading ROM set {archive}: {e}"))?;
     let machine = (entry.create)(&set, rev).map_err(|e| {
         format!(
-            "creating machine '{}' from ROM set '{name}': {e}",
+            "creating machine '{}' from ROM set '{archive}': {e}",
             entry.name
         )
     })?;
@@ -290,6 +322,22 @@ fn resolve_default(entry: &'static MachineEntry, path: &str) -> Result<Resolved,
     if !Path::new(path).is_dir() {
         let set = load_rom_set(path, &entry.archive_names())
             .map_err(|e| format!("loading ROM set {path}: {e}"))?;
+        // A stem naming an accepted archive pins the revision before any
+        // loader runs: `mhavocp.zip` boots the prototype even where an
+        // earlier loader would also accept its bytes. A stem that names
+        // nothing falls through to matching below.
+        if let Some(revision) = stem_revision(entry, path) {
+            let machine = (entry.create)(&set, revision)
+                .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
+            return Ok(Resolved {
+                source: RomSource {
+                    entry,
+                    revision,
+                    digest: rom_digest(&set),
+                },
+                machine,
+            });
+        }
         let (revision, machine) = first_accepting(entry, &set)
             .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
         return Ok(Resolved {
@@ -399,7 +447,7 @@ mod tests {
             nvram_group: None,
         },
         phosphor_machines::registry::Revision {
-            names: &["rev1a"],
+            names: &["rev1a", "rev1alias"],
             nvram_group: None,
         },
     ];
@@ -526,6 +574,95 @@ mod tests {
         let dir = scratch();
         write_zip(&dir, "rev1a", &[("rev1.bin", &[7])]);
         let zip = dir.join("rev1a.zip");
+        let resolved = resolve(&TOY, zip.to_str().unwrap(), None).unwrap();
+        assert_eq!(resolved.source.revision, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_canonical_loads_from_an_alias_archive() {
+        // Only the alias archive is on disk; asking for the canonical set
+        // still boots the revision it names.
+        let dir = scratch();
+        write_zip(&dir, "rev0alias", &[("rev0.bin", &[1])]);
+        let resolved = resolve(&TOY, dir.to_str().unwrap(), Some("rev0a")).unwrap();
+        assert_eq!(resolved.source.revision, 0);
+        assert_eq!(resolved.source.set(), "rev0a");
+        assert_eq!(
+            resolved.source.digest,
+            digest_of(&dir, "rev0alias"),
+            "the bytes came from the alias archive"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_alias_prefers_the_canonical_archive() {
+        // Both archives hold a buildable dump; the canonical one wins even
+        // when the choice named the alias.
+        let dir = scratch();
+        write_zip(&dir, "rev0a", &[("rev0.bin", &[1])]);
+        write_zip(&dir, "rev0alias", &[("rev0.bin", &[2])]);
+        let resolved = resolve(&TOY, dir.to_str().unwrap(), Some("rev0alias")).unwrap();
+        assert_eq!(resolved.source.revision, 0);
+        assert_eq!(
+            resolved.source.digest,
+            digest_of(&dir, "rev0a"),
+            "the bytes came from the canonical archive"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_missing_set_lists_the_archives_tried() {
+        let dir = scratch();
+        write_zip(&dir, "rev1a", &[("rev1.bin", &[4, 5, 6])]);
+        let Err(err) = resolve(&TOY, dir.to_str().unwrap(), Some("rev0a")) else {
+            panic!("explicit choice for a missing set must fail");
+        };
+        assert!(
+            err.contains("rev0a")
+                && err.contains("rev0a.zip")
+                && err.contains("rev0alias.zip")
+                && err.contains(dir.to_str().unwrap()),
+            "unexpected error: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn direct_zip_stem_names_the_revision_before_matching() {
+        // The dump would satisfy rev0 first, but the stem names rev1's
+        // alias, so rev1 boots.
+        let dir = scratch();
+        write_zip(&dir, "rev1alias", &[("rev0.bin", &[1]), ("rev1.bin", &[7])]);
+        let zip = dir.join("rev1alias.zip");
+        let resolved = resolve(&TOY, zip.to_str().unwrap(), None).unwrap();
+        assert_eq!(resolved.source.revision, 1);
+        assert_eq!(resolved.source.set(), "rev1a");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn direct_zip_stem_pins_the_revision_strictly() {
+        // The stem names rev1 but the dump only satisfies rev0: the stem
+        // wins and the build fails, rather than silently booting rev0.
+        let dir = scratch();
+        write_zip(&dir, "rev1a", &[("rev0.bin", &[1])]);
+        let zip = dir.join("rev1a.zip");
+        let Err(err) = resolve(&TOY, zip.to_str().unwrap(), None) else {
+            panic!("a stem-named revision the bytes cannot build must fail");
+        };
+        assert!(err.contains("creating machine"), "unexpected error: {err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn direct_zip_unknown_stem_still_matches_by_bytes() {
+        // A stem naming no archive keeps the old behavior: the bytes pick.
+        let dir = scratch();
+        write_zip(&dir, "renamed", &[("rev1.bin", &[7])]);
+        let zip = dir.join("renamed.zip");
         let resolved = resolve(&TOY, zip.to_str().unwrap(), None).unwrap();
         assert_eq!(resolved.source.revision, 1);
         std::fs::remove_dir_all(&dir).unwrap();

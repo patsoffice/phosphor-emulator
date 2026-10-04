@@ -21,7 +21,7 @@ pub use movie::{
 };
 pub use resolve::{
     ReplayBoot, Resolved, RomSource, infer_rom_set, load_revision_set, movie_boot_set,
-    present_archive, present_revisions, replay_boot, resolve,
+    present_archive, present_revisions, replay_boot, resolve, stem_revision,
 };
 pub use rom_path::load_rom_set;
 

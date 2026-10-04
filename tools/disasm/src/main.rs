@@ -33,6 +33,7 @@ use phosphor_machines::registry;
 use phosphor_harness::movie::{Movie, MovieRecord, hex};
 use phosphor_harness::{
     Harness, hash_frame, hash_vectors, load_revision_set, load_rom_set, render_oriented,
+    stem_revision,
 };
 
 mod audiodiff;
@@ -1480,20 +1481,23 @@ fn run_machine(
     // Regions name member files, which may differ between revisions: a set
     // whose dump lacks the region's members fails at assembly below.
     let entry = registry::find(machine).ok_or_else(|| format!("unknown machine '{machine}'"))?;
-    let rev = revision_index(entry, machine, rom_set)?;
-    let set =
-        load_revision_set(entry, path, rev).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    let rev = revision_index(entry, machine, rom_set, path)?;
+    // No extra prefix: `load_revision_set` already reports which archive it
+    // was loading.
+    let set = load_revision_set(entry, path, rev)?;
     let data = (r.load)(&set).map_err(|e| format!("assembling region '{region}': {e}"))?;
     disassemble(CpuArg::from(r.cpu), &data, r.org, range)
 }
 
-/// Revision index for a `--rom-set` choice: the named revision, or the default
-/// when none was given. An unknown name errors listing what the machine
-/// accepts, mirroring the boot path's explicit-choice error.
+/// Revision index for a `--rom-set` choice: the named revision, else a direct
+/// archive's stem when it names an accepted set, else the default. An
+/// unknown name errors listing what the machine accepts, mirroring the boot
+/// path's explicit-choice error; the stem rule mirrors its default boot.
 fn revision_index(
     entry: &registry::MachineEntry,
     machine: &str,
     rom_set: Option<&str>,
+    path: &str,
 ) -> Result<usize, String> {
     match rom_set {
         Some(name) => entry.find_revision(name).ok_or_else(|| {
@@ -1502,7 +1506,7 @@ fn revision_index(
                 entry.archive_names().join(", ")
             )
         }),
-        None => Ok(0),
+        None => Ok(stem_revision(entry, path).unwrap_or(0)),
     }
 }
 
@@ -1566,9 +1570,10 @@ fn run_gfxview(
     // Regions name member files, which may differ between revisions: a set
     // whose dump lacks the region's members fails at assembly below.
     let entry = registry::find(machine).ok_or_else(|| format!("unknown machine '{machine}'"))?;
-    let rev = revision_index(entry, machine, rom_set)?;
-    let set =
-        load_revision_set(entry, path, rev).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    let rev = revision_index(entry, machine, rom_set, path)?;
+    // No extra prefix: `load_revision_set` already reports which archive it
+    // was loading.
+    let set = load_revision_set(entry, path, rev)?;
     let bytes = (r.load)(&set).map_err(|e| format!("assembling gfx region '{region}': {e}"))?;
 
     let cache = decode_gfx(&bytes, 0, r.count as usize, r.layout);
@@ -1730,13 +1735,70 @@ mod tests {
     fn revision_index_defaults_to_zero_and_rejects_unknown_sets() {
         let entry = registry::find("mariobros").expect("mariobros is registered");
         assert_eq!(
-            revision_index(entry, "mariobros", None).unwrap(),
+            revision_index(entry, "mariobros", None, "roms").unwrap(),
             0,
             "no --rom-set means the default revision"
         );
-        let err = revision_index(entry, "mariobros", Some("not-a-set")).unwrap_err();
+        let err = revision_index(entry, "mariobros", Some("not-a-set"), "roms").unwrap_err();
         assert!(err.contains("not-a-set"), "{err}");
         assert!(err.contains("known sets:"), "{err}");
+    }
+
+    #[test]
+    fn revision_index_follows_a_direct_archives_stem() {
+        let entry = registry::find("majorhavoc").expect("majorhavoc is registered");
+        assert_eq!(
+            revision_index(entry, "majorhavoc", None, "roms/mhavocp.zip").unwrap(),
+            2,
+            "a stem naming a set picks its revision, like the default boot"
+        );
+        assert_eq!(
+            revision_index(entry, "majorhavoc", None, "roms/renamed.zip").unwrap(),
+            0,
+            "a stem naming nothing keeps the default"
+        );
+        assert_eq!(
+            revision_index(entry, "majorhavoc", Some("mhavoc"), "roms/mhavocp.zip").unwrap(),
+            0,
+            "an explicit --rom-set wins over the stem"
+        );
+    }
+
+    #[test]
+    fn region_load_failures_name_the_archive_once() {
+        let range = RangeArgs {
+            start: None,
+            end: None,
+            count: None,
+        };
+        let err = run_machine(
+            "mariobros",
+            Some("main"),
+            &range,
+            Some("nowhere/missing.zip"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.matches("loading ROM set").count(),
+            1,
+            "no doubled prefix: {err}"
+        );
+        let err = run_gfxview(
+            "donkeykong",
+            Some("tiles"),
+            16,
+            2,
+            None,
+            Some("nowhere/missing.zip"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.matches("loading ROM set").count(),
+            1,
+            "no doubled prefix: {err}"
+        );
     }
 
     #[test]
