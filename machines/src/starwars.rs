@@ -472,7 +472,8 @@ static SW_PROGRAM_ROM: RomRegion = RomRegion {
             name: "136021.203.1jk",
             size: 0x2000,
             offset: 0x2000,
-            crc32: &[0xf6da0a00],
+            // Parent ROM 2; starwarso's 136021-103.1jk, a two-byte patch.
+            crc32: &[0xf6da0a00, 0x3fde9ccb],
         },
         RomEntry {
             name: "136021.104.1kl",
@@ -498,7 +499,9 @@ static SW_BANK_ROM: RomRegion = RomRegion {
         name: "136021.214.1f",
         size: 0x4000,
         offset: 0x0000,
-        crc32: &[0x04f1876e],
+        // Parent ROM 0; starwars1's 136021.114.1f and starwarso's
+        // 136021-114.1f are the same dump under two names, two bytes off.
+        crc32: &[0x04f1876e, 0xe75ff867],
     }],
 };
 
@@ -2748,13 +2751,13 @@ fn create_esb_bare_revision(_rev: usize) -> Box<dyn FrontendMachine> {
     create_esb_bare()
 }
 
-// One revision, no aliases: the regions above name the starwars.zip members
-// with single CRCs, and the split starwars1/starwarso clones cannot satisfy
-// them without parent merging, which the loader does not do
-// (phosphor-emulator-gqq3 tracks supporting them, likely as own revisions).
-// List them if that ever lands.
+// One revision: the starwars1/starwarso clones are aliases, not revisions.
+// Both ZIPs are complete sets (no parent merge needed), the loader finds
+// their members by CRC whatever the file names say, and each differing ROM
+// is a two-byte patch, so saves transfer and there is nothing to refuse.
+// Quantum models its larger program revisions the same way.
 inventory::submit! {
-MachineEntry::new("starwars", &[Revision { names: &["starwars"], nvram_group: None }], create_machine, create_bare, create_bare_revision, STARWARS_CONTROLS) }
+MachineEntry::new("starwars", &[Revision { names: &["starwars", "starwars1", "starwarso"], nvram_group: None }], create_machine, create_bare, create_bare_revision, STARWARS_CONTROLS) }
 
 inventory::submit! {
 MachineEntry::new("empirestrikesback", &[Revision { names: &["esb"], nvram_group: None }], create_esb_machine, create_esb_bare, create_esb_bare_revision, STARWARS_CONTROLS).with_former_names(&["esb"]) }
@@ -3252,6 +3255,25 @@ mod tests {
         assert_eq!(shi[0], 0x00); // gap
         assert_eq!(shi[0x1000], 0x77); // 107 at $C000
         assert_eq!(shi[0x4FFE], 0xEE); // 208 near $FFFE
+    }
+
+    /// The manifest accepts all three sets' dumps: the parent's ROM 0 and
+    /// ROM 2 plus the clones' patches (starwars1's `.114` and starwarso's
+    /// `-114` are one dump under two names). Boot-check only boots the
+    /// default revision, so without this a dropped CRC would silently
+    /// un-support an alias no suite boots.
+    #[test]
+    fn rom_manifest_accepts_the_clone_dumps() {
+        let bank = &SW_BANK_ROM.entries[0].crc32;
+        assert!(
+            bank.contains(&0x04f1876e) && bank.contains(&0xe75ff867),
+            "bank ROM 0 must accept parent and clone dumps: {bank:08x?}"
+        );
+        let rom2 = &SW_PROGRAM_ROM.entries[1].crc32;
+        assert!(
+            rom2.contains(&0xf6da0a00) && rom2.contains(&0x3fde9ccb),
+            "program ROM 2 must accept parent and starwarso dumps: {rom2:08x?}"
+        );
     }
 
     #[test]
