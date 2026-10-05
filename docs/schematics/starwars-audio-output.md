@@ -54,6 +54,15 @@ because neither is a board fact and both change what the emulator sounds like.
   `1/delay`; measuring said otherwise, taking clipping from 0.10% to 0.58% and
   the RMS up 2.5 dB. With the factor in, clipping is 0.009%.
 
+**Updated 2026-10-05 (phosphor-emulator-xo4e).** Each POKEY now works into its
+own virtual ground (0 ohm to a node at +5A), so volume follows the devices'
+conductance instead of a linear 0-15 law, and each chip normalizes by its own
+full scale ahead of its leg gain. Over the committed movie the mix moves
+0.01 dB on both channels, band-energy deltas stay under 0.4 points, and
+clipping is unchanged at 0.009/0.013%. Headroom: the loudest chip peaks at
+0.78 of full scale, 7.4 mA through 1k, so its buffer bottoms at -2.4 V
+against the -5 V rail, about a volt clear of where a TL084 runs out of swing.
+
 What is still **not** modelled: the R5106 samples at half its clock and this
 does not, because the 3.47 kHz sections either side make that inaudible; and
 `C51` into the delay line's 68k bias network is a 5 Hz high-pass, left out as
@@ -68,11 +77,14 @@ below the band rather than modelled and ignored.
 ## The four POKEYs are not weighted equally
 
 Each POKEY's `OUT` on pin 37 goes into a TL084 section wired as a
-**transimpedance amplifier**: the chip's output current lands on a virtual
-ground with a 1k feedback resistor and a 1000 pF cap across it, so
-`V = -I * 1000` with a pole at 159 kHz. All four buffers are identical, at R20,
-R22, R24 and R26. The speech chip instead gets a unity follower, AC-coupled
-through C41 0.1 uF onto R28 100k.
+**transimpedance amplifier**: the chip's output current lands on a node the
+partner input holds at +5A, with a 1k feedback resistor, so `V = 5 - I * 1000`.
+All four buffers are identical, at R20, R22, R24 and R26, on +12/-5 V rails.
+The 1000 pF caps (C29, C33, C35, C39) shunt the input node to ground rather
+than bridging the feedback resistor; on a virtual-ground node they carry no
+signal current, so there is no 159 kHz pole in the signal path. The speech
+chip instead gets a unity follower, AC-coupled through C41 0.1 uF onto
+R28 100k.
 
 The five buffered signals then reach one inverting summing amplifier with R30
 12k of feedback, each through its own resistor and its own 0.1 uF:

@@ -57,7 +57,7 @@ use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
-use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::pokey::{Pokey, PokeyLoad};
 use phosphor_core::device::riot6532::Riot6532;
 use phosphor_core::device::slapstic::Slapstic;
 use phosphor_core::device::starwars_math::StarWarsMath;
@@ -1005,6 +1005,16 @@ pub(crate) const AUDIO_LEGS: [AudioLeg; 5] = [
     AudioLeg { ohms: 15_000.0 }, // R29
 ];
 
+/// Each POKEY's pin 37 goes straight to a TL084 inverting input whose partner
+/// holds the node at +5A: a zero-ohm virtual ground (sheet 16A, `Buffers`).
+/// The four buffers are separate, so four separate loads are right and a
+/// shared QuadPokey one is not. The 1k feedback resistor turns the drained
+/// current into volts downstream, inside the leg gains.
+const POKEY_LOAD: PokeyLoad = PokeyLoad::VirtualGround {
+    series_ohms: 0.0,
+    reference_v: 5.0,
+};
+
 // ---------------------------------------------------------------------------
 // Sheet 16B: the filter, the delay line, and the stereo matrix
 // ---------------------------------------------------------------------------
@@ -1208,7 +1218,9 @@ impl StarWarsBoard {
             novram: X2212::new(),
             slapstic: esb.then(|| Slapstic::for_chip(101)),
             pokey: std::array::from_fn(|_| {
-                Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz())
+                let mut p = Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz());
+                p.set_output_load(POKEY_LOAD);
+                p
             }),
             riot: Riot6532::new(),
             tms: Tms5220::with_variant(Tms52xxVariant::Tms5220, tms_hz),
@@ -1959,6 +1971,9 @@ impl StarWarsBoard {
         //    other.
         let chans: [Vec<f32>; 4] = std::array::from_fn(|i| self.pokey[i].drain_audio());
         let speech = self.tms.drain_audio();
+        // The drained POKEY samples are amps into the virtual ground; scale
+        // each chip so full scale means what the linear mix's 1.0 did.
+        let full = POKEY_LOAD.full_scale() as f32;
         let n = chans
             .iter()
             .map(Vec::len)
@@ -1978,10 +1993,10 @@ impl StarWarsBoard {
         for i in 0..n {
             let sample = |src: &[f32]| src.get(i).copied().unwrap_or(0.0);
             let sources = [
-                sample(&chans[0]),
-                sample(&chans[1]),
-                sample(&chans[2]),
-                sample(&chans[3]),
+                sample(&chans[0]) / full,
+                sample(&chans[1]) / full,
+                sample(&chans[2]) / full,
+                sample(&chans[3]) / full,
                 sample(&speech),
             ];
             let sum: f32 = self
@@ -2961,6 +2976,39 @@ mod tests {
         let ratio = AUDIO_LEGS[4].gain() / (ensemble / 4.0);
         assert!((ratio - 3.983).abs() < 0.01, "speech ratio {ratio}");
         assert!((20.0 * (ratio / 2.5).log10() - 4.05).abs() < 0.01);
+    }
+
+    /// The POKEY front ends weigh volume by conductance, not linearly.
+    ///
+    /// Each chip works into its own transimpedance buffer (sheet 16A), so one
+    /// channel at volume 1 stands to full volume as its device's conductance
+    /// does, about 0.028, and not as 1/15. Volume-only output (AUDC bit 4)
+    /// holds the devices steady so the drained level is the settled current,
+    /// scaled by the same full scale the mix normalizes with.
+    #[test]
+    fn pokey_volume_law_is_conductance_not_linear() {
+        fn level(vol: u8) -> f32 {
+            let mut board = StarWarsBoard::new();
+            board.sound_write(0x1827, 0x03); // SKCTL: polys out of reset
+            board.sound_write(0x1800, 0x20); // AUDF1
+            board.sound_write(0x1801, 0x10 | vol); // AUDC1: volume only
+            for _ in 0..TIMING.cycles_per_frame() * 2 {
+                board.pokey[0].tick();
+            }
+            let i = board.pokey[0].drain_audio();
+            i.iter().sum::<f32>() / i.len() as f32
+        }
+        let full = POKEY_LOAD.full_scale() as f32;
+        let v15 = level(15) / full;
+        assert!(
+            (v15 - 0.25).abs() < 0.01,
+            "one channel full is a quarter of four: {v15}"
+        );
+        let ratio = level(1) / full / v15;
+        assert!(
+            (ratio - 0.0276).abs() < 0.005,
+            "volume 1 stands at conductance, not 1/15: {ratio}"
+        );
     }
 
     /// Sheet 16B's two Sallen-Key sections, held against the drawing.

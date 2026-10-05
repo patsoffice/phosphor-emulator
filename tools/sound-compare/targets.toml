@@ -1212,9 +1212,11 @@ the dry: the dry lands entirely in the difference channel and the delayed
 entirely in the sum. A difference matrix built out of one op-amp's two inputs.
 The model is mono.
 
-Each POKEY is loaded by a TRANSIMPEDANCE AMPLIFIER at a virtual ground, 1k with
-1000 pF, which is a third distinct POKEY interface in this sweep after Missile
-Command's 10k/0.1 uF and Tempest's 10k/0.015 uF.
+Each POKEY is loaded by a TRANSIMPEDANCE AMPLIFIER at a virtual ground held at
++5A, 1k feedback on +12/-5 V rails, which is a third distinct POKEY interface
+in this sweep after Missile Command's 10k/0.1 uF and Tempest's 10k/0.015 uF.
+The 1000 pF caps shunt the input node to ground rather than bridging the
+feedback, so there is no 159 kHz pole in the signal path.
 
 Transcribed at docs/schematics/starwars-audio-output.md. Tracked as
 phosphor-emulator-82zr. The schematics are PDF pages 114-147 of the
