@@ -1,0 +1,107 @@
+{
+  "modules": {
+    "qbert RDY1: object RAM and playfield RAM wait states": {
+      "ports": {
+        "H15 (8) H decode": { "direction": "input", "bits": [2] },
+        "/HBLANK": { "direction": "input", "bits": [3] },
+        "J13 CLK (untraced)": { "direction": "input", "bits": [4] },
+        "/FRSEL (0x3000)": { "direction": "input", "bits": [7] },
+        "V3": { "direction": "input", "bits": [9] },
+        "/VBLANK": { "direction": "input", "bits": [10] },
+        "/BRSEL (0x3800)": { "direction": "input", "bits": [12] },
+        "RDY1 to P3/P4-24": { "direction": "output", "bits": [14] }
+      },
+      "cells": {
+        "uK14": {
+          "type": "K14 74LS08",
+          "port_directions": {
+            "(4)": "input",
+            "(5)": "input",
+            "(6)": "output"
+          },
+          "connections": {
+            "(4)": [2],
+            "(5)": [3],
+            "(6)": [5]
+          },
+          "attributes": {}
+        },
+        "uJ13": {
+          "type": "J13 74LS74",
+          "port_directions": {
+            "D (2)": "input",
+            "CLK (3)": "input",
+            "/CLR (1)": "input",
+            "/PRE (4) via R60": "input",
+            "Q (5)": "output"
+          },
+          "connections": {
+            "D (2)": [3],
+            "CLK (3)": [4],
+            "/CLR (1)": [5],
+            "/PRE (4) via R60": ["1"],
+            "Q (5)": [6]
+          },
+          "attributes": {}
+        },
+        "uK13": {
+          "type": "K13 74LS32",
+          "port_directions": {
+            "(5)": "input",
+            "(4)": "input",
+            "(6)": "output"
+          },
+          "connections": {
+            "(5)": [6],
+            "(4)": [7],
+            "(6)": [8]
+          },
+          "attributes": {}
+        },
+        "uJ8a": {
+          "type": "J8 74LS32",
+          "port_directions": {
+            "(13)": "input",
+            "(12)": "input",
+            "(11)": "output"
+          },
+          "connections": {
+            "(13)": [9],
+            "(12)": [10],
+            "(11)": [11]
+          },
+          "attributes": {}
+        },
+        "uJ8b": {
+          "type": "J8 74LS32",
+          "port_directions": {
+            "(4)": "input",
+            "(5)": "input",
+            "(6)": "output"
+          },
+          "connections": {
+            "(4)": [11],
+            "(5)": [12],
+            "(6)": [13]
+          },
+          "attributes": {}
+        },
+        "uJ9": {
+          "type": "J9 7408",
+          "port_directions": {
+            "(9)": "input",
+            "(10)": "input",
+            "(8)": "output"
+          },
+          "connections": {
+            "(9)": [8],
+            "(10)": [13],
+            "(8)": [14]
+          },
+          "attributes": {}
+        }
+      },
+      "netnames": {}
+    }
+  }
+}

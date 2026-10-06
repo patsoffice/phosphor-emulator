@@ -815,7 +815,8 @@ pub struct GottliebBoard {
     /// rebuild. Copied whole at line 240 rather than over eight lines: with the
     /// CPU locked out of E7 for the whole window, the two are the same.
     ///
-    /// Logic board sheet 3, `docs/schematics/` has no transcription of it yet.
+    /// Logic board sheet 3, transcribed in
+    /// `docs/schematics/qbert-playfield-buffer.md`.
     #[save(id = 10)]
     pub(crate) bg_buffer: [u8; 0x400],
 

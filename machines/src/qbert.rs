@@ -444,7 +444,8 @@ impl Bus for GottliebBoard {
     ///   at 0x3800-0x3FFF, waits on the first eight lines of vertical blank.
     ///
     /// The 8284 synchronizes RDY1 to the clock, which is not modeled: the
-    /// window is applied on the clock the CPU asks in.
+    /// window is applied on the clock the CPU asks in. Transcribed, with what
+    /// the drawing does not settle, in `docs/schematics/qbert-playfield-buffer.md`.
     fn memory_ready(&self, _master: BusMaster, addr: u32) -> bool {
         let h = self.clock % gottlieb::TIMING.cycles_per_scanline;
         let v =

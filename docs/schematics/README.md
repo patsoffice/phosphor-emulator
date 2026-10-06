@@ -117,6 +117,11 @@ section is there so that is obvious.
 - [`qbert-object-enable.md`](qbert-object-enable.md), what enables one Gottlieb
   System 80 object on one line: why an enable and not a clip is what keeps a
   parked object off the screen, and what `sy_raw - 13` is made of.
+- [`qbert-playfield-buffer.md`](qbert-playfield-buffer.md), the Gottlieb
+  playfield as two RAMs: the CPU writes one, the display reads the other, and a
+  DMA copies across on the first eight lines of vblank while the board's RDY1
+  holds the CPU off. Also when the 8088 waits on object RAM, and the one
+  polarity on the drawing that could not be settled.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.

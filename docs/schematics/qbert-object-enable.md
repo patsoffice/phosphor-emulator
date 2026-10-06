@@ -219,11 +219,25 @@ evidence of a missing clip.
   read. The total of two is inferred from `-13` against the adder's `-15`, not
   read, and the "no objects on rows 0 and 1" conclusion moves to "row 0 only" if
   the total is really one line.
-- **`S1`.** It selects every mux in the fill path between real data and the idle
-  value, and it is drawn as a bus running down the sheet. Its source was not
-  found, so whether the fill and the readout of the line RAM interleave within a
-  line or alternate per line is open. This is the same uncertainty as the item
-  above, seen from the other side.
+- **`S1`, on Q*Bert's board as drawn.** It selects every mux in the fill path
+  between real data and the idle value. Sheet 2 does draw a source, which an
+  earlier pass missed: K13.3, a 74LS32 OR of K13.1 and K13.2, beside the
+  horizontal latches (K13.1 shares a node with J12.2, an input of the NOR that
+  makes `BLANK`). Neither input was traced, so what S1 is on an uncorrected
+  board is still open.
+- **How far the Qubes correction reaches.** The addendum to the Q*Bert's Qubes
+  manual (`arcade-museum.com/manuals-videogames/Q/QBertsQubes.pdf`, PDF page 3,
+  form TMS 6/25/84, the "PAGE 20" item) corrects sheet 2 by adding H14 (74LS00)
+  between G7 and G9: H14.4 is `H1`, H14.5 is `H2`, and H14.6, labeled S1 in its
+  inset, drives G7.S (1) and G9.S (1). That select is low on two of every eight
+  pixel clocks, which picks the fill counter (`a0`..`a4`, the A inputs), and
+  high on the other six, which picks the display address (`H3`..`H7`, the B
+  inputs). So on the corrected board the line RAM's fill and its readout
+  interleave within a line rather than alternating per line. The inset shows
+  only G6 to G9, so whether G1, G2 and G5 move to the new select as well, or keep
+  K13's S1, is not shown. Nor does interleaving say which line a readout serves,
+  so the pipeline item above stays open. H14's other gate (1, 2, 3) is the
+  `/VH BLANK` NAND already on the sheet, so the correction uses a spare gate.
 - **HBLANK's decode.** The signal is used here; the counter and gate that
   produce it were not located.
 - **The object scan's cadence.** L11/L12, the block named 800NS COUNTER, was
@@ -238,3 +252,5 @@ evidence of a missing clip.
   says where the four pixels of skew between those two are introduced. The
   serial converter L4..L8 is the obvious candidate and was not traced.
 - **Sheet 1**, and the colour path beyond the foreground/background mux H12.
+  Sheet 1's selects and the CPU's READY gating are now read in
+  [`qbert-playfield-buffer.md`](qbert-playfield-buffer.md).
