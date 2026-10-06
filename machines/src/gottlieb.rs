@@ -801,6 +801,24 @@ pub struct GottliebBoard {
     #[save_skip]
     pub(crate) pixel_buffer: Vec<u8>,
 
+    /// The background buffer RAM (E10-11, a 4118), which is what the display
+    /// reads the playfield from. The CPU never sees it.
+    ///
+    /// The CPU's 0x3800 window is a separate 1K RAM, E7, which the drawing
+    /// names the background character register. E9-10 copy E7 into this buffer
+    /// by DMA on the first eight lines of vertical blank, V = 240..247, and the
+    /// board's RDY1 holds the CPU off E7 for exactly those lines
+    /// ([`memory_ready`](phosphor_core::core::Bus::memory_ready)). So the
+    /// playfield a frame displays is the one the game had written by the start
+    /// of the previous vblank, and a game that rebuilds its whole page in mid
+    /// screen, as Q*Bert's Qubes does on its attract page, never shows the
+    /// rebuild. Copied whole at line 240 rather than over eight lines: with the
+    /// CPU locked out of E7 for the whole window, the two are the same.
+    ///
+    /// Logic board sheet 3, `docs/schematics/` has no transcription of it yet.
+    #[save(id = 10)]
+    pub(crate) bg_buffer: [u8; 0x400],
+
     // Video state
     #[save(id = 6)]
     pub(crate) video_control: u8,
@@ -813,6 +831,13 @@ pub struct GottliebBoard {
     pub(crate) gfxcharlo: bool, // codes 0x00-0x7F
     #[save_skip]
     pub(crate) gfxcharhi: bool, // codes 0x80-0xFF
+
+    // Output-latch bit 4 banks the sprites (Q*Bert's Qubes). The reference
+    // driver's `qbertqub_output_w` latches it and the game toggles it around
+    // sprite work; Q*Bert drives its coin meter from that bit instead, so
+    // this stays off unless the game wrapper sets it at ROM load.
+    #[save_skip]
+    pub(crate) output_bit4_banks_sprites: bool,
 
     // I/O ports (active-high for Q*Bert joystick/buttons) and the DIP byte,
     // which keep their previous treatment: live input and operator
@@ -854,10 +879,15 @@ impl GottliebBoard {
     }
 
     pub fn new() -> Self {
+        let mut map = Self::build_map();
+        // Battery RAM powers up all ones (MAME's `DEFAULT_ALL_1`), never all
+        // zeros: Q*Bert's Qubes reads an all-zero NVRAM as a valid high-score
+        // table and dies for it (phosphor-emulator-6mw9).
+        map.region_data_mut(Region::Nvram).fill(0xFF);
         Self {
             sound_cpu: M6502::new(),
             sound: GottliebSoundBoard::new(),
-            map: Self::build_map(),
+            map,
             tile_rom_cache: gfx::GfxCache::new(0, 8, 8),
             charram_cache: gfx::GfxCache::new(128, 8, 8),
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
@@ -865,10 +895,12 @@ impl GottliebBoard {
             palette_rgb: [(0, 0, 0); 16],
             palette_scanline: vec![[(0, 0, 0); 16]; VISIBLE_LINES as usize],
             pixel_buffer: vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT],
+            bg_buffer: [0; 0x400],
             video_control: 0,
             sprite_bank: 0,
             gfxcharlo: false,
             gfxcharhi: false,
+            output_bit4_banks_sprites: false,
             input_ports: [0; 4],
             dsw: 0,
             clock: 0,
@@ -989,7 +1021,12 @@ impl GottliebBoard {
         match port & 0x07 {
             0 => self.watchdog_counter = 0,
             2 => self.sound.write_sound_command(data),
-            3 => self.video_control = data,
+            3 => {
+                self.video_control = data;
+                if self.output_bit4_banks_sprites {
+                    self.sprite_bank = (data >> 4) & 1;
+                }
+            }
             4 => self.sprite_bank = (data >> 2) & 3,
             _ => {}
         }
@@ -1062,6 +1099,12 @@ impl GottliebBoard {
     /// Called once per scanline from [`run_scanlines`] and, for the debugger's
     /// single-step path, from [`tick`] when the clock lands on a boundary.
     pub(crate) fn begin_scanline(&mut self, scanline: u64) {
+        // The background DMA: E7 into the buffer the display reads, at the top
+        // of vertical blank. See `bg_buffer`.
+        if scanline == VISIBLE_LINES {
+            let video_ram = self.map.region_data(Region::VideoRam);
+            self.bg_buffer.copy_from_slice(&video_ram[..0x400]);
+        }
         if scanline >= VISIBLE_LINES {
             return;
         }
@@ -1170,7 +1213,8 @@ impl GottliebBoard {
             tile_width: 8,
             tile_height: 8,
         };
-        let video_ram = self.map.region_data(Region::VideoRam);
+        // The buffer, not the CPU's RAM: see `bg_buffer`.
+        let video_ram = &self.bg_buffer;
         let gfxcharhi = self.gfxcharhi;
         let gfxcharlo = self.gfxcharlo;
         let cache = if is_rom {
@@ -1702,21 +1746,29 @@ mod tests {
         ram[2] = 255; // 255 ^ 255 == code 0
     }
 
-    /// The behavior W4 exists for on the tilemap layer: video RAM is read as
-    /// the beam passes it, so rewriting the map partway down the screen changes
-    /// only the rows below the write.
+    /// Write `code` to every cell of the CPU's video RAM and run the vblank
+    /// DMA that carries it into the buffer the display reads.
+    fn fill_playfield(board: &mut GottliebBoard, code: u8) {
+        board.map.region_data_mut(Region::VideoRam).fill(code);
+        board.begin_scanline(VISIBLE_LINES);
+    }
+
+    /// The playfield is double-buffered: the display reads `bg_buffer`, which
+    /// the vblank DMA fills from the CPU's video RAM at line 240. So rewriting
+    /// the map partway down the screen changes *nothing* in that frame, and the
+    /// whole of the next frame shows the new map.
     ///
-    /// The split is deliberately at row 100, which is *inside* tile row 12 (rows
-    /// 96..103). A whole-frame render draws a tile row from one snapshot and
-    /// could not produce this picture at all.
+    /// This is the opposite of what the test here used to pin, a split at the
+    /// write's row. That was the live read, and it tore Q*Bert's Qubes' attract
+    /// page, which rebuilds the whole map in mid screen every frame.
     #[test]
-    fn a_mid_frame_vram_write_changes_only_the_rows_below_it() {
+    fn a_mid_frame_vram_write_waits_for_the_vblank_copy() {
         const SPLIT: usize = 100;
         let mut board = GottliebBoard::new();
         solid_char_tile(&mut board, 1, 1);
         solid_char_tile(&mut board, 2, 2);
 
-        board.map.region_data_mut(Region::VideoRam).fill(1);
+        fill_playfield(&mut board, 1);
         for y in 0..SPLIT as u64 {
             board.begin_scanline(y);
         }
@@ -1725,19 +1777,16 @@ mod tests {
             board.begin_scanline(y);
         }
 
-        let px = |y: usize| board.pixel_buffer[y * NATIVE_WIDTH];
-        assert_eq!(px(0), 1, "row 0 was drawn before the write");
-        assert_eq!(
-            px(SPLIT - 1),
-            1,
-            "the last row above the write keeps the old tile, mid-tile-row"
-        );
-        assert_eq!(
-            px(SPLIT),
-            2,
-            "the first row below the write takes the new tile"
-        );
-        assert_eq!(px(NATIVE_HEIGHT - 1), 2, "the bottom row is below it");
+        let px = |b: &GottliebBoard, y: usize| b.pixel_buffer[y * NATIVE_WIDTH];
+        assert_eq!(px(&board, SPLIT - 1), 1, "above the write: the old map");
+        assert_eq!(px(&board, SPLIT), 1, "below the write: still the old map");
+        assert_eq!(px(&board, NATIVE_HEIGHT - 1), 1, "to the bottom row");
+
+        // The next vblank copies the write across, and the next frame shows it
+        // from the top.
+        board.begin_scanline(VISIBLE_LINES);
+        board.begin_scanline(0);
+        assert_eq!(px(&board, 0), 2, "the frame after the copy has the new map");
     }
 
     /// Layer order is a live register on this board (`video_control` bit 0), and
@@ -1749,7 +1798,7 @@ mod tests {
         let mut board = GottliebBoard::new();
         solid_char_tile(&mut board, 1, 1);
         solid_sprite0(&mut board, 2);
-        board.map.region_data_mut(Region::VideoRam).fill(1);
+        fill_playfield(&mut board, 1);
 
         // Normal order: tiles first, so the sprite wins where they overlap.
         board.video_control = 0;
@@ -1792,7 +1841,7 @@ mod tests {
         let mut board = GottliebBoard::new();
         solid_char_tile(&mut board, 1, 1);
         solid_sprite0(&mut board, 2); // parked over rows 0..16
-        board.map.region_data_mut(Region::VideoRam).fill(1);
+        fill_playfield(&mut board, 1);
         for y in 0..VISIBLE_LINES {
             board.begin_scanline(y);
         }
@@ -1823,7 +1872,7 @@ mod tests {
         let mut board = GottliebBoard::new();
         let mut cpu = I8088::new();
         solid_char_tile(&mut board, 1, 1);
-        board.map.region_data_mut(Region::VideoRam).fill(1);
+        fill_playfield(&mut board, 1);
         board.pixel_buffer.fill(0xFF);
 
         // One cycle at clock 0 crosses the scanline-0 boundary.
@@ -1839,8 +1888,9 @@ mod tests {
         for _ in 0..rest {
             tick(&mut cpu, &mut board);
         }
-        board.map.region_data_mut(Region::VideoRam).fill(2);
-        solid_char_tile(&mut board, 2, 2);
+        // Char RAM is read live (only the map is buffered), so repainting the
+        // tile is what row 1 can show differently from row 0.
+        solid_char_tile(&mut board, 1, 2);
         run_scanlines(&mut cpu, &mut board, TIMING.cycles_per_scanline);
         assert_eq!(
             board.pixel_buffer[NATIVE_WIDTH], 2,
@@ -1858,7 +1908,7 @@ mod tests {
     fn vblank_scanlines_have_no_row_to_draw() {
         let mut board = GottliebBoard::new();
         solid_char_tile(&mut board, 1, 1);
-        board.map.region_data_mut(Region::VideoRam).fill(1);
+        fill_playfield(&mut board, 1);
         board.pixel_buffer.fill(0xFF);
         for y in VISIBLE_LINES..TIMING.total_scanlines {
             board.begin_scanline(y);
@@ -2076,5 +2126,58 @@ mod tests {
         let mut buf = [0i16; 256];
         let count = snd.fill_audio(&mut buf);
         assert!(count > 0, "should produce audio samples after ticking");
+    }
+
+    /// The output latch's bit 4 banks the sprites only when the game says so.
+    /// Q*Bert's Qubes holds 512 sprites and switches halves from the latch;
+    /// Q*Bert drives its coin meter from that bit, so the latch must leave
+    /// the bank alone unless the wrapper opted in.
+    #[test]
+    fn output_bit4_banks_sprites_only_when_enabled() {
+        let mut plain = GottliebBoard::new();
+        plain.io_port_write(3, 0x10);
+        assert_eq!(
+            plain.sprite_bank, 0,
+            "without the flag the latch is not a bank switch"
+        );
+
+        let mut qubes = GottliebBoard::new();
+        qubes.output_bit4_banks_sprites = true;
+        qubes.io_port_write(3, 0x10);
+        assert_eq!(qubes.sprite_bank, 1);
+        qubes.io_port_write(3, 0x00);
+        assert_eq!(qubes.sprite_bank, 0);
+        // The video-control byte still latches whole, bank bit included.
+        assert_eq!(qubes.video_control, 0x00);
+        qubes.io_port_write(3, 0x11);
+        assert_eq!(qubes.video_control, 0x11);
+        assert_eq!(qubes.sprite_bank, 1);
+    }
+
+    /// Fresh NVRAM reads back all ones, and a reset leaves it alone.
+    ///
+    /// MAME's Gottlieb driver declares `DEFAULT_ALL_1`, and all zeros is the
+    /// one pattern the games must never see: Q*Bert's Qubes takes an all-zero
+    /// battery RAM for a valid high-score table, formats no score strings,
+    /// and its text renderer walks off the end of the empty buffer, through
+    /// the stack, and kills the main loop by frame 404
+    /// (phosphor-emulator-6mw9). Real battery RAM never powers up all zeros.
+    #[test]
+    fn nvram_boots_all_ones_and_survives_reset() {
+        let mut board = GottliebBoard::new();
+        assert!(
+            board
+                .map
+                .region_data(Region::Nvram)
+                .iter()
+                .all(|b| *b == 0xFF),
+            "fresh battery RAM reads back all ones"
+        );
+
+        board.map.region_data_mut(Region::Nvram)[0x32F] = 0xFD;
+        board.map.region_data_mut(Region::Ram)[0] = 0xA5;
+        board.reset_board();
+        assert_eq!(board.map.region_data(Region::Nvram)[0x32F], 0xFD);
+        assert_eq!(board.map.region_data(Region::Ram)[0], 0);
     }
 }

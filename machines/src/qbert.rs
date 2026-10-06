@@ -427,6 +427,35 @@ impl Bus for GottliebBoard {
         false
     }
 
+    /// The board's RDY1, which the 8284 turns into the 8088's READY.
+    ///
+    /// From the logic board drawing: RDY1 is J9 (7408) of two terms, each of
+    /// which holds one RAM's accesses off while the video side owns it.
+    ///
+    /// - K13 (74LS32) is `/FRSEL` ORed with J13's extended horizontal blank.
+    ///   Object RAM, B6's Y6 at 0x3000-0x37FF, is open to the CPU only inside
+    ///   that blank, H = 254 (H15's decode) through the end of HBLANK, and
+    ///   waits for it everywhere else. The rest of the line belongs to the
+    ///   object scan, which is gated by `/HBLANK` and reads 64 entries at four
+    ///   pixel clocks each across the 256 active clocks
+    ///   (`docs/schematics/qbert-object-enable.md`). The polarity is taken from
+    ///   that cadence: the label at J13's Q as read does not settle it.
+    /// - J8 (74LS32) is `/BRSEL OR V3 OR /VBLANK`. The playfield RAM, B6's Y7
+    ///   at 0x3800-0x3FFF, waits on the first eight lines of vertical blank.
+    ///
+    /// The 8284 synchronizes RDY1 to the clock, which is not modeled: the
+    /// window is applied on the clock the CPU asks in.
+    fn memory_ready(&self, _master: BusMaster, addr: u32) -> bool {
+        let h = self.clock % gottlieb::TIMING.cycles_per_scanline;
+        let v =
+            self.clock / gottlieb::TIMING.cycles_per_scanline % gottlieb::TIMING.total_scanlines;
+        match addr & 0xF800 {
+            0x3000 => (254..318).contains(&h),
+            0x3800 => !(240..248).contains(&v),
+            _ => true,
+        }
+    }
+
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => {
@@ -764,6 +793,40 @@ inventory::submit! {
 mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
+
+    /// RDY1's two windows, at their edges. Object RAM is open to the CPU only
+    /// in the extended horizontal blank, and the playfield RAM is closed only
+    /// on the eight vblank lines its DMA copy runs on. Everything else is
+    /// always ready.
+    #[test]
+    fn rdy1_holds_object_ram_outside_hblank_and_the_playfield_during_its_dma() {
+        let mut board = GottliebBoard::new();
+        let line = gottlieb::TIMING.cycles_per_scanline;
+        let mut ready_at = |v: u64, h: u64, addr: u32| {
+            board.clock = v * line + h;
+            board.memory_ready(BusMaster::Cpu(0), addr)
+        };
+
+        assert!(!ready_at(100, 0, 0x3000), "object RAM, active line");
+        assert!(!ready_at(100, 253, 0x30FF), "the clock before the window");
+        assert!(ready_at(100, 254, 0x3000), "H15's decode opens it");
+        assert!(ready_at(100, 317, 0x37FF), "and the last HBLANK clock");
+        assert!(
+            ready_at(245, 0, 0x3000) == ready_at(100, 0, 0x3000),
+            "V plays no part"
+        );
+
+        assert!(ready_at(239, 0, 0x3800), "playfield, last visible line");
+        assert!(!ready_at(240, 0, 0x3800), "the DMA's first line");
+        assert!(!ready_at(247, 317, 0x3FFF), "and its last");
+        assert!(ready_at(248, 0, 0x3800), "V3 set again: open");
+
+        assert!(ready_at(244, 100, 0x4000), "char RAM is never held");
+        assert!(
+            !ready_at(240, 0, 0xE3800),
+            "the segment E000 alias is held too"
+        );
+    }
 
     #[test]
     fn dip_default_and_metadata() {

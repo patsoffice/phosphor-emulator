@@ -820,6 +820,7 @@ pub mod namco_wsg_output;
 pub mod pacman;
 pub mod pisces;
 pub mod qbert;
+pub mod qbertsqubes;
 pub mod quantum;
 pub mod registry;
 pub mod roadrunner;

@@ -90,8 +90,9 @@ pub enum BusStatus {
 ///
 /// A bus cycle is T1 through T4, with wait states inserted between T3 and T4
 /// when a device is not ready. `Idle` is the 8088's Ti: no bus cycle at all.
-/// Nothing on the Gottlieb board inserts wait states and the test suite records
-/// none, so `Wait` is declared for completeness and never produced.
+/// `Wait` is produced only when a bus holds a memory cycle with
+/// [`Bus::memory_ready`]; the test suite records none, so nothing validates its
+/// pins against the part.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TState {
     T1,
@@ -221,8 +222,8 @@ pub(crate) enum TCycle {
     T1,
     T2,
     T3,
-    /// A wait state, inserted between T3 and T4 by a device that is not ready.
-    /// Nothing this core drives asks for one.
+    /// A wait state, inserted between T3 and T4 by a device that is not ready:
+    /// a memory cycle for which [`Bus::memory_ready`] returned `false`.
     Tw,
     T4,
 }
@@ -1467,6 +1468,7 @@ impl I8088 {
         }
 
         // -- operate the T-state the bus is in ------------------------------
+        let mut ready = true;
         match self.bus_status_latch {
             // Nothing is running. The two states that lift themselves ask here
             // whether they still hold: a delay that has expired, and a pause
@@ -1479,7 +1481,7 @@ impl I8088 {
                 FetchState::PausedFull if self.queue_has_room() => self.fetch_decision(),
                 _ => {}
             },
-            status => self.operate_bus_t_state(bus, master, status),
+            status => ready = self.operate_bus_t_state(bus, master, status),
         }
 
         // The fetch delay counts down on every T-state that is not a wait.
@@ -1521,8 +1523,9 @@ impl I8088 {
                 _ => TCycle::T2,
             },
             TCycle::T2 => TCycle::T3,
-            // Nothing this core drives asks for a wait state, so T3 always
-            // ends the transfer.
+            // A device that was not ready on this clock holds the cycle in a
+            // wait state; the data moved on the clock it was.
+            TCycle::T3 | TCycle::Tw if !ready => TCycle::Tw,
             TCycle::T3 | TCycle::Tw => TCycle::T4,
             // The status is cleared on the way out of T4, not on the way in,
             // which is what lets a request made at T4 see what it is behind.
@@ -1533,13 +1536,18 @@ impl I8088 {
         };
     }
 
-    /// Drive the pins for the T-state the bus is in, and move the data on T3.
+    /// Drive the pins for the T-state the bus is in, and move the data on T3
+    /// or on the wait state that ends a not-ready cycle.
+    ///
+    /// Returns whether the cycle was ready, which is `false` only on a T3 or
+    /// Tw of a memory cycle the bus held with [`Bus::memory_ready`]. The data
+    /// has not moved on such a clock, and the advance turns it into a Tw.
     fn operate_bus_t_state<B: Bus<Address = u32, Data = u8> + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         status: BusStatus,
-    ) {
+    ) -> bool {
         match self.t_cycle {
             // Latched but not yet advanced. The clock this would run on has
             // already been turned into T1 at the top of the tick.
@@ -1573,8 +1581,25 @@ impl I8088 {
             }
             // T3: the data moves. A read takes the byte the addressed device
             // drove; a write puts the byte on the pins.
+            //
+            // Unless the device is not ready. READY is asked on T3 and again on
+            // each wait state, and the transfer happens on the first clock it
+            // is high, so a write lands in the memory at the moment the board's
+            // arbiter lets it rather than when it was asked for.
             TCycle::T3 | TCycle::Tw => {
-                self.drive_bus_pins(status, TState::T3);
+                let t_state = if self.t_cycle == TCycle::Tw {
+                    TState::Wait
+                } else {
+                    TState::T3
+                };
+                self.drive_bus_pins(status, t_state);
+                let memory = matches!(
+                    status,
+                    BusStatus::Code | BusStatus::MemRead | BusStatus::MemWrite
+                );
+                if memory && !bus.memory_ready(master, self.address_latch) {
+                    return false;
+                }
                 self.do_bus_transfer(bus, master, status);
             }
             // T4 completes the transaction, and a fetched byte joins the queue
@@ -1595,6 +1620,7 @@ impl I8088 {
                 }
             }
         }
+        true
     }
 
     /// Move the byte the running cycle is for, on T3.
@@ -4790,6 +4816,100 @@ mod tests {
                 && cycles.contains(&(BusStatus::IoWrite, 0x301)),
             "two IOW cycles: {cycles:?}"
         );
+    }
+
+    /// A bus whose memory at one address is not ready for a set number of
+    /// clocks, the way a board's RDY logic holds a RAM the video side owns.
+    struct WaitBus {
+        mem: Box<[u8; 0x10_0000]>,
+        slow_addr: u32,
+        /// How many more times `memory_ready` answers `false` for `slow_addr`.
+        waits_left: std::cell::Cell<u32>,
+        writes: u32,
+    }
+
+    impl Bus for WaitBus {
+        type Address = u32;
+        type Data = u8;
+
+        fn read(&mut self, _master: BusMaster, addr: u32) -> u8 {
+            self.mem[(addr & 0xF_FFFF) as usize]
+        }
+
+        fn write(&mut self, _master: BusMaster, addr: u32, data: u8) {
+            if addr == self.slow_addr {
+                self.writes += 1;
+            }
+            self.mem[(addr & 0xF_FFFF) as usize] = data;
+        }
+
+        fn memory_ready(&self, _master: BusMaster, addr: u32) -> bool {
+            if addr != self.slow_addr || self.waits_left.get() == 0 {
+                return true;
+            }
+            self.waits_left.set(self.waits_left.get() - 1);
+            false
+        }
+
+        fn is_halted_for(&self, _master: BusMaster) -> bool {
+            false
+        }
+
+        fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
+            InterruptState::default()
+        }
+    }
+
+    /// The clock on which `MOV [0x200], AL` puts its byte into memory, with
+    /// the write held for `waits` wait states. Runs on until the `NOP` after it
+    /// has retired as well, and returns the bus, to inspect the write.
+    fn clock_of_a_held_write(waits: u32) -> (u32, WaitBus) {
+        let mut cpu = I8088::new();
+        let mut bus = WaitBus {
+            mem: Box::new([0x90; 0x10_0000]),
+            slow_addr: 0x200,
+            waits_left: std::cell::Cell::new(waits),
+            writes: 0,
+        };
+        cpu.cs = 0;
+        cpu.ds = 0;
+        cpu.ip = 0x100;
+        cpu.ax = 0x5A;
+        cpu.load_prefetch_queue(&[]);
+        bus.mem[0x100..0x103].copy_from_slice(&[0xA2, 0x00, 0x02]); // MOV [0x200], AL
+        let mut clocks = 0;
+        let mut landed = None;
+        let mut retired = 0;
+        while retired < 2 || landed.is_none() {
+            clocks += 1;
+            assert!(clocks < 500, "the write lands and two instructions retire");
+            if cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0)) {
+                retired += 1;
+            }
+            if bus.writes == 1 && landed.is_none() {
+                landed = Some(clocks);
+            }
+        }
+        (landed.expect("the write lands"), bus)
+    }
+
+    /// A memory cycle the bus is not ready for holds in Tw, and every wait
+    /// state moves the transfer one clock later. The data moves once, on the
+    /// ready clock: a write is not repeated on each wait state.
+    ///
+    /// The transfer, not the instruction count, is what is pinned: the `NOP`
+    /// behind the write runs out of the queue while the bus is held, so a
+    /// short wait can cost the instruction stream nothing at all.
+    #[test]
+    fn a_not_ready_write_lands_one_clock_later_per_wait_state() {
+        let (ready, bus) = clock_of_a_held_write(0);
+        assert_eq!(bus.mem[0x200], 0x5A, "the write lands");
+        for waits in [1, 3, 64] {
+            let (held, bus) = clock_of_a_held_write(waits);
+            assert_eq!(held, ready + waits, "{waits} wait states");
+            assert_eq!(bus.mem[0x200], 0x5A, "the held write still lands");
+            assert_eq!(bus.writes, 1, "once, not once per wait state");
+        }
     }
 
     /// A bus that asserts an interrupt line, so the acknowledge sequence can be

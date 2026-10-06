@@ -1549,12 +1549,14 @@ phosphor-emulator-4056."""
 
 [[target]]
 id = "gottlieb-output"
-machines = ["qbert"]
+machines = ["qbert", "qbertsqubes"]
 device = "machines/src/gottlieb.rs"
 status = "partial"
 notes = """
 EXAMINED. Sound/Speech Assy. A6 schematic, transcribed at
-docs/schematics/qbert-sound-output.md. `partial` because two of the three things
+docs/schematics/qbert-sound-output.md. Q*Bert's Qubes rides the same A6
+assembly (its manual shows the same board), so it is covered here too.
+`partial` because two of the three things
 that looked like gaps turned out to be modelled already, and the third is real.
 
 ALREADY MODELLED, and worth recording so nobody re-finds it: both MC1408s are

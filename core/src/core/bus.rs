@@ -103,6 +103,22 @@ pub trait Bus {
     /// Returns true if the master must pause before the next bus cycle.
     fn is_halted_for(&self, master: BusMaster) -> bool;
 
+    /// Whether the memory addressed by a running bus cycle is ready to complete
+    /// it on this clock: the READY input, asked once per T-state from the point
+    /// the data would move until it does.
+    ///
+    /// This is a wait inside a cycle, not a pause between cycles, which is what
+    /// separates it from [`is_halted_for`](Self::is_halted_for). A master that
+    /// supports it holds the cycle with its address on the bus, inserting wait
+    /// states, and moves the data on the first clock this returns `true`.
+    ///
+    /// Asked for memory cycles only, instruction fetches included. The default
+    /// is always ready, so a board with no wait-state logic, which is nearly
+    /// all of them, changes nothing by not overriding it. Only the I8088 asks.
+    fn memory_ready(&self, _master: BusMaster, _addr: Self::Address) -> bool {
+        true
+    }
+
     /// Generic interrupt query. CPUs pick what they need.
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState;
 }
