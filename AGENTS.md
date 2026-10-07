@@ -69,6 +69,7 @@ cargo test -p phosphor-machines                                # Test machine/bo
 cargo test -p phosphor-macros                                  # Test proc macro changes
 cargo test -p phosphor-frontend                                # Test frontend changes
 cargo test -p phosphor-cpu-validation                          # CPU validation (slow — only after CPU changes)
+./scripts/test.sh                                              # Whole workspace minus CPU validation, two lanes (faster than cargo test)
 cargo test m6809_alu_shift_test                                # Run specific test category
 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings  # Check code quality (exactly what CI runs)
 cargo clippy --workspace --all-features --all-targets --allow-dirty --fix      # Auto-fix clippy warnings
@@ -79,6 +80,9 @@ cargo run --release -p phosphor-bench -- --roms /path/to/roms   # Benchmark emul
 ```
 
 - Before/after numbers for any performance change come from `phosphor-bench`, not from the interactive profiler — it reports the fastest of N repetitions, which is the stable estimator for a deterministic workload. Always `--release`; a debug build measures a different program.
+
+- For a whole-workspace run, `./scripts/test.sh` (from the dev shell; it takes the same arguments as `cargo test`, which replace its default selection). It runs the three CPU-heavy ROM-gated suites (audio sanity, golden frames, movies) one at a time, and every other test binary in a parallel pool beside them. With ROMs that is about 2.6 minutes of tests against about 3.8 for `cargo test`, which runs binaries one at a time. Each binary still runs in one process, as under `cargo test`; that is why it is not `cargo-nextest`, whose process per test made `audio_sanity_test` compute its shared sweep three times and was no faster. The script's header has the measurements.
+- Do not run the workspace's tests with `--release`. The release profile's fat LTO links all 126 test binaries whole-program, which took a cold run to 12.5 minutes; the dev profile is already `opt-level = 2`.
 
 - Test the crate you changed; also test downstream crates when changing `phosphor-core` or `phosphor-macros`
 - `cargo clippy` must pass with no warnings. Run it with the full flag set above:

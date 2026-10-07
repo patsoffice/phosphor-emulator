@@ -71,6 +71,10 @@
             # without this the only way to open one is an ad-hoc `brew install`
             # outside the pinned shell.
             pkgs.poppler-utils
+            # Reads cargo's JSON build output in scripts/test.sh, which needs
+            # each test binary's path and package directory to run it the way
+            # `cargo test` would.
+            pkgs.jq
           ] ++ linuxPkgs;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
