@@ -5,18 +5,19 @@
 //! were previously reachable only from the SDL frontend. Two loops, chosen by
 //! the requested observers:
 //!
-//! **Frame loop** (`--events`/`--watch` only) — runs whole frames and drains,
+//! **Frame loop** (`--events`/`--hang` only): runs whole frames and drains,
 //! per frame, the board's [`DebugTrace`](phosphor_core::core::debug_trace::DebugTrace) event ring (`--events <kinds|all>`:
-//! device writes, bank switches, interrupt edges, watchdog kicks, …) and the
-//! watchpoint hit queue (`--watch <cpu:addr:kind>`). Records are merged and
-//! emitted cycle-sorted. Bounded memory.
+//! device writes, bank switches, interrupt edges, watchdog kicks, …). Records
+//! are emitted cycle-sorted. Bounded memory.
 //!
-//! **Cycle loop** (`--cpu` instruction trace or `--break-pc`) — drives
-//! `debug_tick()` per cycle, disassembles at each traced CPU's instruction
-//! boundaries (optional `:regs` register columns), correlates any watchpoint
-//! hits/events by cycle, and honors `--break-pc`/`--stop-on-watch`. It streams
-//! straight to the output writer, so an instruction trace is unbounded by
-//! design (never materialized in memory).
+//! **Cycle loop** (`--watch`, `--cpu` instruction trace or `--break-pc`):
+//! drives `debug_tick()` per cycle, disassembles at each traced CPU's
+//! instruction boundaries (optional `:regs` register columns), correlates any
+//! watchpoint hits/events by cycle, and honors `--break-pc`/`--stop-on-watch`.
+//! It streams straight to the output writer, so an instruction trace is
+//! unbounded by design (never materialized in memory). A watch runs in this
+//! loop because the watchpoint hit queue is finite and only this loop drains it
+//! as it fills; see `run_trace`.
 //!
 //! Both loops emit human `text` or machine-diffable `jsonl`, and `--from-frame
 //! N` seeks cheaply (runs fast to N with the observers off, then arms them) so
@@ -115,7 +116,10 @@ pub struct TraceOptions<'a> {
 
     /// Output serialization.
     pub format: TraceFormat,
-    /// Output file; `None` returns the trace as a string instead.
+    /// Output file. With `None`, the frame loop (`--events`/`--hang` alone)
+    /// returns the trace as a string, and the cycle loop (`--watch`, `--cpu`,
+    /// `--break-pc`) streams it to stdout and returns an empty string, with its
+    /// run summary on stderr. With a file, both return the summary.
     pub out: Option<&'a Path>,
 }
 
@@ -168,6 +172,11 @@ struct ResolvedWatch {
 struct WatchTally {
     reads: Vec<usize>,
     writes: Vec<usize>,
+    /// Hits that fired but never reached this run, because the hit queue was
+    /// full when they did: the sum of every drained hit's `dropped_after`.
+    /// They cannot be attributed to a spec, since what was dropped is not
+    /// known, so a nonzero total makes every count a lower bound.
+    dropped: u64,
 }
 
 impl WatchTally {
@@ -175,11 +184,14 @@ impl WatchTally {
         Self {
             reads: vec![0; specs.len()],
             writes: vec![0; specs.len()],
+            dropped: 0,
         }
     }
 
-    /// Attribute one hit to every spec that asked for it.
+    /// Attribute one hit to every spec that asked for it, and count any hits
+    /// the queue dropped behind it.
     fn note(&mut self, specs: &[ResolvedWatch], hit: &WatchpointHit) {
+        self.dropped += u64::from(hit.dropped_after);
         for (i, s) in specs.iter().enumerate() {
             if s.cpu != hit.cpu_index || s.addr != hit.addr {
                 continue;
@@ -227,6 +239,13 @@ fn watch_summary(specs: &[ResolvedWatch], tally: &WatchTally, names: &[String]) 
             }
             lines.push(line);
         }
+    }
+    if tally.dropped > 0 {
+        lines.push(format!(
+            "watch: {} more hit(s) fired and were dropped, because the hit queue \
+             filled before it was drained; every count above is a lower bound",
+            tally.dropped
+        ));
     }
     lines
 }
@@ -355,13 +374,14 @@ fn render_hang(
 /// Two loops, chosen by the requested observers (they need different
 /// granularity):
 ///
-/// - **Frame loop** — `--events`/`--watch` only. Runs `run_frame()` per frame
-///   and drains the event ring + watchpoint queue; records are merged and
-///   emitted cycle-sorted. Bounded memory, cheap.
-/// - **Cycle loop** — whenever `--cpu` (instruction trace) or `--break-pc` is
-///   requested. Drives `debug_tick()` per cycle, disassembles at instruction
-///   boundaries, and honors `--break-pc`/`--stop-on-watch`. Streams straight
-///   to the output writer, so an instruction trace is unbounded by design.
+/// - **Frame loop**: `--events`/`--hang` only. Runs `run_frame()` per frame
+///   and drains the event ring; records are emitted cycle-sorted. Bounded
+///   memory, cheap.
+/// - **Cycle loop**: whenever `--watch`, `--cpu` (instruction trace) or
+///   `--break-pc` is requested. Drives `debug_tick()` per cycle, drains the
+///   watchpoint queue every cycle, disassembles at instruction boundaries, and
+///   honors `--break-pc`/`--stop-on-watch`. Streams straight to the output
+///   writer, so an instruction trace is unbounded by design.
 ///
 /// At least one observer must be requested (`--cpu`, `--break-pc`, `--events`,
 /// or `--watch`), else there is nothing to report.
@@ -389,8 +409,7 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
         out,
     } = opts;
 
-    let cycle_mode = cpu.is_some() || break_pc.is_some();
-    if events.is_none() && watch.is_none() && !cycle_mode && !hang {
+    if events.is_none() && watch.is_none() && cpu.is_none() && break_pc.is_none() && !hang {
         return Err(
             "trace needs at least one observer: --cpu, --break-pc, --events, --watch, or --hang"
                 .to_string(),
@@ -449,6 +468,18 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
         }
     }
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
+
+    // A watch runs in the cycle loop too, because only the cycle loop drains the
+    // hit queue as it fills. The frame loop drains it once a frame, so a frame
+    // with more hits than the queue holds loses the rest: when the queue held
+    // 64, watching Q*Bert's Qubes' frame counter for reads and writes together
+    // reported 6 of 200 writes, because the main loop's spin reads filled the
+    // queue first every frame. The queue is larger now, but a trace should not
+    // depend on how dense a watch is. The cost is about 1.2 to 2.5 times the run
+    // time. A machine that reports no cycle count has no cycle loop, and falls
+    // back to the frame loop with any loss reported (`WatchTally::dropped`).
+    let cycle_mode =
+        cpu.is_some() || break_pc.is_some() || (watch.is_some() && cycles_per_frame > 0);
 
     // Resolve CPU names/indices against the booted machine's bus.
     let traced = resolve_cpu_specs(&mut harness, &cpu_specs)?;
@@ -569,8 +600,10 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
         tally,
     } = fl;
 
-    // Watchpoint hits are drained every frame (the pending queue is shallow);
-    // trace events are drained and cleared every frame so a run longer than the
+    // Watchpoint hits reach this loop only on a machine with no cycle count
+    // (see `run_trace`), and are drained once a frame, so a frame with more than
+    // the queue holds loses hits; `tally` counts the loss and the summary says
+    // so. Trace events are drained and cleared every frame so a run longer than the
     // ring capacity does not silently lose early events.
     let mut records: Vec<Record> = Vec::new();
     let mut hang_lines: Vec<String> = Vec::new();
@@ -915,7 +948,16 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         }
         None => format!("frames {from_frame}..{frames}"),
     };
-    Ok(format!("trace: {emitted} line(s) over {span} -> {dest}\n"))
+    let summary = format!("trace: {emitted} line(s) over {span} -> {dest}\n");
+    // Streamed to stdout, the trace *is* the result, and the caller prints
+    // whatever is returned to stdout after it: a summary returned here would
+    // land as the last line of the trace, which is not JSON in a jsonl run. It
+    // is about the run, so it goes to stderr instead.
+    if out.is_none() {
+        eprint!("{summary}");
+        return Ok(String::new());
+    }
+    Ok(summary)
 }
 
 // ---------------------------------------------------------------------------
@@ -1808,6 +1850,32 @@ mod tests {
         );
     }
 
+    /// Hits the queue dropped are counted from `dropped_after`, and the summary
+    /// says the counts are lower bounds. Without that line a watch whose hits
+    /// were all dropped reads "0 hit(s)", which says the address was never
+    /// touched (phosphor-emulator-ghrs).
+    #[test]
+    fn dropped_hits_are_counted_and_make_the_counts_lower_bounds() {
+        let names = names2();
+        let watches = vec![resolve_watch(&spec("0", 0x10, "w"), &names).unwrap()];
+        let mut tally = WatchTally::new(&watches);
+        tally.note(&watches, &hit(0, 0x10, WatchpointKind::Write));
+        let lines = watch_summary(&watches, &tally, &names);
+        assert_eq!(lines.len(), 1, "nothing dropped, no warning: {lines:?}");
+
+        let mut last = hit(0, 0x10, WatchpointKind::Write);
+        last.dropped_after = 7;
+        tally.note(&watches, &last);
+        assert_eq!(tally.dropped, 7);
+        let lines = watch_summary(&watches, &tally, &names);
+        assert!(lines[0].contains("2 hit(s)"), "{lines:?}");
+        assert!(
+            lines.last().unwrap().contains("7 more hit(s)")
+                && lines.last().unwrap().contains("lower bound"),
+            "the loss is stated: {lines:?}"
+        );
+    }
+
     /// A hit is attributed only to the spec that asked for that CPU, address
     /// and kind — otherwise the summary would launder a hit on one CPU into
     /// evidence for a watch on another, which is the very confusion this is
@@ -2236,17 +2304,57 @@ mod tests {
 
         // The 0xC900 bank latch is written during boot; a write watchpoint on
         // it must fire at least once.
-        let out = run_trace(TraceOptions {
-            frames: 30,
-            watch: Some("0:0xC900:w"),
-            ..TraceOptions::new("joust", path)
-        })
-        .expect("trace run");
+        let out = cycle_trace_to_string(
+            "watch_c900",
+            TraceOptions {
+                frames: 30,
+                watch: Some("0:0xC900:w"),
+                ..TraceOptions::new("joust", path)
+            },
+        );
 
         assert!(
             out.lines()
                 .any(|l| l.contains("$C900") && l.trim_end().ends_with("; watch")),
             "expected a watchpoint hit on $C900:\n{out}"
+        );
+    }
+
+    /// A dense watch delivers every hit. Q*Bert's Qubes reads its frame counter
+    /// at `$06FE` in a spin loop, hundreds of times a frame; draining once a
+    /// frame from a 64-entry queue capped this at 64 per frame and dropped the
+    /// rest without a word (phosphor-emulator-ghrs).
+    #[test]
+    fn a_watch_busier_than_the_hit_queue_loses_nothing() {
+        let Some(roms) = roms_dir() else {
+            eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+            return;
+        };
+        let path = roms.to_str().unwrap();
+        const FRAMES: usize = 3;
+
+        let p = std::env::temp_dir().join("phosphor_trace_watch_busy.txt");
+        match run_trace(TraceOptions {
+            frames: 100 + FRAMES,
+            from_frame: 100,
+            watch: Some("0:0x6fe:r"),
+            out: Some(&p),
+            ..TraceOptions::new("qbertsqubes", path)
+        }) {
+            Ok(_) => {}
+            Err(e) if e.contains("ROM") || e.contains("rom") => {
+                eprintln!("skipping: {e}");
+                return;
+            }
+            Err(e) => panic!("trace run: {e}"),
+        }
+        let out = std::fs::read_to_string(&p).expect("read trace file");
+        let _ = std::fs::remove_file(&p);
+
+        let hits = out.lines().filter(|l| l.contains("$06FE")).count();
+        assert!(
+            hits > 64 * FRAMES * 4,
+            "every spin-loop read arrives, far more than 64 a frame: {hits}"
         );
     }
 
@@ -2259,12 +2367,14 @@ mod tests {
 
         // During boot the C900 bank latch takes 0x01 then 0x00. An Equals(0x01)
         // condition must fire on the 0x01 write and NOT on the 0x00 write.
-        let out = run_trace(TraceOptions {
-            frames: 30,
-            watch: Some("0:0xC900:w:=01"),
-            ..TraceOptions::new("joust", path)
-        })
-        .expect("trace run");
+        let out = cycle_trace_to_string(
+            "watch_c900_eq01",
+            TraceOptions {
+                frames: 30,
+                watch: Some("0:0xC900:w:=01"),
+                ..TraceOptions::new("joust", path)
+            },
+        );
 
         let hits: Vec<&str> = out.lines().filter(|l| l.contains("$C900")).collect();
         assert!(!hits.is_empty(), "the =01 write should fire:\n{out}");

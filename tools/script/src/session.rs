@@ -233,10 +233,25 @@ impl DebugSession {
     }
 
     /// Move any queued watchpoint hits out of the machine and into `self.hits`.
+    ///
+    /// The machine-side queue is finite and this drains it once per frame, so
+    /// a watch dense enough to fill it within one frame loses the rest. The
+    /// hit it stopped at says so in `dropped_after`, which scripts see as the
+    /// hit map's `dropped`; the warning here is for the script that does not
+    /// look (phosphor-emulator-ghrs). `step()` drains every cycle and cannot
+    /// lose.
     fn drain_watchpoint_hits(&mut self) {
         let machine = self.harness.machine_mut();
+        let mut dropped = 0u64;
         while let Some(hit) = machine.take_watchpoint_hit() {
+            dropped += u64::from(hit.dropped_after);
             self.hits.push(hit);
+        }
+        if dropped > 0 {
+            log::warn!(
+                "{dropped} watchpoint hit(s) were dropped because the hit queue filled within \
+                 one frame; step() drains every cycle"
+            );
         }
     }
 

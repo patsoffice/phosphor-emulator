@@ -21,3 +21,4 @@ rhai = "1"
 clap = { version = "4", features = ["derive"] }
 png = "0.18"
 env_logger.workspace = true
+log.workspace = true

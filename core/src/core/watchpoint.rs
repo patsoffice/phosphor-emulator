@@ -201,6 +201,15 @@ pub struct WatchpointHit {
 ///
 /// Bounds memory if the debugger stops polling while a hot address is watched.
 ///
+/// **Sized for a caller that drains once a frame**, which is what the script
+/// session and `disasm trace`'s frame loop do. It was 64, which a dense watch
+/// passes many times over in one frame: Q*Bert's Qubes reads its frame counter
+/// about 935 times a frame in a spin loop and writes its tilemap about 2000
+/// times, and at 64 a watch on either lost almost everything without a word
+/// (phosphor-emulator-ghrs). 4096 covers those with room to spare and still
+/// bounds a forgotten watch at a few hundred KB. The interactive debugger
+/// drains after every tick, so the size never reaches it.
+///
 /// **The queue keeps the OLDEST and discards what does not fit**, recording the
 /// loss in [`WatchpointHit::dropped_after`] on the hit it stopped at. It used to
 /// do the opposite, on the reasoning that the newest hits win and that this
@@ -210,7 +219,7 @@ pub struct WatchpointHit {
 /// full-looking list whose beginning is missing, so a question about *order* is
 /// answered wrongly rather than incompletely. Keeping the oldest makes what
 /// survives a correct prefix.
-const MAX_PENDING_HITS: usize = 64;
+const MAX_PENDING_HITS: usize = 4096;
 
 /// A set of exact-address watchpoints plus a FIFO queue of hits.
 ///
@@ -547,7 +556,7 @@ mod tests {
         }
         assert_eq!(wp.pending_hits(), MAX_PENDING_HITS);
 
-        // The queue is hits 0..64 in the order they fired.
+        // The queue is the first MAX_PENDING_HITS hits, in the order they fired.
         for i in 0..MAX_PENDING_HITS as u32 {
             let hit = wp.take_hit().unwrap();
             assert_eq!(hit.value, i, "hit {i} is not where it fired");

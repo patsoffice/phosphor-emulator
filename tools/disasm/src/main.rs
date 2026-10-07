@@ -273,7 +273,8 @@ enum Command {
         /// E.g. `0:0x87cf:w`, `0:0x4000:w:=4E5F`, `1:0x20:w:chg`.
         /// Every spec's hit count, zero included, is reported on stderr when the
         /// run ends: a watch on the wrong CPU is a common and otherwise silent
-        /// mistake.
+        /// mistake. Runs the per-cycle loop, which drains every hit as it fires
+        /// (bound long runs with `--from-frame`).
         #[arg(long)]
         watch: Option<String>,
         /// Instruction-trace these CPU(s): comma-separated `<name|idx>[:regs]`
@@ -286,7 +287,7 @@ enum Command {
         /// (e.g. `0:0xF000`). Also switches to the per-cycle loop.
         #[arg(long)]
         break_pc: Option<String>,
-        /// Stop at the first watchpoint hit (per-cycle loop).
+        /// Stop at the first watchpoint hit.
         #[arg(long)]
         stop_on_watch: bool,
         /// Detect hangs: report a CPU whose PC stays in a small window for

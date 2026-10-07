@@ -260,11 +260,14 @@ written by a *sub*-CPU, not the main one — a single-CPU watch would silently
 catch nothing. (On galaga, `0x9100` is written mostly by CPU 1, not CPU 0.) Each
 hit's `cpu` field says which CPU fired; use `watch_cpu` to target one
 deliberately. `hits()` accumulates across a whole run (hits are drained after
-each frame/step so a hot address doesn't overflow the machine's 64-entry queue);
-a single frame can still drop hits past 64, so `step()` gives exact capture.
+each frame/step so a hot address doesn't overflow the machine's 4096-entry
+queue); a single frame can still drop hits past 4096, so `step()` gives exact
+capture. The queue was 64 entries until a 960-cell tilemap watch (about 2000
+writes a frame) showed how little that held.
 
-**Past 64 in a frame the queue stops accepting hits, and `dropped` says so.**
-What survives is the oldest 64, in the order they fired, so a capture is always
+**Past 4096 in a frame the queue stops accepting hits, and `dropped` says so**,
+as does a warning in the log (`RUST_LOG=warn`).
+What survives is the oldest 4096, in the order they fired, so a capture is always
 a correct *prefix*; the hit it stopped at carries a nonzero `dropped` counting
 what was lost right after it. Summing `dropped` over a run is how a script tells
 a complete capture from a truncated one, without measuring the busiest frame by
