@@ -835,6 +835,8 @@ pub mod sinistar;
 pub mod spaceduel;
 pub mod starwars;
 pub mod tempest;
+pub mod timepilot;
+pub mod timepilot_sound;
 pub mod tkg04;
 pub mod toobin;
 pub mod williams;

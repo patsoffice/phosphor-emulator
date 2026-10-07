@@ -1773,3 +1773,20 @@ STILL NOT MODELED:
 
 Promote to `implemented-needs-validation` only with an adapter and scenarios.
 Tracked as phosphor-emulator-fuqb.1."""
+
+[[target]]
+id = "timepilot-output"
+machines = ["timepilot"]
+device = "machines/src/timepilot_sound.rs"
+status = "partial"
+notes = """
+EXAMINED. KT-5112-2B sound board schematic, transcribed at
+docs/schematics/timepilot-sound.md.
+
+Modeled: a per-channel RC lowpass on all six AY channels with the program's
+capacitor select (220 nF / 47 nF legs, MAME flt_rc LOWPASS_3R values), the
+0.60 per-channel mix gains, and the LA4460 mute. Not modeled: the 741
+summing stages and output amplifier, the volume pot, or the speaker coupling.
+The 4066-switched voice routing on the sheet is represented by MAME's
+per-channel switched-capacitor model; the two readings have not been
+reconciled gate by gate."""
