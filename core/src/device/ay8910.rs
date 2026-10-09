@@ -32,14 +32,47 @@
 use crate::audio::{AudioResampler, host_sample_rate};
 use phosphor_macros::Saveable;
 
-/// AY-8910 DAC volume table (logarithmic, ~3 dB per step).
+/// A real AY-3-8910's output at each amplitude, in volts: Matthew Westcott's
+/// December 2001 measurements (channel C held at a constant level, read pin to
+/// ground at each of the sixteen amplitudes, with the chip in a ZX Spectrum's
+/// sound circuit; placed in the public domain on comp.sys.sinclair).
 ///
-/// Level 0 produces silence (zero_is_off characteristic of the AY-8910).
-/// Each subsequent level is approximately √2 (3.01 dB) louder than the previous.
-/// Scaled so three channels at maximum volume use ~75% of i16 range.
-const VOLUME_TABLE: [i32; 16] = [
-    0, 64, 91, 128, 181, 256, 362, 512, 724, 1024, 1448, 2048, 2896, 4096, 5793, 8192,
+/// The datasheet's ideal is 3 dB per step, a 45 dB range. The chip is not
+/// that: its output stage compresses, so above the resting 1.147V level 14
+/// sits 1.7 dB under the top, level 8 is 17.6 dB under, and level 1 is 39.6
+/// dB under. Notes played at middle amplitudes, and every envelope's tail,
+/// are several dB louder than the ideal curve makes them.
+///
+/// The curve does depend on what the pin drives, and these were read in one
+/// circuit. Nothing measured says how it moves on another board's load, so
+/// every board takes this shape rather than an extrapolation of it.
+const MEASURED_VOLTS: [f64; 16] = [
+    1.147, 1.162, 1.169, 1.178, 1.192, 1.213, 1.238, 1.299, 1.336, 1.457, 1.573, 1.707, 1.882,
+    2.06, 2.32, 2.58,
 ];
+
+/// What the top amplitude (15) reads in the chip's output units.
+pub const FULL_SCALE: i32 = 8192;
+
+/// The measured swing from a channel at rest to amplitude 15, in volts:
+/// what [`FULL_SCALE`] stands for. A board relating the chip to its other
+/// sources in volts starts here.
+pub const FULL_SCALE_VOLTS: f64 = MEASURED_VOLTS[15] - MEASURED_VOLTS[0];
+
+/// The output level for each amplitude: the measured swing above the resting
+/// level, amplitude 15 at [`FULL_SCALE`]. A channel off (tone low, or
+/// amplitude 0) reads 0, the resting voltage being a DC offset every board
+/// couples out.
+const VOLUME_TABLE: [i32; 16] = {
+    let mut table = [0i32; 16];
+    let mut n = 1;
+    while n < 16 {
+        let swing = (MEASURED_VOLTS[n] - MEASURED_VOLTS[0]) / FULL_SCALE_VOLTS;
+        table[n] = (swing * FULL_SCALE as f64 + 0.5) as i32;
+        n += 1;
+    }
+    table
+};
 
 /// AY-8910 Programmable Sound Generator.
 ///
@@ -65,7 +98,7 @@ const VOLUME_TABLE: [i32; 16] = [
 /// boards that pair their chips' samples tick by tick (SSIO, Konami) rely on
 /// that. The cost is up to eight clocks of latency, about 5 us.
 #[derive(Saveable)]
-#[save_version(3)]
+#[save_version(4)]
 pub struct Ay8910 {
     registers: [u8; 16],
     address_latch: u8,
@@ -80,7 +113,7 @@ pub struct Ay8910 {
     noise_lfsr: u32, // 17-bit LFSR
 
     // Envelope generator
-    envelope_counter: u16,
+    envelope_counter: u32,
     envelope_step: i16,
     envelope_attack: u8, // 0x00 or 0x0F (XOR mask for volume inversion)
     envelope_alternate: bool,
@@ -321,6 +354,14 @@ impl Ay8910 {
         self.channel_resamplers[ch].fill_audio(buffer)
     }
 
+    /// Samples waiting on each channel output, the same for all three. A
+    /// board that drains a sample at a time can test this rather than call
+    /// [`Self::fill_channel_audio`] three times on every clock: the chip only
+    /// emits at the end of a group of eight.
+    pub fn channel_samples_buffered(&self) -> usize {
+        self.channel_resamplers[0].buffered()
+    }
+
     /// Reset the PSG to initial state.
     pub fn reset(&mut self) {
         self.registers = [0; 16];
@@ -379,9 +420,12 @@ impl Ay8910 {
             }
         }
 
-        // Envelope generator: count up, step envelope on period expiry
+        // Envelope generator: one level per 2 x EP of these ticks, 16 x EP chip
+        // clocks, so a 16-level ramp takes 256 x EP clocks: the datasheet's
+        // f = clock / (256 x EP). (Stepping two levels every EP ticks ran
+        // every envelope four times fast with half its levels.)
         self.envelope_counter += 1;
-        let env_period = self.envelope_period().max(1);
+        let env_period = u32::from(self.envelope_period().max(1)) * 2;
         if self.envelope_counter >= env_period {
             self.envelope_counter = 0;
             self.step_envelope();
@@ -447,7 +491,7 @@ impl Ay8910 {
             return;
         }
 
-        self.envelope_step -= 2;
+        self.envelope_step -= 1;
         if self.envelope_step < 0 {
             if self.envelope_hold {
                 if self.envelope_alternate {
@@ -572,6 +616,23 @@ mod tests {
     use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     #[test]
+    fn volume_table_is_the_measured_curve() {
+        // The swing above rest at each amplitude, against the top one.
+        let db = |n: usize| 20.0 * (f64::from(VOLUME_TABLE[n]) / f64::from(FULL_SCALE)).log10();
+        assert_eq!(VOLUME_TABLE[0], 0, "a channel at rest reads 0");
+        assert_eq!(VOLUME_TABLE[15], FULL_SCALE);
+        assert!((db(14) + 1.73).abs() < 0.05, "{}", db(14));
+        assert!((db(12) + 5.80).abs() < 0.05, "{}", db(12));
+        assert!((db(8) + 17.59).abs() < 0.05, "{}", db(8));
+        assert!((db(1) + 39.6).abs() < 0.1, "{}", db(1));
+        assert!(
+            VOLUME_TABLE.windows(2).all(|w| w[0] < w[1]),
+            "each amplitude is louder than the last: {VOLUME_TABLE:?}"
+        );
+        assert!((FULL_SCALE_VOLTS - 1.433).abs() < 1e-9);
+    }
+
+    #[test]
     fn initial_state_is_silent() {
         let mut ay = Ay8910::new(2_000_000);
         // Run a few ticks to generate samples
@@ -648,21 +709,48 @@ mod tests {
         // Initial volume should be 15 (step=15, attack=0, volume = 15^0 = 15)
         assert_eq!(ay.envelope_volume, 15);
 
-        // Run enough internal clocks to step through the envelope
-        // Each internal clock = 8 chip clocks, envelope steps when counter reaches period
-        for _ in 0..8 {
+        // One level per 16 x EP chip clocks: at EP = 1, 15 clocks leave the
+        // level alone and the 16th steps it 15 -> 14.
+        for _ in 0..15 {
             ay.tick();
         }
-        // After 1 internal clock, envelope should have stepped: 15 -> 13
-        assert_eq!(ay.envelope_volume, 13);
+        assert_eq!(ay.envelope_volume, 15);
+        ay.tick();
+        assert_eq!(ay.envelope_volume, 14);
 
-        // Run more to complete the envelope cycle (8 steps to reach 0)
-        for _ in 0..(7 * 8) {
+        // Fourteen more single-level steps reach 0. Shape 0 then holds there;
+        // the hold latches on the step after, the one that would pass 0.
+        for _ in 0..(14 * 16) {
             ay.tick();
         }
-        // Should be holding at 0
+        assert_eq!(ay.envelope_volume, 0);
+        for _ in 0..16 {
+            ay.tick();
+        }
         assert_eq!(ay.envelope_volume, 0);
         assert!(ay.envelope_holding);
+    }
+
+    #[test]
+    fn a_repeating_envelope_cycles_at_clock_over_256_ep() {
+        // Shape 0x0C (sawtooth, repeating) at EP = 3: one full 16-level ramp
+        // is 256 x 3 = 768 chip clocks, so the level is back where it started.
+        let mut ay = Ay8910::new(2_000_000);
+        for (reg, value) in [(11, 3), (12, 0), (13, 0x0C)] {
+            ay.address_write(reg);
+            ay.data_write(value);
+        }
+        let start = ay.envelope_volume;
+        let mut seen = [false; 16];
+        for _ in 0..768 {
+            ay.tick();
+            seen[ay.envelope_volume as usize] = true;
+        }
+        assert_eq!(ay.envelope_volume, start);
+        assert!(
+            seen.iter().all(|&s| s),
+            "every one of the 16 levels: {seen:?}"
+        );
     }
 
     #[test]

@@ -293,6 +293,14 @@ impl TimePilotSound {
         b.ay[0].tick();
         b.ay[1].tick();
 
+        // A chip emits only at the end of a group of eight of its clocks, so
+        // most cycles there is nothing to drain; checking first spares six
+        // empty drains per cycle.
+        if b.ay.iter().all(|chip| chip.channel_samples_buffered() == 0) {
+            b.clock += 1;
+            return;
+        }
+
         // Both AYs share one clock, so all six channels produce the same
         // count; each side is still drained separately so a phase slip degrades
         // to a silent side rather than a stuck one.

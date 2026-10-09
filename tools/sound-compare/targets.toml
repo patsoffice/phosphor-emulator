@@ -689,6 +689,12 @@ notes = """
 The discrete output-filter controls. Filter selection is latched but nothing
 models what it switches. Phase 8 item 4.
 
+The board's output now passes a 20 Hz DC blocker, standing in for a coupling
+capacitor that every speaker path has but whose place and value on this board
+nobody has read. It went in when the AY core's measured volume curve raised
+Scramble's DC offset past the audio sanity limit; it is not a reading of the
+board, and this row stays `missing`.
+
 This is the ONLY analog path these three boards have, and the row that used to
 put Scramble and Scobra on the Galaxian sound board was simply wrong. They run
 `KonamiSound`: a second Z80 with two AY-8910s behind an 8255 PPI, which is not a

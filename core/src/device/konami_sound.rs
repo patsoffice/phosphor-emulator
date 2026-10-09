@@ -45,7 +45,7 @@
 //! ports are swapped (data on `A&0x40`, address on `A&0x80`); and the timer read
 //! has its B3/B5 bits swapped (`frogger_sound_timer_r`).
 
-use crate::audio::{AudioResampler, host_sample_rate};
+use crate::audio::{AudioResampler, DcBlocker, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::{AccessKind, AddressSpace16, Bus, BusMaster};
 use crate::cpu::Cpu;
@@ -172,6 +172,14 @@ struct KonamiSoundBus {
     // Total sound-CPU cycles (drives the timer).
     #[save(id = 10)]
     clock: u64,
+
+    /// The coupling every speaker path has somewhere: the AY outputs swing
+    /// from ground up, so their sum carries a DC level that moves with the
+    /// amplitudes the program sets. Where the board's coupling capacitor sits
+    /// and its value are not transcribed (no schematic for this board is in
+    /// the repository), so the corner is the shared 20 Hz default.
+    #[save(id = 11)]
+    coupling: DcBlocker,
 }
 
 impl KonamiSound {
@@ -201,6 +209,7 @@ impl KonamiSound {
                 frogger: false,
                 resampler: AudioResampler::new(cpu_clock_hz, host_sample_rate() as u64),
                 clock: 0,
+                coupling: DcBlocker::new(host_sample_rate()),
             },
         }
     }
@@ -316,12 +325,17 @@ impl KonamiSound {
         if n0 > 0 || n1 > 0 {
             let s0 = if n0 > 0 { buf0[0] as i32 } else { 0 };
             let s1 = if n1 > 0 { buf1[0] as i32 } else { 0 };
-            let mixed = if self.bus.mute {
-                0
+            // The mute bit silences the sources ahead of the coupling, so the
+            // blocker settles back from whatever level they last held.
+            let sum = if self.bus.mute {
+                0.0
             } else {
-                ((s0 + s1) / self.bus.num_ay as i32).clamp(-32767, 32767) as i16
+                (s0 + s1) as f32 / self.bus.num_ay as f32
             };
-            self.bus.resampler.push_sample(mixed);
+            let coupled = self.bus.coupling.process(sum);
+            self.bus
+                .resampler
+                .push_sample(coupled.clamp(-32767.0, 32767.0) as i16);
         }
 
         self.bus.clock += 1;
@@ -346,6 +360,7 @@ impl KonamiSound {
         self.bus.mute = false;
         self.bus.filter = 0;
         self.bus.resampler.reset();
+        self.bus.coupling.reset();
         self.bus.clock = 0;
     }
 }
