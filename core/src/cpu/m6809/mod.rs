@@ -72,6 +72,12 @@ pub struct M6809 {
     /// True when the bus HALT line is asserted (TSC/RDY logic)
     #[save(id = 11)]
     pub(crate) halted: bool,
+    /// Konami-1 opcode decryption (Gyruss sub CPU): opcode fetches are XORed
+    /// by address bits 1 and 3, data reads never. Saved: a load must restore
+    /// the same CPU the save was taken on. `default` keeps pre-Konami saves
+    /// loading as plain 6809s.
+    #[save(id = 12, default)]
+    pub(crate) konami: bool,
 
     // Execution temporaries — not saved, reset to defaults on load
     #[save_skip(default = ExecState::Fetch)]
@@ -139,6 +145,7 @@ impl M6809 {
             cc: 0,
             nmi_previous: false,
             halted: false,
+            konami: false,
             state: ExecState::Fetch,
             opcode: 0,
             scratch: 0,
@@ -149,6 +156,47 @@ impl M6809 {
             indexed_pc_offset: 0,
             reset_cycles: 0,
             resume_delay: 0,
+        }
+    }
+
+    /// Enable Konami-1 opcode decryption (Gyruss sub CPU).
+    ///
+    /// The Konami-1 is a 6809 with scrambled opcodes: every opcode fetch is
+    /// XORed by a value selected from address bits 1 and 3, while data reads
+    /// pass through untouched (MAME `konami1`, Olivier Galibert). Gyruss sets
+    /// no encryption boundary, so the cipher applies at every address.
+    pub fn set_konami_decryption(&mut self, enabled: bool) {
+        self.konami = enabled;
+    }
+
+    /// One opcode-fetch byte, decrypted when Konami-1 mode is on.
+    ///
+    /// Call sites are exactly the opcode bytes: the fetch state plus the two
+    /// page-prefix second bytes. Operands and postbytes read through
+    /// `bus.read` directly and are never decoded.
+    #[inline]
+    fn fetch_opcode<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &self,
+        bus: &mut B,
+        master: BusMaster,
+        addr: u16,
+    ) -> u8 {
+        let val = bus.read(master, addr);
+        if self.konami {
+            val ^ Self::konami_xor(addr)
+        } else {
+            val
+        }
+    }
+
+    /// Konami-1 fetch XOR for one address (MAME `konami1::read_opcode`).
+    #[inline]
+    fn konami_xor(addr: u16) -> u8 {
+        match addr & 0x0A {
+            0x02 => 0x82,
+            0x08 => 0x28,
+            0x0A => 0x88,
+            _ => 0x22,
         }
     }
 
@@ -277,7 +325,7 @@ impl M6809 {
                     return; // Interrupt taken, state changed to Interrupt sequence
                 }
 
-                self.opcode = bus.read(master, self.pc);
+                self.opcode = self.fetch_opcode(bus, master, self.pc);
                 self.pc = self.pc.wrapping_add(1);
                 self.state = ExecState::Execute(self.opcode, 0);
             }
@@ -313,7 +361,7 @@ impl M6809 {
             // Page 2 Prefix (0x10)
             0x10 => {
                 if cycle == 0 {
-                    let next_op = bus.read(master, self.pc);
+                    let next_op = self.fetch_opcode(bus, master, self.pc);
                     self.pc = self.pc.wrapping_add(1);
                     self.state = ExecState::ExecutePage2(next_op, 0);
                 }
@@ -322,7 +370,7 @@ impl M6809 {
             // Page 3 Prefix (0x11)
             0x11 => {
                 if cycle == 0 {
-                    let next_op = bus.read(master, self.pc);
+                    let next_op = self.fetch_opcode(bus, master, self.pc);
                     self.pc = self.pc.wrapping_add(1);
                     self.state = ExecState::ExecutePage3(next_op, 0);
                 }
