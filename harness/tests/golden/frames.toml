@@ -177,6 +177,22 @@ size = [256, 240]
 frame = "sha256:81abe693819036e15d5925eb23f3f7b44ab423bf86407e1cfcbf3e82c263ac43"
 
 [[frame]]
+machine = "gyruss"
+frames = 1800
+shows = "Attract mode title screen: the 1-UP / HI-SCORE header over 00 and 10000, the large outlined GYRUSS logo, the SCORE RANKING TABLE from 1ST 10000 to 5TH 4300 with default initials, the (C) KONAMI 1983 line, and CREDIT 0 at bottom right. The hyphens in 1-UP and HI-SCORE, the 8800 second-place score and the K.O / N.A / M.I / O.O / RYO initials were read back from the tilemap against the tile ROM, since the 8-pixel type is past reliable reading from the PNG alone."
+size = [224, 256]
+frame = "sha256:d35c7be7c8262cccc17b4fb3651d7d6116b1a02513a51b67621891c2e885f28f"
+
+[[frame]]
+machine = "gyruss"
+id = "gameplay"
+frames = 7000
+shows = "Recorded gameplay at movie frame 7000, stage 3 with score and HI-SCORE both 21300 and two ships in reserve at bottom left: the player's red and white ship at the bottom of the ring, an orange explosion ring and a cluster of blue and orange satellites spread across the lower half, two green shots, and the blue starfield converging on the center. The 1-UP label is absent because it blinks during play. This pins sprites in both banks under rotation and flip, and the sub CPU's cooked sprite list under real gameplay, which attract mode alone does not reach. Chosen from probes at 2500, 4000, 5500, 7000 and 8200 as the busiest frame; the movie is 8234 frames."
+movie = "movies/gyruss-1791425783.phmi"
+size = [224, 256]
+frame = "sha256:cf446ca2988ed50c27cbfbc771d7e4edb1b824c2a9d12d45fbb8a6201d44e94b"
+
+[[frame]]
 machine = "irobot"
 frames = 1800
 shows = "Attract mode: the EYE OPEN DONT JUMP instruction panel beside the red-and-blue eye, over the blue polygon playfield."

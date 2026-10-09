@@ -1796,3 +1796,64 @@ summing stages and output amplifier, the volume pot, or the speaker coupling.
 The 4066-switched voice routing on the sheet is represented by MAME's
 per-channel switched-capacitor model; the two readings have not been
 reconciled gate by gate."""
+
+[[target]]
+id = "gyruss-output"
+machines = ["gyruss"]
+device = "machines/src/gyruss_sound.rs"
+status = "implemented-unvalidated"
+notes = """
+EXAMINED and MODELED (phosphor-emulator-16kg): the sound schematic from the
+Gyruss manual, transcribed at docs/schematics/gyruss-sound.md, re-read on
+2026-10-08 from the native 768 ppi page image with every bus traced end to
+end.
+
+Modeled: the stereo mix as the passive loaded buses the sheet draws. Each
+filtered voice (11D, 12D) is AY, 1K, a node with its port-B-switched 0.047 and
+0.22 uF capacitors (each holding its own charge while switched out), then 2.2K
+to the bus, so it meets the bus through 3.2K, not 2.2K; the pole is the
+capacitor against 1K || 2.2K. Unfiltered voices (8B, 9B, 10B) through 3.3K.
+The DAC is the 8039's P1 into an R-2R ladder (assumed 4V port high) and a
++5V-only 324 follower that flattens above 3.5V, through 4.7K. The 200-ohm VRs
+load each bus (wipers at full), C36/C37 (0.1 uF) sit at each amplifier input
+against the bus's own resistance (about 11-12 kHz), and a 20 Hz DC blocker
+stands for the amplifier's 100 uF feedback capacitor. Left = 12D + 8B + DAC
+(6F, SPL); right = 11D + 9B + 10B (6E). The presentation gain is full scale
+over the loudest loaded bus; nothing is fitted to a recording.
+
+ASSUMED: the VR wipers at full; the 8039 port high level (4V); the AY's
+output resistance (356 ohms) and that its measured 1.433V swing at amplitude
+15 (read in another circuit; see the AY core) is what drives these legs; the
+RTB-1.5-2F mono link between the buses absent; the AY3 port-A timer nibble.
+
+Compared against MAME 0.289 on one scripted session (power on, coin at frame
+600, start at 700, 3600 frames; envelope correlation 0.946 at zero lag), both
+high-passed at 30 Hz. MAME's left channel carries sub-audio DC steps (3-14 Hz,
+a held -25 dBFS after a sound ends) that the board's feedback capacitor would
+remove. The comparison found the 8039 taking only its first command, an
+MCS-48 core bug (interrupt entry cleared the EN I enable), now fixed. With
+it, AY-dominated passages sit 7.5-13.6 dB under MAME (our gain is a
+presentation choice), and DAC-dominated ones about 8 dB further down. MAME's
+driver (checked in both the 0.148 source under cross-validation/ and current
+source) scales its DAC input as 256 * 4/5 per code, while its AY streams arrive
+as a fraction of Vcc times 32768, so 32768 is 5V and DAC code 255 reads as
+about 8V: 6 dB over the 4V its own comment states. That accounts for most of
+the gap.
+
+The AY core's ideal 3 dB per step volume table was the other gap: a real
+chip compresses, levels 1-13 sitting 3-7 dB above the ideal. The core now
+uses Matthew Westcott's 2001 measured levels directly, for every board. (MAME
+extrapolates those to each board's load through a resistor network. That
+network was fit inside a simulation of the Spectrum's sound circuit, and read
+as a plain load to ground it misses the measured volts by 11-51 percent even
+at 2K, so the load dependence it implies is not evidence and was not
+adopted.) Trying the loaded curve here had narrowed the right channel's
+segment spread from 6 dB to about 3.
+
+The player's shot is an AY envelope used as the waveform (R13 = 0x0E, a
+repeating triangle; amplitudes in envelope mode; tone periods 0; R11 swept
+0x0F-0x16), so it exposed an AY core bug: envelopes stepped two levels every
+EP ticks, four times the datasheet's clock / (256 x EP) with half its levels.
+Fixed in the core for every board. Ten shots scripted in both emulators: the
+fundamental went from 656 Hz to 162 Hz, MAME's figure, on all three measured. Promote to
+`implemented-needs-validation` only with an adapter and scenarios."""

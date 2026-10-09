@@ -798,6 +798,8 @@ pub mod gfx_registry;
 pub mod gottlieb;
 pub mod gravitar;
 pub mod gridlee;
+pub mod gyruss;
+pub mod gyruss_sound;
 pub(crate) mod input_defaults;
 pub mod irobot;
 pub mod joust;
