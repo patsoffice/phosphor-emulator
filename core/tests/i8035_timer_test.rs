@@ -230,8 +230,45 @@ fn test_external_interrupt_entry() {
     tick(&mut cpu, &mut bus, 3);
     assert_eq!(cpu.pc, 0x003); // external INT vector
     assert!(cpu.in_interrupt);
-    assert!(!cpu.int_enabled); // disabled during interrupt
+    // Entry blocks nesting through the in-progress latch alone; the enable
+    // set by EN I survives.
+    assert!(cpu.int_enabled);
     assert_eq!(cpu.psw & 0x07, 1); // SP pushed
+}
+
+#[test]
+fn test_external_interrupt_retaken_after_retr_without_en_i() {
+    // The Gyruss SFX handler: enable once, and return with RETR each time.
+    // A second request after RETR must be taken with no EN I in between.
+    let mut cpu = I8035::new();
+    let mut bus = TestBus::new();
+    bus.load(0x000, &[0x05, 0x00, 0x00, 0x04, 0x10]); // EN I; NOP; JMP 0x010
+    bus.load(0x003, &[0x04, 0x20]); // vector: JMP 0x020
+    bus.load(0x010, &[0x04, 0x10]); // idle: JMP 0x010
+    bus.load(0x020, &[0x93]); // handler: RETR
+    tick(&mut cpu, &mut bus, 4);
+    assert!(cpu.int_enabled);
+
+    for request in 0..2 {
+        bus.irq = true;
+        let mut entered = false;
+        for _ in 0..20 {
+            tick(&mut cpu, &mut bus, 1);
+            if cpu.in_interrupt {
+                entered = true;
+                break;
+            }
+        }
+        assert!(entered, "request {request} was not taken");
+        bus.irq = false;
+        for _ in 0..20 {
+            tick(&mut cpu, &mut bus, 1);
+            if !cpu.in_interrupt {
+                break;
+            }
+        }
+        assert!(!cpu.in_interrupt, "request {request}: RETR did not return");
+    }
 }
 
 // =============================================================================

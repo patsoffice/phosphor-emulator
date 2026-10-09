@@ -145,6 +145,17 @@ impl I8035 {
         }
     }
 
+    /// An 8039: the 128-byte-RAM MCS-48 variant (Gyruss SFX MCU).
+    ///
+    /// Same core as the 8035; only the RAM mask differs (0x7F vs 0x3F). The
+    /// mask is saved state, so a save carries its own variant.
+    pub fn new_8039() -> Self {
+        Self {
+            ram_mask: 0x7F, // 128 bytes for 8039
+            ..Self::new()
+        }
+    }
+
     // --- Flag helpers ---
 
     #[inline]
@@ -685,9 +696,12 @@ impl I8035 {
     ) {
         match cycle {
             0 => {
-                // Push PC and PSW to internal stack
+                // Push PC and PSW to internal stack. Only the in-progress
+                // latch blocks a second interrupt; the EN I / DIS I enables
+                // are untouched, so after RETR a still-enabled source is taken
+                // again with no EN I in between (the Gyruss SFX program enables
+                // once at reset and relies on exactly that).
                 self.push_pc_psw();
-                self.int_enabled = false;
                 self.in_interrupt = true;
                 self.state = ExecState::Interrupt(1);
             }
