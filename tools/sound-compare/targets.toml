@@ -1070,10 +1070,10 @@ appears here and not there."""
 
 [[target]]
 id = "namco-mappy-output"
-machines = ["mappy"]
+machines = ["mappy", "digdug2"]
 status = "partial"
 notes = """
-MODELED 2026-10-10 in machines/src/mappy.rs, as `MappyAudio` on the
+MODELED 2026-10-10 in machines/src/namco_mappy.rs, as `MappyAudio` on the
 DiscreteCircuit runtime, from the CPU board drawing (sheet 8-5, transcribed in
 docs/schematics/mappy-board.md).
 

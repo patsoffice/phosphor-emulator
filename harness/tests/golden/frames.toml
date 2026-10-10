@@ -102,6 +102,13 @@ size = [224, 288]
 frame = "sha256:4b763923d1d8318e5dc8eac6169cdc099f656c8e67aa2d6be0ea10260a84be13"
 
 [[frame]]
+machine = "digdug2"
+frames = 1800
+shows = "Attract mode: a demo island under the 1UP 00 and HIGH SCORE 20000 header, with Dig Dug, Pooka and Fygar sprites on the green field, red fault lines, and CREDIT 0 in the footer. The header and footer strips, the island colors, and the sprite transparency are what this pins; the demo play itself moves whenever the machine's state evolves differently."
+size = [224, 288]
+frame = "sha256:dee69eaa07752b4d5726e102b1a8cf4be585ca986f4bad1d855804e35faaa904"
+
+[[frame]]
 machine = "donkeykong"
 frames = 1800
 shows = "Attract mode: the DONKEY KONG title in blue block letters with Kong beneath it and the 1981 Nintendo of America copyright."

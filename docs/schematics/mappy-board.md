@@ -188,10 +188,11 @@ disable bit and X bit 8. Position math and the one-line line-buffer
 delay match Super Pac-Man (`docs/schematics/sprite-list-scan.md`
 covers the delay). Later slots draw over earlier ones.
 
-Sprite pixels are 4 bits wide. The transparent set is every pen whose
-LUT nibble equals pen 15's nibble in that color (MAME's transpen mask
-rule): the comparison, not a fixed pen, because the PAL decodes the
-LUT outputs and pen 15's color varies by color entry. Chars have no
+Sprite pixels are 4 bits wide. A sprite pixel is transparent when its
+LUT nibble is 15 (MAME's transpen mask with transcolor 15: the argument
+is a color value, not a pen index). Mappy's low colors map pen 15 to
+nibble 15, which is why matching pen 15's nibble looked right here and
+broke on Dig Dug II, whose LUT mostly maps it to 0. Chars have no
 transparency: the playfield is opaque.
 
 ### 7.5 GFX decode orders
@@ -359,12 +360,14 @@ Bit 2 cabinet (upright 0x04, cocktail 0x00), bit 3 service mode (off
 
 ## 13. What the emulator does with this
 
-`machines/src/mappy.rs` follows `superpacman.rs`: two M6809s beside a
-board holding the shared address space, MappyVideo (scanline
+`machines/src/namco_mappy.rs` follows `superpacman.rs`: two M6809s
+beside a board holding the shared address space, MappyVideo (scanline
 composited), Namco15xx, a Mappy audio stage (linear 99XX stand-in, C29
-pole, flat amp), and two Namco58s. DIPs are pin levels with the tables
-from section 10. Everything in section 14's list is MAME-anchored or
-assumed in the code and labeled as such.
+pole, flat amp), and two Namco58s. DIPs are pin levels with the
+tables from section 10. Everything in section 14's list is
+MAME-anchored or assumed in the code and labeled as such. Dig Dug II
+shares the board through `MappyVariant::DigDug2`; see
+`docs/schematics/digdug2-board.md`.
 
 ## 14. NOT FOUND (consolidated)
 

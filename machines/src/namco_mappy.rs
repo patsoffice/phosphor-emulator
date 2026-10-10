@@ -1,4 +1,11 @@
-//! Mappy (Namco, 1983).
+//! The Namco Mappy board: Mappy (Namco, 1983) and Dig Dug II (Namco, 1985).
+//!
+//! One board, two games. Dig Dug II runs on Mappy hardware (no schematics of
+//! its own are known): same CPUs, maps, video pipeline, sound chain and latch,
+//! with its own ROMs, a 56XX in place of the second 58XX, twice the sprite
+//! ROM, and the program ROM filling 0x8000-0xFFFF instead of 0xA000-0xFFFF.
+//! The per-game differences are a [`MappyVariant]` the board is constructed
+//! with; everything else below is shared.
 //!
 //! # Schematics
 //!
@@ -22,16 +29,16 @@
 //! the 15XX's eight voices behind a volume pot, and the playfield is a
 //! 36x60 scrolling tilemap with fixed side strips.
 //!
-//! Memory map, main CPU:
+//! Memory map, main CPU (both games; the program ROM window differs):
 //! ```text
 //!   0x0000-0x0fff  Video RAM: tile codes 0x000-0x7ff, attributes 0x800-0xfff
 //!   0x1000-0x27ff  Work RAM, with the sprite registers at 0x1780, 0x1f80, 0x2780
 //!   0x3800-0x3fff  Scroll, write-only: the value is the address (offset >> 3)
 //!   0x4000-0x43ff  Sound RAM, shared; 0x4000-0x403f are the 15XX's registers
-//!   0x4800-0x480f  58XX #0 (16 nibbles)    0x4810-0x481f  58XX #1
+//!   0x4800-0x480f  MCU #0: 58XX on both    0x4810-0x481f  MCU #1: 58XX/56XX
 //!   0x5000-0x500f  LS259 latch: line = A1-A3, data = A0
-//!   0x8000         Watchdog reset (not modeled)
-//!   0xa000-0xffff  Program ROM (1D, 1C, 1B)
+//!   0x8000         Watchdog reset on Mappy (not modeled); ROM on Dig Dug II
+//!   0xa000-0xffff  Program ROM on Mappy (1D, 1C, 1B); 0x8000-0xffff on DD2
 //! ```
 //!
 //! Memory map, sound CPU:
@@ -65,7 +72,7 @@ use phosphor_core::device::discrete::{
     CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, NodeId, OutputGain,
 };
 use phosphor_core::device::namco_15xx::{Namco15xx, VOICES};
-use phosphor_core::device::namco56::InPort;
+use phosphor_core::device::namco56::{InPort, Namco56};
 use phosphor_core::device::namco58::Namco58;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
@@ -119,6 +126,26 @@ const VBLANK_LINE: u64 = 224;
 const LATCH_SUB_INT_ON: u8 = 0x01;
 const LATCH_MAIN_INT_ON: u8 = 0x02;
 const LATCH_SUB_RUN: u8 = 0x20;
+
+/// Which game the board runs. The three things that differ are the program
+/// ROM window (0xA000 versus 0x8000), the DIP MCU at 0x4810 (58XX versus
+/// 56XX), and the mix of live inputs and DIPs on that MCU's port D.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Saveable)]
+#[repr(u8)]
+pub enum MappyVariant {
+    Mappy = 0,
+    DigDug2 = 1,
+}
+
+impl MappyVariant {
+    /// Where the program ROM window starts (it always runs to 0xFFFF).
+    fn rom_base(self) -> u16 {
+        match self {
+            MappyVariant::Mappy => 0xA000,
+            MappyVariant::DigDug2 => 0x8000,
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
@@ -236,7 +263,8 @@ pub struct MappyVideo {
     /// 8x8 chars, 256 codes. ROM-derived.
     #[save_skip]
     chars: GfxCache,
-    /// 16x16 sprites, 128 codes. ROM-derived.
+    /// 16x16 sprites, up to 256 codes (128 on Mappy, 256 on Dig Dug II).
+    /// ROM-derived.
     #[save_skip]
     sprites: GfxCache,
     /// 32 palette entries. ROM-derived.
@@ -270,7 +298,7 @@ impl MappyVideo {
     pub fn new() -> Self {
         Self {
             chars: GfxCache::new(256, 8, 8),
-            sprites: GfxCache::new(128, 16, 16),
+            sprites: GfxCache::new(256, 16, 16),
             palette: [(0, 0, 0); 32],
             char_lut: [0; 256],
             sprite_lut: [0; 256],
@@ -290,9 +318,10 @@ impl MappyVideo {
         self.chars = decode_gfx(&inverted, 0, 256, &MAPPY_CHAR_LAYOUT);
     }
 
-    /// Load the sprite ROMs: two 8K chips back-to-back, de-interleaved
-    /// even/odd into the 16K image the layout decodes (MAME
-    /// ROM_LOAD16_BYTE: even bytes from 3M, odd bytes from 3N).
+    /// Load the sprite ROMs: two chips back-to-back (8K each on Mappy, 16K
+    /// on Dig Dug II), de-interleaved even/odd into the image the layout
+    /// decodes (MAME ROM_LOAD16_BYTE: even bytes from 3M, odd bytes from
+    /// 3N). The code count comes from the ROM size: 128 or 256.
     pub fn load_sprite_rom(&mut self, data: &[u8]) {
         let half = data.len() / 2;
         let mut image = vec![0u8; data.len()];
@@ -300,7 +329,8 @@ impl MappyVideo {
             image[2 * i] = data.get(i).copied().unwrap_or(0);
             image[2 * i + 1] = data.get(half + i).copied().unwrap_or(0);
         }
-        self.sprites = decode_gfx(&image, 0, 128, &MAPPY_SPRITE_LAYOUT);
+        let codes = (data.len() / 128).min(256);
+        self.sprites = decode_gfx(&image, 0, codes, &MAPPY_SPRITE_LAYOUT);
     }
 
     /// Load the PROMs: 32 bytes of palette (5B), then the 256-entry char
@@ -343,7 +373,7 @@ impl MappyVideo {
     ///
     /// 1. every tile, opaque, columns 2-33 scrolled;
     /// 2. sprites, over everything, a pixel transparent when its lookup
-    ///    nibble equals pen 15's nibble in that color;
+    ///    nibble is 15 (MAME's transpen mask with transcolor 15);
     /// 3. tiles whose attribute bit 6 is set, again, over the sprites.
     ///
     /// The last two are the MPI-4 PAL's and are inferred from the program's
@@ -435,9 +465,6 @@ impl MappyVideo {
             // The program keeps the color byte's high bits clear; masking
             // keeps a stray one inside the table.
             let color = (workram[CODE + offs + 1] & 0x0F) as usize;
-            // Transparent is whatever maps where pen 15 maps (MAME's transpen
-            // mask rule): the PAL decodes the LUT outputs, not the pixel.
-            let transparent = self.sprite_lut[color * 16 + 15];
             let sx = workram[POS + offs + 1] as i32 + 0x100 * (attr1 & 1) as i32 - 40;
 
             let dy = (v - top) as usize;
@@ -459,7 +486,12 @@ impl MappyVideo {
                     }
                     let src = if flip_x { 15 - px } else { px };
                     let pen = self.sprite_lut[color * 16 + pixels[src] as usize];
-                    if pen == transparent {
+                    // Transparent is lookup nibble 15, whatever pixel maps to
+                    // it: `transpen_mask` takes a transcolor, not a pen index.
+                    // (Mappy's low colors map pen 15 to nibble 15, which is why
+                    // matching pen 15's nibble looked right there and broke on
+                    // Dig Dug II, whose LUT mostly maps it to 0.)
+                    if pen == 0x0F {
                         continue;
                     }
                     let x = if flip {
@@ -716,9 +748,14 @@ pub fn run_frame(main: &mut M6809, sub: &mut M6809, board: &mut MappyBoard) {
 // ---------------------------------------------------------------------------
 
 #[derive(BusDebug, DebugTrace, Saveable)]
-#[save_version(1)]
+#[save_version(2)]
 #[save_tlv]
 pub struct MappyBoard {
+    /// Which game runs on this board. Version 2 added it with the Dig Dug II
+    /// bring-up, which also fitted io1 as an Option: a version 1 save fails
+    /// loudly here rather than misreading either.
+    #[save(id = 20)]
+    pub(crate) variant: MappyVariant,
     /// Video, work and sound RAM, and both CPUs' ROMs. Both CPUs share it;
     /// the sound CPU's regions sit at translated addresses (see `build_map`).
     #[debug_map(cpu = 0)]
@@ -739,9 +776,12 @@ pub struct MappyBoard {
     #[debug_device("58XX #0")]
     #[save(id = 5)]
     pub(crate) io0: Namco58,
-    #[debug_device("58XX #1")]
+    /// The DIP MCU at 0x4810: a 58XX on Mappy, a 56XX on Dig Dug II. Exactly
+    /// one is fitted; an Option field is on the wire exactly when it is.
     #[save(id = 6)]
-    pub(crate) io1: Namco58,
+    pub(crate) io1_58: Option<Namco58>,
+    #[save(id = 22)]
+    pub(crate) io1_56: Option<Namco56>,
 
     // Cabinet switches, active-low nibbles as they sit on the 58XX pins.
     /// 58XX #0 port A: coin 1, coin 2, unused, service coin.
@@ -756,6 +796,14 @@ pub struct MappyBoard {
     /// 58XX #0 port D: P1 button, P2 button, start 1, start 2.
     #[save(id = 10)]
     pub(crate) in_buttons: u8,
+    /// Dig Dug II second buttons on MCU #1 port D bits 0-1: P1 drill, P2
+    /// drill. Unused on Mappy.
+    #[save(id = 21)]
+    pub(crate) in_buttons2: u8,
+    /// Dig Dug II service-mode button on MCU #1 port D bit 3. Unused on
+    /// Mappy (its service mode is a DIP).
+    #[save(id = 23)]
+    pub(crate) in_service_mode: bool,
 
     /// DIP bank SW2 at CPU 5B (58XX #1 ports B and C).
     #[save(id = 11)]
@@ -763,7 +811,8 @@ pub struct MappyBoard {
     /// DIP bank SW3 at CPU 5E (58XX #1 port A, through the mux).
     #[save(id = 12)]
     pub(crate) dsw2: u8,
-    /// Cabinet and service mode (58XX #1 port D).
+    /// Cabinet and service mode (MCU #1 port D). On Dig Dug II only bit 2
+    /// is a DIP; bits 0-1 and 3 are the live buttons above.
     #[save(id = 13)]
     pub(crate) dsw0: u8,
 
@@ -792,21 +841,85 @@ pub struct MappyBoard {
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
+/// The fitted DIP MCU at 0x4810, reborrowed for one call. Both chips share
+/// the same call shapes (`read`, `write`, `set_reset`, `run`, `reset` over
+/// [`InPort`]), so this transient enum is the only dispatch the Option pair
+/// needs. It is runtime-only: the fields stay concrete for the save derive.
+enum Io1<'a> {
+    M58(&'a mut Namco58),
+    M56(&'a mut Namco56),
+}
+
+impl Io1<'_> {
+    fn read(&self, addr: u16) -> u8 {
+        match self {
+            Io1::M58(io) => io.read(addr),
+            Io1::M56(io) => io.read(addr),
+        }
+    }
+
+    fn write(&mut self, addr: u16, data: u8) {
+        match self {
+            Io1::M58(io) => io.write(addr, data),
+            Io1::M56(io) => io.write(addr, data),
+        }
+    }
+
+    fn set_reset(&mut self, asserted: bool) {
+        match self {
+            Io1::M58(io) => io.set_reset(asserted),
+            Io1::M56(io) => io.set_reset(asserted),
+        }
+    }
+
+    fn run<F: FnMut(InPort, u8) -> u8>(&mut self, read: F) {
+        match self {
+            Io1::M58(io) => io.run(read),
+            Io1::M56(io) => io.run(read),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Io1::M58(io) => io.reset(),
+            Io1::M56(io) => io.reset(),
+        }
+    }
+}
+
 impl MappyBoard {
-    pub fn new() -> Self {
+    /// The fitted DIP MCU. Exactly one is Some; the constructor fits the
+    /// variant's and there is no path that fits both or neither.
+    fn io1(&mut self) -> Io1<'_> {
+        match (&mut self.io1_58, &mut self.io1_56) {
+            (Some(io), None) => Io1::M58(io),
+            (None, Some(io)) => Io1::M56(io),
+            _ => unreachable!("exactly one DIP MCU is fitted"),
+        }
+    }
+
+    pub fn new(variant: MappyVariant) -> Self {
         let clocks = clock_tree();
         let wsg_dom = clocks.find(Clk::Psg).expect("declared 15XX domain");
+        let (io1_58, io1_56) = match variant {
+            MappyVariant::Mappy => (Some(Namco58::new()), None),
+            MappyVariant::DigDug2 => (None, Some(Namco56::new())),
+        };
         Self {
-            map: Self::build_map(),
+            variant,
+            map: Self::build_map(variant),
             video: MappyVideo::new(),
             wsg: Namco15xx::new(),
             audio: MappyAudio::new(TIMING.cpu_clock_hz),
             io0: Namco58::new(),
-            io1: Namco58::new(),
+            io1_58,
+            io1_56,
             in_coins: 0x0F,
             in_p1: 0x0F,
             in_p2: 0x0F,
             in_buttons: 0x0F,
+            in_buttons2: 0x0F,
+            in_service_mode: false,
             dsw1: DEFAULT_DSW1,
             dsw2: DEFAULT_DSW2,
             dsw0: DEFAULT_DSW0,
@@ -823,9 +936,11 @@ impl MappyBoard {
 
     /// One map for both CPUs. The sound CPU's RAM is the main CPU's sound RAM
     /// at 0x4000, and its ROM is translated to 0x6000, which nothing on the
-    /// main CPU's side decodes.
-    fn build_map() -> AddressSpace16 {
+    /// main CPU's side decodes. The program ROM window starts at 0xA000 on
+    /// Mappy and 0x8000 on Dig Dug II.
+    fn build_map(variant: MappyVariant) -> AddressSpace16 {
         let mut map = AddressSpace16::new();
+        let rom_base = variant.rom_base();
         map.region(
             Region::VideoRam,
             "Video RAM (codes 0x0000, attrs 0x0800)",
@@ -857,8 +972,8 @@ impl MappyBoard {
         .region(
             Region::MainRom,
             "Program ROM",
-            0xA000,
-            0x6000,
+            rom_base,
+            0x1_0000 - u32::from(rom_base),
             AccessKind::ReadOnly,
         );
         map
@@ -932,7 +1047,7 @@ impl MappyBoard {
     /// the scanline drive already visits (MAME uses a 50 us timer for the
     /// same wait). **That latency is a stand-in for the MCU's, not a part on
     /// the board.**
-    fn run_io(&mut self) {
+    pub(crate) fn run_io(&mut self) {
         let (coins, p1, p2, buttons) = (self.in_coins, self.in_p1, self.in_p2, self.in_buttons);
         self.io0.run(|port, _| match port {
             InPort::A => coins,
@@ -941,7 +1056,15 @@ impl MappyBoard {
             InPort::D => buttons,
         });
         let (dsw0, dsw1, dsw2) = (self.dsw0, self.dsw1, self.dsw2);
-        self.io1.run(|port, out_a| match port {
+        // Port D is all DIPs on Mappy; on Dig Dug II only bit 2 is, with
+        // live buttons on bits 0-1 (second buttons) and 3 (service mode).
+        let port_d = match self.variant {
+            MappyVariant::Mappy => dsw0 & 0x0F,
+            MappyVariant::DigDug2 => {
+                (self.in_buttons2 & 0x03) | (dsw0 & 0x04) | (u8::from(!self.in_service_mode) << 3)
+            }
+        };
+        self.io1().run(|port, out_a| match port {
             // The mux on port A: select low reads SW3's low four switches,
             // high its high four.
             InPort::A => {
@@ -953,7 +1076,7 @@ impl MappyBoard {
             }
             InPort::B => dsw1 & 0x0F,
             InPort::C => dsw1 >> 4,
-            InPort::D => dsw0 & 0x0F,
+            InPort::D => port_d,
         });
     }
 
@@ -984,7 +1107,7 @@ impl MappyBoard {
         self.wsg.reset();
         self.audio.reset();
         self.io0.reset();
-        self.io1.reset();
+        self.io1().reset();
         self.latch = 0;
         self.main_irq_pending = false;
         self.sub_irq_pending = false;
@@ -1012,8 +1135,16 @@ impl MappyBoard {
             // 0x3800-0x3FFF is the write-only scroll register.
             0x4000..=0x43FF => self.map.read_backing(addr),
             0x4800..=0x480F => self.io0.read(addr),
-            0x4810..=0x481F => self.io1.read(addr),
-            0xA000..=0xFFFF => self.map.read_backing(addr),
+            0x4810..=0x481F => self.io1().read(addr),
+            // The program ROM window starts at 0xA000 on Mappy (below that
+            // floats high) and 0x8000 on Dig Dug II.
+            0x8000..=0xFFFF => {
+                if addr < 0xA000 && self.variant == MappyVariant::Mappy {
+                    0xFF
+                } else {
+                    self.map.read_backing(addr)
+                }
+            }
             _ => 0xFF,
         }
     }
@@ -1028,7 +1159,7 @@ impl MappyBoard {
             0x3800..=0x3FFF => self.video.set_scroll(((addr - 0x3800) >> 3) as u8),
             0x4000..=0x43FF => self.sound_ram_write(addr - 0x4000, data),
             0x4800..=0x480F => self.io0.write(addr, data),
-            0x4810..=0x481F => self.io1.write(addr, data),
+            0x4810..=0x481F => self.io1().write(addr, data),
             0x5000..=0x500F => self.latch_write(addr),
             _ => {} // 0x8000 watchdog (not modeled), ROM, unmapped
         }
@@ -1077,7 +1208,7 @@ impl MappyBoard {
             3 => self.wsg.set_sound_enabled(bit),
             4 => {
                 self.io0.set_reset(!bit);
-                self.io1.set_reset(!bit);
+                self.io1().set_reset(!bit);
             }
             5 if bit && before & LATCH_SUB_RUN == 0 => self.pending_sub_reset = true,
             _ => {}
@@ -1090,7 +1221,7 @@ const IO_RUN_LINE: u64 = VBLANK_LINE + 1;
 
 impl Default for MappyBoard {
     fn default() -> Self {
-        Self::new()
+        Self::new(MappyVariant::Mappy)
     }
 }
 
@@ -1254,9 +1385,12 @@ pub static MAPPY_SOUND_PROM: RomRegion = RomRegion {
 // `docs/schematics/mappy-board.md` section 10.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_DSW1: u8 = 0xFF;
-const DEFAULT_DSW2: u8 = 0xFF;
-const DEFAULT_DSW0: u8 = 0x0F;
+/// Power-on DIP state, all switches OFF (pin-high). Both games share it:
+// Dig Dug II's bank 2 is entirely unused and its bank 0 carries live buttons
+// that default high, so 0xFF/0xFF/0x0F is still the all-off state.
+pub(crate) const DEFAULT_DSW1: u8 = 0xFF;
+pub(crate) const DEFAULT_DSW2: u8 = 0xFF;
+pub(crate) const DEFAULT_DSW0: u8 = 0x0F;
 
 const DSW1_OPTIONS: &[DipOption] = &[
     DipOption {
@@ -1702,7 +1836,7 @@ impl MappySystem {
         Self {
             main: M6809::new(),
             sub: M6809::new(),
-            board: MappyBoard::new(),
+            board: MappyBoard::new(MappyVariant::Mappy),
         }
     }
 
@@ -1765,7 +1899,7 @@ impl Default for MappySystem {
 crate::impl_board_delegation!(MappySystem, board, TIMING, orientation);
 
 impl MachineCore for MappySystem {
-    crate::machine_core_metadata!("mappy", TIMING, crate::mappy::clock_tree);
+    crate::machine_core_metadata!("mappy", TIMING, crate::namco_mappy::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
@@ -2148,17 +2282,18 @@ mod tests {
     }
 
     #[test]
-    fn the_sprite_transparency_follows_pen_15s_nibble() {
-        // Color 3 maps pen 15 to nibble 7 and pen 0 to nibble 7 as well, so
-        // pen 0 skips; pen 1 maps to nibble 0 and draws. The rule compares
-        // LUT outputs, not pixel values.
+    fn the_sprite_transparency_is_lookup_nibble_15() {
+        // Color 3 maps pen 15 to nibble 7 and pen 0 to nibble 7 as well, but
+        // transparency is nibble 15 itself, not pen 15's nibble: pen 0 draws
+        // and pen 1 (nibble 15) skips. Both pixels distinguish the rules.
         let mut sys = parked();
         let mut p = vec![0u8; 0x220];
-        p[0] = 0x07; // palette 0 red, for the drawn pen
+        p[7] = 0x07; // palette 7 red, for the drawn pen 0
+        p[15] = 0x07; // palette 15 red, so a drawn pen 1 would show
         // Tiles stay black: palette 16 is zero, and char LUT entries are zero.
         p[288 + 3 * 16 + 15] = 0x07;
         p[288 + 3 * 16] = 0x07;
-        p[288 + 3 * 16 + 1] = 0x00;
+        p[288 + 3 * 16 + 1] = 0x0F;
         sys.board.load_proms(&p);
         // One sprite at slot 0: code 0, color 3, on, 16x16, top-left (48,153).
         sys.bus_write(BusMaster::Cpu(0), 0x1780, 0x00);
@@ -2173,7 +2308,7 @@ mod tests {
         sprites[0x2000] = 0x08;
         sys.board.load_sprite_rom(&sprites);
         sys.run_frame();
-        assert_eq!(pixel(&sys, 48, 153), RED, "pen 1 draws");
-        assert_eq!(pixel(&sys, 49, 153), (0, 0, 0), "pen 0 skips");
+        assert_eq!(pixel(&sys, 48, 153), (0, 0, 0), "pen 1 skips");
+        assert_eq!(pixel(&sys, 49, 153), RED, "pen 0 draws");
     }
 }
