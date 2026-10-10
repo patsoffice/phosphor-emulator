@@ -71,6 +71,8 @@ pub mod namco51;
 pub mod namco51_lle;
 pub mod namco53;
 pub mod namco54;
+pub mod namco56;
+pub mod namco_15xx;
 pub mod namco_wsg;
 pub mod output_latch;
 pub mod pia6820;
