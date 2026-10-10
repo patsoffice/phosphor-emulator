@@ -143,6 +143,10 @@ pub struct BoardParams {
     /// The 54XX explosion network summed at the same op-amp, on the boards that
     /// have one. `None` where the board has no 54XX at all.
     pub explosion: Option<ExplosionNetwork>,
+    /// Each voice's share of the multiplex frame, one entry per voice, summing
+    /// to one. This is also the voice count: three on the WSG boards, eight on
+    /// the 15XX's.
+    pub slot_duty: &'static [f64],
 }
 
 /// The 54XX's three channels and how they reach the summing amplifier.
@@ -232,6 +236,7 @@ impl BoardParams {
         shunt_c: 10e-9,
         coupling: (100_000.0, 100e-9),
         explosion: None,
+        slot_duty: &SLOT_DUTY,
     };
 
     /// Galaga. R19 10k into the 5P LM324's virtual ground is the bias arm and
@@ -243,6 +248,7 @@ impl BoardParams {
         shunt_c: 2.2e-9,
         coupling: (100_000.0, 80e-9),
         explosion: Some(ExplosionNetwork::NAMCO_54XX),
+        slot_duty: &SLOT_DUTY,
     };
 
     /// Xevious, read 2026-09-17 and found to be Galaga's stage resistor for
@@ -254,6 +260,7 @@ impl BoardParams {
         shunt_c: 2.2e-9,
         coupling: (100_000.0, 80e-9),
         explosion: Some(ExplosionNetwork::NAMCO_54XX),
+        slot_duty: &SLOT_DUTY,
     };
 
     /// Dig Dug. R105 10k to +5 V and R108 10k to ground put a fixed 200 uS on
@@ -266,6 +273,7 @@ impl BoardParams {
         shunt_c: 10e-9,
         coupling: (10_000.0, 0.22e-6),
         explosion: None,
+        slot_duty: &SLOT_DUTY,
     };
 }
 
@@ -451,7 +459,8 @@ struct VoiceInputs {
 }
 
 struct Inputs {
-    voices: [VoiceInputs; 3],
+    /// One per entry of [`BoardParams::slot_duty`].
+    voices: Vec<VoiceInputs>,
     sound: NodeId,
     /// The 54XX's three output ports, on the boards that have one.
     explosion: Option<[DataInputId; 3]>,
@@ -476,11 +485,12 @@ fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, 
 
     let weights = sample_weights();
     // Every voice's legs land on one node, because the board has one network.
-    let mut taps: Vec<(NodeId, f64, Option<NodeId>)> = Vec::with_capacity(12);
-    let mut corner_inputs = Vec::with_capacity(3);
-    let mut voices = Vec::with_capacity(3);
+    let count = params.slot_duty.len();
+    let mut taps: Vec<(NodeId, f64, Option<NodeId>)> = Vec::with_capacity(4 * count);
+    let mut corner_inputs = Vec::with_capacity(count);
+    let mut voices = Vec::with_capacity(count);
 
-    for (v, &duty) in SLOT_DUTY.iter().enumerate() {
+    for (v, &duty) in params.slot_duty.iter().enumerate() {
         // The latch's two fields. The sample field is unsigned here, exactly as
         // 5Q-8Q are: the DC it carries is C46's to remove, further down.
         let sample = b.data_input(&format!("SAMPLE{v}"), 1.0);
@@ -577,7 +587,7 @@ fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, 
     (
         circuit,
         Inputs {
-            voices: [voices.remove(0), voices.remove(0), voices.remove(0)],
+            voices,
             sound,
             explosion,
         },
@@ -654,7 +664,11 @@ impl WsgOutputStage {
     /// across a save: two instances with different histories would then make
     /// different decisions about what to refresh, and the save-state round trip
     /// is what caught that.
-    pub fn tick(&mut self, voices: [(i32, u8); 3]) {
+    ///
+    /// The voice count is the board's ([`BoardParams::slot_duty`]); a caller
+    /// passing a different count is a wiring mistake and panics in debug.
+    pub fn tick<const N: usize>(&mut self, voices: [(i32, u8); N]) {
+        debug_assert_eq!(N, self.ids.voices.len(), "voice count");
         for (v, &(sample, volume)) in voices.iter().enumerate() {
             let code = (sample + 8).clamp(0, 15) as f64;
             self.circuit.set_data(self.ids.voices[v].sample, code);
