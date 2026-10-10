@@ -836,6 +836,7 @@ pub mod simple_system;
 pub mod sinistar;
 pub mod spaceduel;
 pub mod starwars;
+pub mod superpacman;
 pub mod tempest;
 pub mod timepilot;
 pub mod timepilot_sound;

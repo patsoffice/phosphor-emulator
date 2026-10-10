@@ -275,7 +275,39 @@ impl BoardParams {
         explosion: None,
         slot_duty: &SLOT_DUTY,
     };
+
+    /// Super Pac-Man, read 2026-10-08 off the CPU board (sheet 9-5): the 15XX
+    /// in place of the WSG, into the same two ladders (R37-R34 and R22-R25 in
+    /// the 4L 4066). The node V carries three permanent arms, R27 22k to +5 V,
+    /// R17 12k to ground, and R26 33k into the 1k VR1 to ground, and C25
+    /// 4.7 nF shunts it. That is a 5.4 kHz corner with every leg open and
+    /// 11.3 kHz with every leg closed.
+    ///
+    /// The output is VR1's wiper into C26 0.1 uF and the MB3730, whose input
+    /// impedance is not on the drawing: the same coupling, and the same gap, as
+    /// Galaga's, so the same 20 Hz stands in. C29 0.01 uF to ground at the amp
+    /// input sees at most the wiper's 1k and sits above 15 kHz, so it is left
+    /// out. The amplifier drives the speaker bridge-tied; mono here.
+    pub const SUPERPAC: Self = Self {
+        bias_g: 1.0 / 22_000.0 + 1.0 / 12_000.0 + 1.0 / 34_000.0,
+        shunt_c: 4.7e-9,
+        coupling: (100_000.0, 80e-9),
+        explosion: None,
+        slot_duty: &SLOT_DUTY_15XX,
+    };
 }
+
+/// The 15XX's eight voices, each an eighth of its multiplex frame.
+///
+/// Read off how the board addresses the sound RAM for the 15XX rather than off
+/// the chip, which is a box on the drawing: during its phase (2H high) the RAM
+/// address is 4H, 8H, the chip's own pin 6, 16H, 32H and 64H, so the voice's
+/// eight-byte record is picked by H bits 4-6 and every voice gets the same 16
+/// dots of each 128. Pin 6 picks the record's half, so one voice update is two
+/// passes, 256 dots, which is the 24 kHz the voice arithmetic assumes. When in
+/// its slot the chip strobes the 4M latch (its pin 8) is internal, so the
+/// split is equal on the evidence of the addressing alone.
+const SLOT_DUTY_15XX: [f64; 8] = [1.0 / 8.0; 8];
 
 /// The WSG's voices update at 96 kHz on this board, so the circuit has to run
 /// above twice that to carry their steps rather than alias them. A floor, not

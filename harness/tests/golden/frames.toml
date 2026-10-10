@@ -440,6 +440,22 @@ size = [224, 256]
 frame = "sha256:482baaec7604cbcef89ba2c3a59843886c0439131c3c6eb9e0d2393c5f663e3f"
 
 [[frame]]
+machine = "superpacman"
+frames = 1800
+shows = "Attract mode character introduction: the 1UP / HIGH SCORE header over 00 and 30000, an empty pair of blue bars where the bonus row was drawn earlier, the POWER label with its pellet already gone and SUPER beside a small green dot, Pac-Man and the red, pink and cyan ghosts in a row on the right, the (C)(P) 1982 NAMCO LTD. line, the red namco logo, CREDIT 0 and the apple round marker at bottom right."
+size = [224, 288]
+frame = "sha256:74070d309496e7a40160c80bc611ea4c906cc9f3d72a33e197489e30a55018ea"
+
+[[frame]]
+machine = "superpacman"
+id = "gameplay"
+frames = 7500
+shows = "Recorded gameplay at movie frame 7500, the banana round: score 6830 under a HIGH SCORE of 30000 (1UP blinks off), the blue maze with pink doors partly opened, cyan keys, bananas in the boxes and four peach power pellets. Super Pac-Man is in his double-size form at bottom center, a 2x2 block of sprite cells, which attract mode never reaches; the pink ghost at top left, red at right, orange in the pen and cyan at bottom right drawn over a key. Banana and apple round markers at bottom right and no reserve lives. Chosen from probes at 1500, 3000, 4500, 6000, 7500 and 8700 as the busiest; the movie is 8711 frames and ends on GAME OVER."
+movie = "movies/superpacman-1791554216.phmi"
+size = [224, 288]
+frame = "sha256:1421af41ce6569add84778c59b17cf60141131da51a8b077309b5669909a42db"
+
+[[frame]]
 machine = "tempest"
 frames = 1800
 shows = "Attract mode: a blue tube seen head-on with a yellow flipper on its rim and colored debris at the center, the 10101 EJD high-score line over a red INSERT COINS, and the MCMLXXX ATARI / BONUS EVERY 20000 / CREDITS 0 / 1 COIN 1 PLAY lines. Upright since phosphor-emulator-iitc: the raster fallback no longer applies the cabinet rotation a second time. WHICH TUBE IS NOT PINNED: the demo cycles levels, so the shape at this frame moves whenever the machine's timing does. It was the square tube before phosphor-emulator-mtme and is the round one after, on a one-cycle shift in the 250 Hz IRQ that compounds over 1800 frames. The four text lines are what this pins."
