@@ -260,6 +260,13 @@ frame = "sha256:c2d100a78944097cd20ff94d6a02a0fe9be9369245677053e3d4439b013df3bd
 vectors = "sha256:6ced524cd460c08cdf8bbcb3721e1ae0b9d5690bca60cf9fbaa59d21632b6a0e"
 
 [[frame]]
+machine = "mappy"
+frames = 1800
+shows = "Attract mode: the STARRING cast card under the 1UP 00 and HIGH SCORE 20000 header, with the tricolor MAPPY logo, the Mappy mouse as MICRO POLICE, Goro as BOSS OF THE BIG BIT, Meowky as NAUGHTY FOLKS, and CREDIT 0 in the footer. The logo, the three cast sprites, the header and footer strips and the score text are what this pins."
+size = [224, 288]
+frame = "sha256:d39c653d44b5ba59ae057db74f64a676e1557837cf1f444fced3228987a71693"
+
+[[frame]]
 machine = "marblemadness"
 frames = 1800
 shows = "Attract mode: the MARBLE MADNESS logo over the TROUBLEMAKERS high-score table, with a red and a blue marble on the black field. The logo, the table and its ten scores are what this pins; the two marbles are rolling and sit wherever the machine's timing has carried them by this frame, so they move whenever the CPU's clock accounting changes. They last moved when the bit operations on a data register stopped charging Table 8-8's asterisked maximum unconditionally, which changed no text and rolled the marbles a little further."

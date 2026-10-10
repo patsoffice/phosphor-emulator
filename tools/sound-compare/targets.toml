@@ -1069,6 +1069,34 @@ see. Dig Dug shares the board but has 51XX and 53XX rather than the 54XX, so it
 appears here and not there."""
 
 [[target]]
+id = "namco-mappy-output"
+machines = ["mappy"]
+status = "partial"
+notes = """
+MODELED 2026-10-10 in machines/src/mappy.rs, as `MappyAudio` on the
+DiscreteCircuit runtime, from the CPU board drawing (sheet 8-5, transcribed in
+docs/schematics/mappy-board.md).
+
+EXAMINED, AND THE VOICE DAC IS INSIDE THE 99XX. Where Super Pac-Man spreads
+the mixing across discrete parts (273 latch, ladders, 4066 switches), Mappy
+feeds the 15XX's eight digital voices into the 99XX custom and takes one
+analog EXDATA out. The mixing law is the silicon's internal logic, not on the
+drawing, so the stage assumes a linear sum of sample x volume over the eight
+voices' combined full swing. That assumption is the documented stand-in, and
+MAME's `namco_15xx` device stands in the same place for the same reason.
+
+What IS on the drawing is everything downstream: EXDATA crosses R30 10K into
+the 1K VR1 volume pot to ground, the wiper drives C29 2.2MF into LA4460 pin 2,
+and the amp runs bridged with a Zobel on each leg (0.033MF/4.7) and C30/C28
+supply filtering. The stage models C29 as one high-pass pole near 7 Hz (10K of
+source with VR1 at maximum; the wiper position is a trimmer setting, not a
+schematic value). Amp, divider and Zobels are flat across the audio band.
+
+STILL `partial`: the mix law is assumed rather than schematic, and there is no
+reference comparison, no adapter, no scenario. Judged by ear on the attract
+music before landing."""
+
+[[target]]
 id = "namco-superpac-output"
 machines = ["superpacman"]
 status = "partial"

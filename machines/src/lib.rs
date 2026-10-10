@@ -807,6 +807,7 @@ pub mod lunarba1;
 pub mod lunarlander;
 pub mod lunarlander_sound;
 pub mod majorhavoc;
+pub mod mappy;
 pub mod marblemadness;
 pub mod mario_bros;
 pub mod mario_sound;
