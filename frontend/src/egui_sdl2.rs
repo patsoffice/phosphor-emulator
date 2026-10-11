@@ -306,6 +306,9 @@ pub fn input_to_egui(
             state.input.events.push(egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
                 delta,
+                // SDL reports discrete ticks with no gesture info, which is
+                // the smoothing path; Start/End would wrongly track a touch.
+                phase: egui::TouchPhase::Move,
                 modifiers: state.modifiers,
             });
         }

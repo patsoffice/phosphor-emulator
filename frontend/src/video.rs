@@ -301,7 +301,7 @@ impl Video {
     /// `overlay_fn` draws the FPS / PAUSED layer over the picture. It runs
     /// inside the same egui pass, which is also what keeps input events drained
     /// on the frames where it draws nothing.
-    pub fn present_game_only(&mut self, aspect: f32, overlay_fn: impl FnOnce(&egui::Context)) {
+    pub fn present_game_only(&mut self, aspect: f32, overlay_fn: impl FnOnce(&mut egui::Ui)) {
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -309,11 +309,12 @@ impl Video {
 
         self.egui_state.input.time = Some(self.start_time.elapsed().as_secs_f64());
         self.egui_ctx.begin_pass(self.egui_state.input.take());
+        let mut root_ui = self.root_ui();
 
         let tex_id = self.game_texture_id;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-            .show(&self.egui_ctx, |ui| {
+            .show_inside(&mut root_ui, |ui| {
                 let (size, offset) = crate::emulator::fit_aspect(ui.available_size(), aspect);
                 ui.add_space(offset.y);
                 ui.horizontal(|ui| {
@@ -321,7 +322,7 @@ impl Video {
                     ui.image(egui::load::SizedTexture::new(tex_id, size));
                 });
             });
-        overlay_fn(&self.egui_ctx);
+        overlay_fn(&mut root_ui);
 
         self.finish_frame();
     }
@@ -330,7 +331,7 @@ impl Video {
     /// and letterboxes the game texture to the target aspect itself.
     pub fn present_with_debug<F>(&mut self, debug_ui_fn: F)
     where
-        F: FnOnce(&egui::Context, egui::TextureId),
+        F: FnOnce(&mut egui::Ui, egui::TextureId),
     {
         unsafe {
             gl::ClearColor(0.1, 0.1, 0.1, 1.0);
@@ -339,10 +340,24 @@ impl Video {
 
         self.egui_state.input.time = Some(self.start_time.elapsed().as_secs_f64());
         self.egui_ctx.begin_pass(self.egui_state.input.take());
+        let mut root_ui = self.root_ui();
 
-        debug_ui_fn(&self.egui_ctx, self.game_texture_id);
+        debug_ui_fn(&mut root_ui, self.game_texture_id);
 
         self.finish_frame();
+    }
+
+    /// The pass root that top-level panels hang under. Built the way
+    /// `Context::run_ui` builds its own, minus the plugin hooks the old
+    /// `Panel::show` path never ran either.
+    fn root_ui(&self) -> egui::Ui {
+        egui::Ui::new(
+            self.egui_ctx.clone(),
+            egui::Id::new((self.egui_ctx.viewport_id(), "__top_ui")),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(self.egui_ctx.content_rect()),
+        )
     }
 
     fn finish_frame(&mut self) {
@@ -375,7 +390,7 @@ impl Video {
 
     /// True if egui wants keyboard events (a text field is focused).
     pub fn wants_keyboard(&self) -> bool {
-        self.egui_ctx.wants_keyboard_input()
+        self.egui_ctx.egui_wants_keyboard_input()
     }
 
     /// Render vector lines via OpenGL, then run an egui pass for overlays.
@@ -389,7 +404,7 @@ impl Video {
         display_size: (u32, u32),
         view_aspect: f32,
         rotation: i32,
-        overlay_fn: impl FnOnce(&egui::Context),
+        overlay_fn: impl FnOnce(&mut egui::Ui),
     ) {
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
@@ -415,7 +430,8 @@ impl Video {
         // Run a minimal egui pass for overlay text on top of the vectors.
         self.egui_state.input.time = Some(self.start_time.elapsed().as_secs_f64());
         self.egui_ctx.begin_pass(self.egui_state.input.take());
-        overlay_fn(&self.egui_ctx);
+        let mut root_ui = self.root_ui();
+        overlay_fn(&mut root_ui);
         self.finish_frame();
     }
 

@@ -1393,14 +1393,14 @@ pub fn run(
                         ds,
                         view_aspect,
                         rot,
-                        |ctx| {
+                        |ui| {
                             crate::overlay::draw_overlay(
-                                ctx,
+                                ui.ctx(),
                                 fps.as_deref(),
                                 stats.as_deref(),
                                 paused,
                             );
-                            crate::overlay::draw_status(ctx, &notices, recording);
+                            crate::overlay::draw_status(ui.ctx(), &notices, recording);
                         },
                     );
                 } else {
@@ -1413,7 +1413,7 @@ pub fn run(
                         ds,
                         view_aspect,
                         rot,
-                        |ctx| crate::overlay::draw_status(ctx, &notices, recording),
+                        |ui| crate::overlay::draw_status(ui.ctx(), &notices, recording),
                     );
                 }
             } else {
@@ -1472,15 +1472,15 @@ pub fn run(
                     debug_state.key_hints = step_key_hints(&host_bindings);
                     let recording = movie_capture.is_recording();
                     let notices_ref = &notices;
-                    video.present_with_debug(|ctx, tex_id| {
+                    video.present_with_debug(|ui, tex_id| {
                         // Profiler side panel (outermost right, drawn first)
                         if profiling {
-                            crate::profile::draw_profile_panel(ctx, &profile_state, frame_duration);
+                            crate::profile::draw_profile_panel(ui, &profile_state, frame_duration);
                         }
                         // Input settings side panel
                         if show_settings {
                             settings_ui::draw_input_panel(
-                                ctx,
+                                ui,
                                 controls,
                                 bindings_ref,
                                 host_bindings_ref,
@@ -1490,23 +1490,23 @@ pub fn run(
                         // DIP switch side panel
                         if show_dip {
                             settings_ui::draw_dip_panel(
-                                ctx,
+                                ui,
                                 dip_banks,
                                 &dip_values,
                                 &mut settings_state,
                             );
                         }
                         if show_display {
-                            settings_ui::draw_display_panel(ctx, &mut settings_state);
+                            settings_ui::draw_display_panel(ui, &mut settings_state);
                         }
                         if show_console {
-                            console_ui::draw_console_panel(ctx, &mut console_state);
+                            console_ui::draw_console_panel(ui, &mut console_state);
                         }
                         // Floating legend, drawn after the side panels so it
                         // lays over them rather than being clipped by one.
                         if show_legend {
                             settings_ui::draw_key_legend(
-                                ctx,
+                                ui.ctx(),
                                 controls,
                                 bindings_ref,
                                 host_bindings_ref,
@@ -1516,7 +1516,7 @@ pub fn run(
                         if debug_state.active {
                             // Debug panels + game central panel
                             debug_ui::draw_debug_ui(
-                                ctx,
+                                ui,
                                 tex_id,
                                 view_aspect,
                                 &mut debug_state,
@@ -1524,10 +1524,10 @@ pub fn run(
                             );
                         } else {
                             // Game central panel with aspect ratio preservation
-                            draw_game_panel(ctx, tex_id, view_aspect);
+                            draw_game_panel(ui, tex_id, view_aspect);
                         }
                         // Last, so it lays over whichever panel is at the edge.
-                        crate::overlay::draw_status(ctx, notices_ref, recording);
+                        crate::overlay::draw_status(ui.ctx(), notices_ref, recording);
                     });
 
                     // The debug panel sizes its columns to what they drew, so
@@ -1594,9 +1594,14 @@ pub fn run(
                     );
                     let paused = debug_state.global_paused;
                     let recording = movie_capture.is_recording();
-                    video.present_game_only(view_aspect, |ctx| {
-                        crate::overlay::draw_overlay(ctx, fps.as_deref(), stats.as_deref(), paused);
-                        crate::overlay::draw_status(ctx, &notices, recording);
+                    video.present_game_only(view_aspect, |ui| {
+                        crate::overlay::draw_overlay(
+                            ui.ctx(),
+                            fps.as_deref(),
+                            stats.as_deref(),
+                            paused,
+                        );
+                        crate::overlay::draw_status(ui.ctx(), &notices, recording);
                     });
                 }
             }
@@ -1735,10 +1740,10 @@ pub fn run(
 /// Draw the game texture in a central panel at the target display aspect,
 /// letterboxed with black bars. Used when a side panel (profiler or debug) is
 /// active alongside the game.
-fn draw_game_panel(ctx: &egui::Context, tex_id: egui::TextureId, aspect: f32) {
+fn draw_game_panel(ui: &mut egui::Ui, tex_id: egui::TextureId, aspect: f32) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             let (size, offset) = fit_aspect(ui.available_size(), aspect);
             ui.add_space(offset.y);
             ui.horizontal(|ui| {

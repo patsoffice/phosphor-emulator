@@ -688,7 +688,7 @@ fn draw_register_grid(ui: &mut egui::Ui, id: &str, registers: &[DebugRegister]) 
 /// Each CPU column shows registers at the top and a tabbed disassembly/memory
 /// viewer below.
 pub fn draw_debug_ui(
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     game_texture_id: egui::TextureId,
     view_aspect: f32,
     state: &mut DebugState,
@@ -701,9 +701,9 @@ pub fn draw_debug_ui(
     // would force a Memory tab (~74 monospace columns) and a Disassembly tab
     // (~35) to the same width, so one of them always ends up scrolling
     // sideways. Widths come from what each column drew last frame.
-    egui::SidePanel::right("debug_panel")
-        .exact_width(state.debug_panel_width() as f32)
-        .show(ctx, |ui| {
+    egui::Panel::right("debug_panel")
+        .exact_size(state.debug_panel_width() as f32)
+        .show_inside(ui, |ui| {
             // Measure the live monospace advance; the column arithmetic is in
             // characters, so this is what converts it to pixels. Laid out over
             // ten glyphs and divided, so per-glyph rounding does not compound
@@ -751,7 +751,7 @@ pub fn draw_debug_ui(
     // Central panel: game framebuffer letterboxed to the target display aspect.
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             let (size, offset) = crate::emulator::fit_aspect(ui.available_size(), view_aspect);
             ui.add_space(offset.y);
             ui.horizontal(|ui| {

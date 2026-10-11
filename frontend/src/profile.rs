@@ -286,13 +286,13 @@ const COLOR_IDLE: egui::Color32 = egui::Color32::from_rgb(80, 80, 80); // dark g
 ///
 /// Must be called before `CentralPanel` or other side panels that should
 /// appear between this panel and the game.
-pub fn draw_profile_panel(ctx: &egui::Context, state: &ProfileState, frame_budget: Duration) {
+pub fn draw_profile_panel(ui: &mut egui::Ui, state: &ProfileState, frame_budget: Duration) {
     let budget_ms = frame_budget.as_secs_f64() * 1000.0;
 
-    egui::SidePanel::right("profiler_panel")
-        .default_width(PANEL_WIDTH as f32)
+    egui::Panel::right("profiler_panel")
+        .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             ui.heading("Profiler");
             ui.separator();
 

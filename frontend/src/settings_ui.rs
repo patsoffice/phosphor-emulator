@@ -75,16 +75,16 @@ pub struct SettingsState {
 /// `state` (a capture request or a reset request); the emulator loop applies
 /// those to the binding set after the frame, avoiding a mutable borrow here.
 pub fn draw_input_panel(
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     controls: &[InputControl],
     bindings: &BindingSet,
     host: &crate::host_keys::HostBindings,
     state: &mut SettingsState,
 ) {
-    egui::SidePanel::right("input_settings_panel")
-        .default_width(PANEL_WIDTH as f32)
+    egui::Panel::right("input_settings_panel")
+        .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             ui.heading("Input Bindings");
             ui.separator();
             if ui.button("Reset to defaults").clicked() {
@@ -340,15 +340,15 @@ fn display_order(controls: &[InputControl]) -> Vec<usize> {
 /// emulator loop applies them after the frame, avoiding a mutable machine
 /// borrow here.
 pub fn draw_dip_panel(
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     banks: &[DipSwitchBank],
     bank_values: &[u8],
     state: &mut SettingsState,
 ) {
-    egui::SidePanel::right("dip_settings_panel")
-        .default_width(PANEL_WIDTH as f32)
+    egui::Panel::right("dip_settings_panel")
+        .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             ui.heading("DIP Switches");
             ui.separator();
             ui.label(
@@ -422,11 +422,11 @@ pub fn draw_dip_panel(
 /// Changes apply immediately, since the whole point of them is to be turned
 /// while looking at the result. The emulator loop notices `display_changed` and
 /// persists them.
-pub fn draw_display_panel(ctx: &egui::Context, state: &mut SettingsState) {
-    egui::SidePanel::right("display_settings_panel")
-        .default_width(PANEL_WIDTH as f32)
+pub fn draw_display_panel(ui: &mut egui::Ui, state: &mut SettingsState) {
+    egui::Panel::right("display_settings_panel")
+        .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
             ui.heading("Display");
             ui.separator();
             ui.label(
