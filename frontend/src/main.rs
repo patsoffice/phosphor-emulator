@@ -7,6 +7,7 @@ mod config;
 mod console_ui;
 mod crt_gl;
 mod debug_ui;
+mod egui_sdl2;
 mod emulator;
 mod gfxview;
 mod gl_util;

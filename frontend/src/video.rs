@@ -1,18 +1,22 @@
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Instant;
 
-use egui_backend::painter::Painter;
-use egui_backend::{DpiScaling, EguiStateHandler, ShaderVersion};
-use egui_sdl2_gl as egui_backend;
 use phosphor_core::core::machine::Orientation;
 use sdl2::video::{GLContext, GLProfile, Window};
 
 pub struct Video {
     window: Window,
     _gl_ctx: GLContext,
-    painter: Painter,
-    egui_state: EguiStateHandler,
+    gl: Arc<egui_glow::glow::Context>,
+    painter: egui_glow::Painter,
+    egui_state: crate::egui_sdl2::EguiStateHandler,
     egui_ctx: egui::Context,
     game_texture_id: egui::TextureId,
+    /// Raw GL name of the game texture, owned here rather than by the
+    /// painter: `egui_glow` offers no lookup for native textures, so the CRT
+    /// stage and the vector target take the name straight from this field.
+    game_texture_gl: u32,
     /// The raster `render_frame` fills, which is what the CRT stage samples.
     native_width: u32,
     native_height: u32,
@@ -94,8 +98,16 @@ impl Video {
             .gl_create_context()
             .expect("Failed to create GL context");
 
-        let (mut painter, egui_state) =
-            egui_backend::with_sdl2(&window, ShaderVersion::Default, DpiScaling::Default);
+        gl::load_with(|name| sdl_video.gl_get_proc_address(name) as *const _);
+        let gl = unsafe {
+            Arc::new(egui_glow::glow::Context::from_loader_function(|name| {
+                sdl_video.gl_get_proc_address(name) as *const _
+            }))
+        };
+        let mut painter = egui_glow::Painter::new(Arc::clone(&gl), "", None, false)
+            .expect("Failed to create egui painter");
+        let egui_state =
+            crate::egui_sdl2::EguiStateHandler::new(&window, crate::egui_sdl2::DpiScaling::Default);
         let egui_ctx = egui::Context::default();
 
         // Create initial game texture (black with full alpha)
@@ -104,25 +116,47 @@ impl Video {
         for chunk in rgba_buffer.as_chunks_mut::<4>().0 {
             chunk[3] = 255;
         }
-        let game_texture_id = painter.new_user_texture_rgba8(
-            (display_width as usize, display_height as usize),
-            rgba_buffer.clone(),
-            // Linear. The CRT stage renders this at the presentation resolution
-            // rather than the machine's, so it is no longer a pixel grid being
-            // magnified: it is a picture of a beam, already carrying the spot's
-            // own softness, and egui only has to fit it to the letterbox. The
-            // nearest-neighbour this replaced existed to keep magnified pixels
-            // crisp, which is the job the beam profile has taken over.
-            true,
-        );
+        // Linear. The CRT stage renders this at the presentation resolution
+        // rather than the machine's, so it is no longer a pixel grid being
+        // magnified: it is a picture of a beam, already carrying the spot's
+        // own softness, and egui only has to fit it to the letterbox. The
+        // nearest-neighbor this replaced existed to keep magnified pixels
+        // crisp, which is the job the beam profile has taken over.
+        let game_texture_gl = unsafe {
+            let mut name = 0;
+            gl::GenTextures(1, &mut name);
+            gl::BindTexture(gl::TEXTURE_2D, name);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            // Sized RGBA8, exactly as the old painter uploaded user textures.
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA8 as i32,
+                display_width as i32,
+                display_height as i32,
+                0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                rgba_buffer.as_ptr() as *const _,
+            );
+            name
+        };
+        let game_texture_id = painter.register_native_texture(egui_glow::glow::NativeTexture(
+            NonZeroU32::new(game_texture_gl).expect("GL returned texture name 0"),
+        ));
 
         Self {
             window,
             _gl_ctx: gl_ctx,
+            gl,
             painter,
             egui_state,
             egui_ctx,
             game_texture_id,
+            game_texture_gl,
             native_width,
             native_height,
             display_width,
@@ -180,14 +214,12 @@ impl Video {
     ///
     /// Normally this runs the frame through [`crate::crt_gl::CrtRenderer`],
     /// which renders into that texture rather than uploading pixels into it. The
-    /// CPU path below is the fallback for two cases: the painter has not yet
-    /// allocated the texture, which is true until it has painted once, and a
-    /// framebuffer that will not complete.
+    /// CPU path below is the fallback for a framebuffer that will not complete.
     ///
-    /// Once the CRT stage takes over, the texture must never be marked dirty
-    /// again: `Painter::upload_user_textures` re-uploads a dirty texture's CPU
-    /// pixels at the start of the next paint, which would overwrite what the
-    /// stage rendered. Uploading is therefore the fallback's job alone.
+    /// The painter never touches this texture's pixels: it was registered as
+    /// a native texture, so per-frame uploads stay the fallback's job alone.
+    /// Uploading straight into the GL texture also deletes the old path's
+    /// per-frame clone of the whole RGBA buffer.
     ///
     /// The fallback orients through `phosphor_core::gfx::apply_orientation`,
     /// which is the same function the harness applies when it hashes a frame.
@@ -199,16 +231,14 @@ impl Video {
         debug_assert_eq!(native_rgb24.len(), native_pixels * 3);
 
         let settings = phosphor_core::core::display::display_settings();
-        if let Some(out_tex) = self.painter.get_raw_gl_texture_id(&self.game_texture_id)
-            && self.crt.present(
-                native_rgb24,
-                (self.native_width, self.native_height),
-                self.presentation_size(),
-                orientation,
-                &settings,
-                out_tex,
-            )
-        {
+        if self.crt.present(
+            native_rgb24,
+            (self.native_width, self.native_height),
+            self.presentation_size(),
+            orientation,
+            &settings,
+            self.game_texture_gl,
+        ) {
             if !self.crt_active {
                 self.crt_active = true;
                 log::debug!("CRT stage active: drawing through the presentation framebuffer");
@@ -241,8 +271,28 @@ impl Video {
             // alpha stays 255 from initialization
         }
 
-        self.painter
-            .update_user_texture_rgba8_data(self.game_texture_id, self.rgba_buffer.clone());
+        unsafe {
+            use egui_glow::glow::{HasContext as _, PixelUnpackData};
+            self.gl
+                .pixel_store_i32(egui_glow::glow::UNPACK_ALIGNMENT, 4);
+            self.gl.bind_texture(
+                egui_glow::glow::TEXTURE_2D,
+                Some(egui_glow::glow::NativeTexture(
+                    NonZeroU32::new(self.game_texture_gl).expect("game texture name is 0"),
+                )),
+            );
+            self.gl.tex_sub_image_2d(
+                egui_glow::glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                self.display_width as i32,
+                self.display_height as i32,
+                egui_glow::glow::RGBA,
+                egui_glow::glow::UNSIGNED_BYTE,
+                PixelUnpackData::Slice(Some(&self.rgba_buffer)),
+            );
+        }
     }
 
     /// Render the game at the target display `aspect` (no debug panels),
@@ -308,14 +358,19 @@ impl Video {
             .process_output(&self.window, &platform_output);
 
         let paint_jobs = self.egui_ctx.tessellate(shapes, pixels_per_point);
-        self.painter.paint_jobs(None, textures_delta, paint_jobs);
+        let (width, height) = self.window.drawable_size();
+        self.painter.paint_and_update_textures(
+            [width, height],
+            pixels_per_point,
+            &paint_jobs,
+            &textures_delta,
+        );
         self.window.gl_swap_window();
     }
 
     /// Forward an SDL2 event to egui for input processing.
     pub fn process_event(&mut self, event: sdl2::event::Event) {
-        self.egui_state
-            .process_input(&self.window, event, &mut self.painter);
+        self.egui_state.process_input(&self.window, event);
     }
 
     /// True if egui wants keyboard events (a text field is focused).
@@ -339,6 +394,11 @@ impl Video {
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+        // egui leaves the scissor on, which would clip the beam to whatever
+        // rectangle it last drew. Same guard as `render_vectors_to_texture`.
+        unsafe {
+            gl::Disable(gl::SCISSOR_TEST);
         }
         let (w, h) = self.window.size();
         renderer.render(
@@ -394,9 +454,7 @@ impl Video {
             (fitted.y.round() as u32).max(1),
         );
 
-        let Some(tex) = self.painter.get_raw_gl_texture_id(&self.game_texture_id) else {
-            return false;
-        };
+        let tex = self.game_texture_gl;
         unsafe {
             if !self.vector_target.attach(tex, out) {
                 return false;
