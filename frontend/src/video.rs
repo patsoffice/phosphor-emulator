@@ -109,6 +109,7 @@ impl Video {
         let egui_state =
             crate::egui_sdl2::EguiStateHandler::new(&window, crate::egui_sdl2::DpiScaling::Default);
         let egui_ctx = egui::Context::default();
+        Self::apply_style_tweaks(&egui_ctx);
 
         // Create initial game texture (black with full alpha)
         let pixel_count = (display_width * display_height) as usize;
@@ -314,7 +315,7 @@ impl Video {
         let tex_id = self.game_texture_id;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-            .show_inside(&mut root_ui, |ui| {
+            .show(&mut root_ui, |ui| {
                 let (size, offset) = crate::emulator::fit_aspect(ui.available_size(), aspect);
                 ui.add_space(offset.y);
                 ui.horizontal(|ui| {
@@ -345,6 +346,16 @@ impl Video {
         debug_ui_fn(&mut root_ui, self.game_texture_id);
 
         self.finish_frame();
+    }
+
+    /// One-time style adjustments for a fresh context.
+    ///
+    /// egui 0.35 zeroed the scroll clip bleed that 0.34 gave by default,
+    /// which cut the left edge of exact-fit scroll content such as the
+    /// debugger's memory rows. Restore the 3px the old default carried.
+    /// Revisit if a later egui removes the field.
+    pub(crate) fn apply_style_tweaks(ctx: &egui::Context) {
+        ctx.all_styles_mut(|style| style.visuals.clip_rect_margin = 3.0);
     }
 
     /// The pass root that top-level panels hang under. Built the way
@@ -541,5 +552,14 @@ impl Video {
         self.window
             .set_size(width, height)
             .expect("Failed to resize window");
+    }
+}
+
+impl Drop for Video {
+    /// Free the painter's GL objects while the context is still current.
+    /// `drop` runs before any field is dropped, so `_gl_ctx` is alive here.
+    /// Without this the painter's own drop warns that its resources leaked.
+    fn drop(&mut self) {
+        self.painter.destroy();
     }
 }

@@ -17,8 +17,8 @@ sdl2 = "0.38"
 # These two move together or not at all: egui_glow releases in lockstep with
 # egui, so they bump as a pair. glow arrives as egui_glow::glow with no direct
 # entry, which keeps it from drifting out of sync with the painter.
-egui_glow = { version = "0.34", default-features = false }
-egui = "0.34"
+egui_glow = { version = "0.35", default-features = false }
+egui = "0.35"
 gl = "0.14"
 clap = { version = "4", features = ["derive"] }
 toml = "1"

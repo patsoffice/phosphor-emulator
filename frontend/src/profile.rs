@@ -292,7 +292,7 @@ pub fn draw_profile_panel(ui: &mut egui::Ui, state: &ProfileState, frame_budget:
     egui::Panel::right("profiler_panel")
         .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             ui.heading("Profiler");
             ui.separator();
 

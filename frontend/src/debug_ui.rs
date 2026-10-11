@@ -86,6 +86,11 @@ const COLUMN_CHROME: f32 = 30.0;
 /// the real one has been measured from the live font.
 const DEFAULT_CHAR_WIDTH: f32 = 7.0;
 
+/// Fallback for [`DebugState::panel_chrome`] before the first draw: the
+/// default side-panel frame's 8px margin on each side plus one default 8px
+/// item gap, for a single CPU column.
+const DEFAULT_PANEL_CHROME: f32 = 24.0;
+
 /// How many watchpoint hits the UI keeps before dropping the oldest.
 ///
 /// The machine's own queue is shallow (it is drained every frame or step), so
@@ -233,6 +238,14 @@ pub struct DebugState {
     /// Monospace glyph advance, measured from the live font each frame so the
     /// column arithmetic follows the user's font scale rather than assuming it.
     pub mono_char_width: f32,
+    /// Width the controls column drew last frame. Its run/step buttons carry
+    /// the live key names, so a binding like `Shift+F10` widens the row past
+    /// [`CONTROLS_COLUMN_WIDTH`]; the panel has to be sized to what was drawn.
+    pub controls_column_width: f32,
+    /// Panel width that belongs to no column: the panel frame's left and
+    /// right margins plus the item spacing between adjacent columns. Measured
+    /// from the live style each frame.
+    pub panel_chrome: f32,
 
     /// Key names to print on the run/step buttons, refreshed from the live host
     /// bindings each frame. Held as strings so this module stays free of SDL
@@ -306,6 +319,8 @@ impl DebugState {
             top_section_height: 0.0,
             column_chars: Vec::new(),
             mono_char_width: DEFAULT_CHAR_WIDTH,
+            controls_column_width: CONTROLS_COLUMN_WIDTH,
+            panel_chrome: DEFAULT_PANEL_CHROME,
             key_hints: StepKeyHints::default(),
         }
     }
@@ -343,12 +358,18 @@ impl DebugState {
     }
 
     /// Width (in pixels) needed for the whole debug panel: the controls column
-    /// plus each CPU column at the width its selected tab needs.
+    /// plus each CPU column at the width its selected tab needs, plus the
+    /// frame margins and column gaps.
+    ///
+    /// This is the panel's exact outer size, so it must cover everything the
+    /// panel draws. Content wider than the panel is clipped at the window's
+    /// right edge, and egui reports the panel to its parent at this size, so
+    /// the game's central panel paints over the overflow at the left edge.
     pub fn debug_panel_width(&self) -> u32 {
         let cpu_total: f32 = (0..self.cpu_panels.len().max(1))
             .map(|i| self.cpu_column_width(i))
             .sum();
-        (CONTROLS_COLUMN_WIDTH + cpu_total).ceil() as u32
+        (self.panel_chrome + self.controls_column_width + cpu_total).ceil() as u32
     }
 
     /// Refresh cached state from the BusDebug interface.
@@ -703,7 +724,7 @@ pub fn draw_debug_ui(
     // sideways. Widths come from what each column drew last frame.
     egui::Panel::right("debug_panel")
         .exact_size(state.debug_panel_width() as f32)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             // Measure the live monospace advance; the column arithmetic is in
             // characters, so this is what converts it to pixels. Laid out over
             // ten glyphs and divided, so per-glyph rounding does not compound
@@ -716,6 +737,14 @@ pub fn draw_debug_ui(
             );
             state.mono_char_width = sample.size().x / 10.0;
 
+            // The panel's exact size includes its frame, and the columns sit
+            // side by side with the default item gap between each pair.
+            let frame_margin = egui::Frame::side_top_panel(ui.style())
+                .total_margin()
+                .sum()
+                .x;
+            state.panel_chrome = frame_margin + ui.spacing().item_spacing.x * n_cpus as f32;
+
             if n_cpus > 0 {
                 // Use the previous frame's max top-section height for alignment
                 let min_h = state.top_section_height;
@@ -724,12 +753,12 @@ pub fn draw_debug_ui(
                 let mut max_h: f32 = 0.0;
                 ui.horizontal_top(|ui| {
                     let size = egui::vec2(CONTROLS_COLUMN_WIDTH, full_height);
-                    max_h = ui
-                        .allocate_ui_with_layout(size, layout, |ui| {
-                            ui.set_min_width(CONTROLS_COLUMN_WIDTH);
-                            draw_controls_column(ui, state, min_h)
-                        })
-                        .inner;
+                    let controls = ui.allocate_ui_with_layout(size, layout, |ui| {
+                        ui.set_min_width(CONTROLS_COLUMN_WIDTH);
+                        draw_controls_column(ui, state, min_h)
+                    });
+                    max_h = controls.inner;
+                    state.controls_column_width = controls.response.rect.width();
 
                     for cpu_idx in 0..n_cpus {
                         let width = state.cpu_column_width(cpu_idx);
@@ -751,7 +780,7 @@ pub fn draw_debug_ui(
     // Central panel: game framebuffer letterboxed to the target display aspect.
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             let (size, offset) = crate::emulator::fit_aspect(ui.available_size(), view_aspect);
             ui.add_space(offset.y);
             ui.horizontal(|ui| {
@@ -2043,5 +2072,134 @@ mod tests {
         assert_eq!(active_cpu_suffix(&s), " — M6809");
         s.step_cpu = 1;
         assert_eq!(active_cpu_suffix(&s), " — Z80 Sound");
+    }
+
+    /// The debug panel is sized to everything it draws. Drawn for a real
+    /// two-CPU machine, with the long key captions a live session shows,
+    /// nothing may be clipped sideways, and the game's central panel must stop
+    /// where the debug panel's frame starts rather than painting over it.
+    #[test]
+    fn debug_panel_fits_its_content() {
+        for tab in [BottomTab::Disassembly, BottomTab::Memory] {
+            let ctx = egui::Context::default();
+            crate::video::Video::apply_style_tweaks(&ctx);
+            let entry = phosphor_machines::registry::find("joust").expect("joust is registered");
+            let machine = (entry.create_bare)();
+            let bus = machine.debug_bus().expect("joust exposes a debug bus");
+            let mut state = DebugState::new();
+            state.active = true;
+            state.refresh(bus);
+            state.bottom_tabs.fill(tab);
+            // Wider than the defaults, so the controls column outgrows
+            // CONTROLS_COLUMN_WIDTH the way it does with the real bindings.
+            state.key_hints = StepKeyHints {
+                pause: "F8".to_string(),
+                step_cycle: "Shift+F8".to_string(),
+                step_instruction: "Shift+F9".to_string(),
+                step_frame: "Shift+F10".to_string(),
+            };
+
+            // The window follows the panel's width, so let the measured
+            // widths settle over a few frames before inspecting one.
+            let game_width = 900.0;
+            let mut output = None;
+            for _ in 0..6 {
+                let width = game_width + state.debug_panel_width() as f32;
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 1000.0),
+                    )),
+                    ..Default::default()
+                };
+                output = Some(ctx.run_ui(input, |ui| {
+                    draw_debug_ui(
+                        ui,
+                        egui::TextureId::default(),
+                        4.0 / 3.0,
+                        &mut state,
+                        Some(bus),
+                    );
+                }));
+            }
+            let output = output.expect("ran at least one frame");
+
+            for clipped in &output.shapes {
+                let r = clipped.shape.visual_bounding_rect();
+                if !r.is_finite() || r.width() <= 0.0 {
+                    continue;
+                }
+                let clip = clipped.clip_rect;
+                assert!(
+                    clip.min.x <= r.min.x && r.max.x <= clip.max.x,
+                    "{tab:?}: shape at x {}..{} clipped to {}..{}",
+                    r.min.x,
+                    r.max.x,
+                    clip.min.x,
+                    clip.max.x
+                );
+            }
+
+            // The two full-height backgrounds: the debug panel's frame fill
+            // and the central panel's opaque black.
+            let panel_fill = ctx.global_style().visuals.panel_fill;
+            let full_height_fill = |fill| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Rect(r) if r.fill == fill && r.rect.height() >= 1000.0 => {
+                            Some(r.rect)
+                        }
+                        _ => None,
+                    })
+            };
+            let debug_panel = full_height_fill(panel_fill).expect("debug panel background");
+            let central = full_height_fill(egui::Color32::BLACK).expect("central panel background");
+            assert!(
+                central.max.x <= debug_panel.min.x,
+                "{tab:?}: central panel reaches x {} but the debug panel starts at {}",
+                central.max.x,
+                debug_panel.min.x
+            );
+        }
+    }
+
+    /// The scroll clip keeps the 3px bleed the frontend restores, so
+    /// exact-fit content like the memory rows is never cut at its edge.
+    /// Fails if `apply_style_tweaks` stops setting the margin.
+    #[test]
+    fn horizontal_scroll_keeps_its_clip_bleed() {
+        let ctx = egui::Context::default();
+        crate::video::Video::apply_style_tweaks(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+        let mut clip_min_x = f32::INFINITY;
+        let mut content_min_x = f32::NEG_INFINITY;
+        let _ = ctx.run_ui(input, |ui| {
+            // Inside a right panel like the real memory view, so the parent
+            // clip leaves room for the bleed to exist.
+            egui::Panel::right("bleed_probe_panel")
+                .exact_size(900.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt("bleed_probe")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            ui.monospace("0".repeat(74));
+                            clip_min_x = ui.clip_rect().min.x;
+                            content_min_x = ui.min_rect().min.x;
+                        });
+                });
+        });
+        assert!(
+            clip_min_x <= content_min_x - 3.0,
+            "clip starts at {clip_min_x}, content at {content_min_x}: no bleed"
+        );
     }
 }

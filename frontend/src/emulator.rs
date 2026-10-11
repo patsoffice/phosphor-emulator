@@ -1743,7 +1743,7 @@ pub fn run(
 fn draw_game_panel(ui: &mut egui::Ui, tex_id: egui::TextureId, aspect: f32) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             let (size, offset) = fit_aspect(ui.available_size(), aspect);
             ui.add_space(offset.y);
             ui.horizontal(|ui| {

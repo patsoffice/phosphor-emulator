@@ -84,7 +84,7 @@ pub fn draw_input_panel(
     egui::Panel::right("input_settings_panel")
         .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             ui.heading("Input Bindings");
             ui.separator();
             if ui.button("Reset to defaults").clicked() {
@@ -348,7 +348,7 @@ pub fn draw_dip_panel(
     egui::Panel::right("dip_settings_panel")
         .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             ui.heading("DIP Switches");
             ui.separator();
             ui.label(
@@ -426,7 +426,7 @@ pub fn draw_display_panel(ui: &mut egui::Ui, state: &mut SettingsState) {
     egui::Panel::right("display_settings_panel")
         .default_size(PANEL_WIDTH as f32)
         .resizable(false)
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             ui.heading("Display");
             ui.separator();
             ui.label(
