@@ -87,9 +87,10 @@ const COLUMN_CHROME: f32 = 30.0;
 const DEFAULT_CHAR_WIDTH: f32 = 7.0;
 
 /// Fallback for [`DebugState::panel_chrome`] before the first draw: the
-/// default side-panel frame's 8px margin on each side plus one default 8px
-/// item gap, for a single CPU column.
-const DEFAULT_PANEL_CHROME: f32 = 24.0;
+/// default side-panel frame's 8px margin on each side, the pixel the panel
+/// keeps for its separator line, plus one default 8px item gap, for a single
+/// CPU column.
+const DEFAULT_PANEL_CHROME: f32 = 25.0;
 
 /// How many watchpoint hits the UI keeps before dropping the oldest.
 ///
@@ -243,8 +244,8 @@ pub struct DebugState {
     /// [`CONTROLS_COLUMN_WIDTH`]; the panel has to be sized to what was drawn.
     pub controls_column_width: f32,
     /// Panel width that belongs to no column: the panel frame's left and
-    /// right margins plus the item spacing between adjacent columns. Measured
-    /// from the live style each frame.
+    /// right margins plus the item spacing between adjacent columns. The
+    /// frame's share is measured from the live panel geometry each frame.
     pub panel_chrome: f32,
 
     /// Key names to print on the run/step buttons, refreshed from the live host
@@ -738,12 +739,13 @@ pub fn draw_debug_ui(
             state.mono_char_width = sample.size().x / 10.0;
 
             // The panel's exact size includes its frame, and the columns sit
-            // side by side with the default item gap between each pair.
-            let frame_margin = egui::Frame::side_top_panel(ui.style())
-                .total_margin()
-                .sum()
-                .x;
-            state.panel_chrome = frame_margin + ui.spacing().item_spacing.x * n_cpus as f32;
+            // side by side with the default item gap between each pair. The
+            // frame's share is measured, not derived from the default frame:
+            // the panel reserves room inside it that the default does not
+            // show (egui 0.36 keeps a pixel for the separator line), and any
+            // shortfall pushes content past the panel's right edge.
+            let frame_chrome = state.debug_panel_width() as f32 - ui.max_rect().width();
+            state.panel_chrome = frame_chrome + ui.spacing().item_spacing.x * n_cpus as f32;
 
             if n_cpus > 0 {
                 // Use the previous frame's max top-section height for alignment
@@ -2082,7 +2084,6 @@ mod tests {
     fn debug_panel_fits_its_content() {
         for tab in [BottomTab::Disassembly, BottomTab::Memory] {
             let ctx = egui::Context::default();
-            crate::video::Video::apply_style_tweaks(&ctx);
             let entry = phosphor_machines::registry::find("joust").expect("joust is registered");
             let machine = (entry.create_bare)();
             let bus = machine.debug_bus().expect("joust exposes a debug bus");
@@ -2112,7 +2113,9 @@ mod tests {
                     )),
                     ..Default::default()
                 };
-                output = Some(ctx.run_ui(input, |ui| {
+                // Headless: no painter consumes the font atlas upload, and
+                // TexturesDelta panics if dropped with deltas pending.
+                let mut frame = ctx.run_ui(input, |ui| {
                     draw_debug_ui(
                         ui,
                         egui::TextureId::default(),
@@ -2120,7 +2123,9 @@ mod tests {
                         &mut state,
                         Some(bus),
                     );
-                }));
+                });
+                frame.textures_delta.clear();
+                output = Some(frame);
             }
             let output = output.expect("ran at least one frame");
 
@@ -2129,9 +2134,15 @@ mod tests {
                 if !r.is_finite() || r.width() <= 0.0 {
                     continue;
                 }
+                // 1px tolerance: a selected row's text background expands 1px
+                // past the text origin by egui default, and the scroll
+                // viewport starts at a fractional x from fractional glyph
+                // advances, so a sub-pixel sliver of highlight always falls
+                // outside a strict clip. Panel-sizing regressions overhang by
+                // whole pixels and still fail.
                 let clip = clipped.clip_rect;
                 assert!(
-                    clip.min.x <= r.min.x && r.max.x <= clip.max.x,
+                    clip.min.x - 1.0 <= r.min.x && r.max.x <= clip.max.x + 1.0,
                     "{tab:?}: shape at x {}..{} clipped to {}..{}",
                     r.min.x,
                     r.max.x,
@@ -2163,43 +2174,5 @@ mod tests {
                 debug_panel.min.x
             );
         }
-    }
-
-    /// The scroll clip keeps the 3px bleed the frontend restores, so
-    /// exact-fit content like the memory rows is never cut at its edge.
-    /// Fails if `apply_style_tweaks` stops setting the margin.
-    #[test]
-    fn horizontal_scroll_keeps_its_clip_bleed() {
-        let ctx = egui::Context::default();
-        crate::video::Video::apply_style_tweaks(&ctx);
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1920.0, 1080.0),
-            )),
-            ..Default::default()
-        };
-        let mut clip_min_x = f32::INFINITY;
-        let mut content_min_x = f32::NEG_INFINITY;
-        let _ = ctx.run_ui(input, |ui| {
-            // Inside a right panel like the real memory view, so the parent
-            // clip leaves room for the bleed to exist.
-            egui::Panel::right("bleed_probe_panel")
-                .exact_size(900.0)
-                .show(ui, |ui| {
-                    egui::ScrollArea::both()
-                        .id_salt("bleed_probe")
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            ui.monospace("0".repeat(74));
-                            clip_min_x = ui.clip_rect().min.x;
-                            content_min_x = ui.min_rect().min.x;
-                        });
-                });
-        });
-        assert!(
-            clip_min_x <= content_min_x - 3.0,
-            "clip starts at {clip_min_x}, content at {content_min_x}: no bleed"
-        );
     }
 }

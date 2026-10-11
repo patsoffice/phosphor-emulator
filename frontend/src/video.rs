@@ -109,7 +109,6 @@ impl Video {
         let egui_state =
             crate::egui_sdl2::EguiStateHandler::new(&window, crate::egui_sdl2::DpiScaling::Default);
         let egui_ctx = egui::Context::default();
-        Self::apply_style_tweaks(&egui_ctx);
 
         // Create initial game texture (black with full alpha)
         let pixel_count = (display_width * display_height) as usize;
@@ -348,16 +347,6 @@ impl Video {
         self.finish_frame();
     }
 
-    /// One-time style adjustments for a fresh context.
-    ///
-    /// egui 0.35 zeroed the scroll clip bleed that 0.34 gave by default,
-    /// which cut the left edge of exact-fit scroll content such as the
-    /// debugger's memory rows. Restore the 3px the old default carried.
-    /// Revisit if a later egui removes the field.
-    pub(crate) fn apply_style_tweaks(ctx: &egui::Context) {
-        ctx.all_styles_mut(|style| style.visuals.clip_rect_margin = 3.0);
-    }
-
     /// The pass root that top-level panels hang under. Built the way
     /// `Context::run_ui` builds its own, minus the plugin hooks the old
     /// `Panel::show` path never ran either.
@@ -374,7 +363,7 @@ impl Video {
     fn finish_frame(&mut self) {
         let egui::FullOutput {
             platform_output,
-            textures_delta,
+            mut textures_delta,
             shapes,
             pixels_per_point,
             ..
@@ -389,7 +378,7 @@ impl Video {
             [width, height],
             pixels_per_point,
             &paint_jobs,
-            &textures_delta,
+            &mut textures_delta,
         );
         self.window.gl_swap_window();
     }
