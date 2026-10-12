@@ -470,6 +470,22 @@ size = [224, 288]
 frame = "sha256:1421af41ce6569add84778c59b17cf60141131da51a8b077309b5669909a42db"
 
 [[frame]]
+machine = "tapper"
+frames = 1800
+shows = "Attract mode title from a cold boot with blank NVRAM: the orange Tapper logo outlined in white on a dark red panel, the (C)COPYRIGHT MCMLXXXIII / BALLY MIDWAY MFG / ALL RIGHTS RESERVED lines in blue, and CREDIT 0 and INSERT COIN along the bottom. Background tiles only, on a horizontal monitor."
+size = [512, 480]
+frame = "sha256:e21e3c96509cb026f7354a877d219717b9e089896bcc95fcc6614fbcc725ab95"
+
+[[frame]]
+machine = "tapper"
+id = "gameplay"
+frames = 3200
+shows = "Recorded gameplay at movie frame 3200, the sports bar: score 9450 at top left with a beer-mug marker, the gray Bud blimp between white clouds, four red bars running from the kegs and red-and-white umbrellas on the left toward the gray grandstand on the right, customers on the top, third and bottom bars, a full mug and an empty one on the bottom bar, the bartender at the bottom tap, and 3 at bottom right. Objects in several palette banks overlapping one another and the tiles, which the title screen does not reach. Chosen from probes at 1200, 1800, 2400, 2800, 3200 and 3576 as the busiest; the movie is 3576 frames and ends on GET READY TO SERVE."
+movie = "movies/tapper-1791773010.phmi"
+size = [512, 480]
+frame = "sha256:796796e04d1c60b7a1be98ca7a620be28a72609606e06abcfbd2d92d63798e0c"
+
+[[frame]]
 machine = "tempest"
 frames = 1800
 shows = "Attract mode: a blue tube seen head-on with a yellow flipper on its rim and colored debris at the center, the 10101 EJD high-score line over a red INSERT COINS, and the MCMLXXX ATARI / BONUS EVERY 20000 / CREDITS 0 / 1 COIN 1 PLAY lines. Upright since phosphor-emulator-iitc: the raster fallback no longer applies the cabinet rotation a second time. WHICH TUBE IS NOT PINNED: the demo cycles levels, so the shape at this frame moves whenever the machine's timing does. It was the square tube before phosphor-emulator-mtme and is the round one after, on a one-cycle shift in the 250 Hz IRQ that compounds over 1800 frames. The four text lines are what this pins."

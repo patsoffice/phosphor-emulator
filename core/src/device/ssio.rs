@@ -16,7 +16,9 @@
 //! an analog chopper with RC smoothing, where [`DUTY_CYCLE_VOLUME`] below is a
 //! lookup of its average; the six channels sum through 13k legs into a 27k
 //! amplifier rather than as `(s0 + s1) / 2`; and the board's output is stereo
-//! where this is mono. See `phosphor-emulator-cg2f`.
+//! where this is mono. See `phosphor-emulator-cg2f`. The one piece that is
+//! modeled is the channels' 1 uF coupling, as a high-pass on the mix at the
+//! corner it computes to: see [`COUPLING_CUTOFF_HZ`].
 //!
 //! Self-contained Z80 + 2×AY-8910 sound board used across Midway's MCR I, II,
 //! and III arcade platforms. The main CPU communicates via 4-byte command latches
@@ -49,7 +51,7 @@
 //! | 0xE000–0xEFFF | R   | IRQ acknowledge/clear            |
 //! | 0xF000–0xFFFF | R   | DIP switches                     |
 
-use crate::audio::{AudioResampler, host_sample_rate};
+use crate::audio::{AudioResampler, DcBlocker, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::{Bus, BusMaster};
 use crate::cpu::Cpu;
@@ -79,6 +81,14 @@ const IRQ_INTERVAL: u32 = 2560;
 const DUTY_CYCLE_VOLUME: [u8; 16] = [
     255, 255, 255, 255, 244, 241, 236, 231, 223, 214, 199, 179, 151, 115, 65, 0,
 ];
+
+/// Corner of the channel coupling: 1 uF into a 13k summing leg, about 12.2 Hz.
+///
+/// Every channel reaches the summing amplifier through its own 1 uF capacitor
+/// and 13k resistor into a virtual ground, so each is high-passed at the same
+/// corner. The legs are equal and the sum is linear, so one high-pass on the
+/// mix is the same filter as six on the channels.
+const COUPLING_CUTOFF_HZ: f32 = 1.0 / (std::f32::consts::TAU * 13_000.0 * 1.0e-6);
 
 /// Midway SSIO sound board.
 ///
@@ -147,6 +157,12 @@ struct SsioBus {
     // Clock state
     #[save(id = 13)]
     clock: u64,
+
+    /// The channel coupling capacitors, at [`COUPLING_CUTOFF_HZ`]. The AY's
+    /// output is unipolar, so without them a sustained tone sits on a DC
+    /// pedestal the board never passes to the amplifier.
+    #[save(id = 14)]
+    coupling: DcBlocker,
 }
 
 impl SsioBoard {
@@ -170,6 +186,7 @@ impl SsioBoard {
                 mute: false,
                 resampler: AudioResampler::new(SSIO_CLOCK_HZ, host_sample_rate() as u64),
                 clock: 0,
+                coupling: DcBlocker::with_cutoff(COUPLING_CUTOFF_HZ, host_sample_rate()),
             },
         }
     }
@@ -250,17 +267,17 @@ impl SsioBoard {
         let n0 = self.bus.ay[0].fill_audio(&mut buf0);
         let n1 = self.bus.ay[1].fill_audio(&mut buf1);
 
-        // When either AY produces a sample, mix and push through the resampler.
-        // Both AYs run at the same clock, so they produce samples in lockstep.
+        // When either AY produces a sample, mix and queue it. The AYs resample
+        // to the host rate themselves and run on one clock, so their samples
+        // arrive in lockstep and already at the output rate.
         if n0 > 0 || n1 > 0 {
             let s0 = if n0 > 0 { buf0[0] as i32 } else { 0 };
             let s1 = if n1 > 0 { buf1[0] as i32 } else { 0 };
-            let mixed = if self.bus.mute {
-                0
-            } else {
-                ((s0 + s1) / 2).clamp(-32767, 32767) as i16
-            };
-            self.bus.resampler.push_sample(mixed);
+            let mixed = if self.bus.mute { 0 } else { (s0 + s1) / 2 };
+            let coupled = self.bus.coupling.process(mixed as f32);
+            self.bus
+                .resampler
+                .push_sample(coupled.clamp(-32767.0, 32767.0) as i16);
         }
 
         self.bus.clock += 1;
@@ -286,6 +303,7 @@ impl SsioBoard {
         self.bus.overall = [0; 2];
         self.bus.mute = false;
         self.bus.resampler.reset();
+        self.bus.coupling.reset();
         self.bus.clock = 0;
     }
 }
@@ -611,6 +629,40 @@ mod tests {
         bus_write(&mut ssio, 0xB002, 0x0F);
         bus_write(&mut ssio, 0xB000, 8);
         assert_eq!(bus_read(&mut ssio, 0xB001), 0x0F);
+    }
+
+    /// The channel coupling passes a step and then lets it decay: a channel
+    /// held at a constant level is audible as a click, not as an offset.
+    #[test]
+    fn a_held_level_decays_through_the_coupling() {
+        let corner = COUPLING_CUTOFF_HZ;
+        assert!((12.0..12.5).contains(&corner), "corner {corner} Hz");
+
+        let mut ssio = SsioBoard::new();
+        ssio.bus.rom[0] = 0x76; // HALT, so the sound CPU writes nothing
+        // AY0: tone and noise off on every channel, channel A at full volume.
+        // With its generators gated off a channel outputs its level unchanged.
+        bus_write(&mut ssio, 0xA000, 7);
+        bus_write(&mut ssio, 0xA002, 0x3F);
+        bus_write(&mut ssio, 0xA000, 8);
+        bus_write(&mut ssio, 0xA002, 0x0F);
+
+        let mut out = Vec::new();
+        let mut buf = [0i16; 4096];
+        for _ in 0..SSIO_CLOCK_HZ {
+            ssio.tick();
+            let n = ssio.fill_audio(&mut buf);
+            out.extend_from_slice(&buf[..n]);
+        }
+        let first_ms = host_sample_rate() as usize / 1000;
+        let onset = out[..first_ms].iter().map(|&s| s.unsigned_abs()).max();
+        assert!(onset.unwrap_or(0) > 1000, "the step passes: {onset:?}");
+        let tail = &out[out.len() - first_ms * 100..];
+        let mean = tail.iter().map(|&s| f64::from(s)).sum::<f64>() / tail.len() as f64;
+        assert!(
+            mean.abs() < 50.0,
+            "after a second the level is gone: {mean}"
+        );
     }
 
     #[test]

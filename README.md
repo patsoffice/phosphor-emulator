@@ -219,6 +219,7 @@ Complete system implementations that wire core components together:
 - **RobotronSystem** — Williams twin-stick arcade (M6809 + blitter + PIAs)
 - **SinistarSystem** — Sinistar on the shared Williams board (M6809 + M6800 sound + blitter with window-clip + HC55516 CVSD speech for the "sini-scream"/"I hunger" + 49-way joystick + 4KB work RAM + ROT270 portrait display)
 - **SatansHollowSystem** — Satan's Hollow on shared MCR II board (Z80 + SSIO + CTC + tile dirty tracking)
+- **TapperSystem**: Tapper on the Bally Midway 91490 board (5 MHz Z80 + CTC + Super Sound I/O + 1024 tiles and a 91464 object path where the first object to reach a pixel keeps it)
 - **QbertSystem** — Q*Bert on shared Gottlieb System 80 board (I8088 + M6502 sound + RIOT + DAC)
 - **GalagaSystem** — Galaga on shared Namco Galaga board (3×Z80 + WSG + 05XX starfield generator)
 - **XeviousSystem**: Xevious on the shared Namco Galaga board (3×Z80 + WSG melodic/effect sound + LLE 54XX explosion channel into its discrete ladders and band-passes; 06XX/51XX I/O + HLE 50XX score/protection; three-layer scrolling video, being a ROM-lookup background, foreground text and 3bpp sprites, with direct DIP reads)

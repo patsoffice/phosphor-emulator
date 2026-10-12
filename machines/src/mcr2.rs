@@ -159,6 +159,59 @@ pub const HTOTAL_DOTS: u32 = 634;
 /// In the pair units this board steps in, that is every 128.
 const PAIRS_PER_FIELD: u64 = 128;
 
+/// Decode a background ROM pair: 4bpp 8×8 tiles, two planes in each half.
+///
+/// Shared with the 91490 board (`mcr_91490.rs`), whose background ROMs are
+/// twice the size in the same format; the tile count follows the ROM length.
+pub(crate) fn decode_tile_gfx(bg_rom: &[u8]) -> gfx::GfxCache {
+    let tile_count = bg_rom.len() / 32;
+    let half_bits = (bg_rom.len() / 2) * 8;
+    let tile_planes: [usize; 4] = [1, 0, half_bits + 1, half_bits];
+    decode_gfx(
+        bg_rom,
+        0,
+        tile_count,
+        &GfxLayout {
+            plane_offsets: &tile_planes,
+            x_offsets: &[0, 2, 4, 6, 8, 10, 12, 14],
+            y_offsets: &[0, 16, 32, 48, 64, 80, 96, 112],
+            char_increment: 128,
+        },
+    )
+}
+
+/// Decode a sprite ROM set: 4bpp 32×32 objects, interleaved across the ROM's
+/// four quarters.
+///
+/// Shared with the 91464 Super Video Gen (`mcr_91490.rs`), which carries eight
+/// ROMs where the 91399 carries four; the layout is the same per quarter.
+pub(crate) fn decode_sprite_gfx(fg_rom: &[u8]) -> gfx::GfxCache {
+    let sprite_count = fg_rom.len() / 512;
+    let q8 = (fg_rom.len() / 4) * 8;
+    let x_offsets: [usize; 32] =
+        std::array::from_fn(|px| ((px / 2) % 4) * q8 + (px / 8) * 8 + (px % 2) * 4);
+    let y_offsets: [usize; 32] = std::array::from_fn(|py| py * 32);
+    decode_gfx(
+        fg_rom,
+        0,
+        sprite_count,
+        &GfxLayout {
+            plane_offsets: &[3, 2, 1, 0],
+            x_offsets: &x_offsets,
+            y_offsets: &y_offsets,
+            char_increment: 1024,
+        },
+    )
+}
+
+/// One 9-bit palette word as RGB: red in bits 6-8, blue in 3-5, green in 0-2.
+pub(crate) fn rgb_from_9bit(val9: u16) -> (u8, u8, u8) {
+    let r = gfx::pal_nbit((val9 >> 6) as u8, 3);
+    let g = gfx::pal_nbit(val9 as u8, 3);
+    let b = gfx::pal_nbit((val9 >> 3) as u8, 3);
+    (r, g, b)
+}
+
 pub fn output_sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
 }
@@ -397,39 +450,8 @@ impl Mcr2Board {
     /// Pre-decode tile and sprite ROMs into GFX caches.
     /// `bg_rom` is the background tile ROM, `fg_rom` is the sprite ROM.
     pub fn decode_gfx(&mut self, bg_rom: &[u8], fg_rom: &[u8]) {
-        // Tiles: 4bpp, 8x8, ROM split in two halves
-        let tile_count = bg_rom.len() / 32;
-        let half_bits = (bg_rom.len() / 2) * 8;
-        let tile_planes: [usize; 4] = [1, 0, half_bits + 1, half_bits];
-        self.tile_cache = decode_gfx(
-            bg_rom,
-            0,
-            tile_count,
-            &GfxLayout {
-                plane_offsets: &tile_planes,
-                x_offsets: &[0, 2, 4, 6, 8, 10, 12, 14],
-                y_offsets: &[0, 16, 32, 48, 64, 80, 96, 112],
-                char_increment: 128,
-            },
-        );
-
-        // Sprites: 4bpp, 32x32, 4 ROM quarters
-        let sprite_count = fg_rom.len() / 512;
-        let q8 = (fg_rom.len() / 4) * 8;
-        let x_offsets: [usize; 32] =
-            std::array::from_fn(|px| ((px / 2) % 4) * q8 + (px / 8) * 8 + (px % 2) * 4);
-        let y_offsets: [usize; 32] = std::array::from_fn(|py| py * 32);
-        self.sprite_cache = decode_gfx(
-            fg_rom,
-            0,
-            sprite_count,
-            &GfxLayout {
-                plane_offsets: &[3, 2, 1, 0],
-                x_offsets: &x_offsets,
-                y_offsets: &y_offsets,
-                char_increment: 1024,
-            },
-        );
+        self.tile_cache = decode_tile_gfx(bg_rom);
+        self.sprite_cache = decode_sprite_gfx(fg_rom);
     }
 
     // -----------------------------------------------------------------------
@@ -447,10 +469,7 @@ impl Mcr2Board {
         // Cache canonical bytes for save state (rebuild_palette reads these)
         self.palette_ram[entry * 2] = val9 as u8;
         self.palette_ram[entry * 2 + 1] = (val9 >> 8) as u8;
-        let r = gfx::pal_nbit((val9 >> 6) as u8, 3);
-        let g = gfx::pal_nbit(val9 as u8, 3);
-        let b = gfx::pal_nbit((val9 >> 3) as u8, 3);
-        self.palette_rgb[entry] = (r, g, b);
+        self.palette_rgb[entry] = rgb_from_9bit(val9);
     }
 
     /// Rebuild the entire palette from the cached palette_ram (used after state load).
@@ -459,10 +478,7 @@ impl Mcr2Board {
             let low = self.palette_ram[entry * 2] as u16;
             let high = self.palette_ram[entry * 2 + 1] as u16;
             let val9 = low | ((high & 1) << 8);
-            let r = gfx::pal_nbit((val9 >> 6) as u8, 3);
-            let g = gfx::pal_nbit(val9 as u8, 3);
-            let b = gfx::pal_nbit((val9 >> 3) as u8, 3);
-            self.palette_rgb[entry] = (r, g, b);
+            self.palette_rgb[entry] = rgb_from_9bit(val9);
         }
     }
 

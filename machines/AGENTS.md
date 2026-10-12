@@ -163,6 +163,9 @@ Games sharing hardware use a shared board struct. When adding a new game on exis
 - `namco_galaga.rs` - Namco Galaga (Z80 + Namco audio)
 - `tkg04.rs` - Nintendo TKG-04 (Z80 + I8035 + DMA)
 - `mcr2.rs` - Bally Midway MCR II (Z80 + SSIO + CTC)
+- `mcr_91490.rs` - Bally Midway 91490 5 MHz CPU board with the 91464 Super
+  Video Gen (Z80 + SSIO + CTC); reuses `mcr2.rs`'s graphics decoders and palette
+  word
 - `atari_dvg.rs` - Atari DVG vector (M6502 + DVG)
 - `gottlieb.rs` - Gottlieb System 80 (I8088 + M6502 sound)
 - `sega_zaxxon.rs` - Sega Zaxxon family video (Zaxxon, Congo Bongo). A video

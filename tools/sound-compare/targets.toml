@@ -1709,13 +1709,17 @@ the AC results. No measurement."""
 
 [[target]]
 id = "mcr2-output"
-machines = ["satanshollow"]
+machines = ["satanshollow", "tapper"]
 device = "core/src/device/ssio.rs"
 status = "partial"
 notes = """
 EXAMINED. Super Sound I/O schematic A084-90913-E000, transcribed at
 docs/schematics/ssio-audio-output.md. `partial` because the duty-cycle
-attenuation IS modelled, as its average; nothing else on the analog half is.
+attenuation IS modeled, as its average, and the channels' 1 uF coupling into the
+13k summing legs is modeled as one 12.2 Hz high-pass on the mix (COUPLING_CUTOFF_HZ
+in ssio.rs); nothing else on the analog half is. The coupling went in when Tapper
+sat at +0.086 DC through movie play and failed audio_sanity_test, with Satan's
+Hollow at +0.039 just under the line.
 
 THE DUTY-CYCLE VOLUME IS AN ANALOG CHOPPER. A 74LS191 loaded with four bits
 drives a 7407 that gates two 4066 sections in series with the channel's audio,
@@ -1736,7 +1740,14 @@ Read from TRON's manual, PDF p128, not Satan's Hollow's: the board is shared
 across MCR II and no Satan's Hollow scan was located. Note that
 phosphor-emulator-aih3 cites this as "sheet 9-10", which is Satan's Hollow's
 numbering; in Tron's package the same drawing is 9-15. Sheet numbers are per
-manual and are not a stable way to name one. phosphor-emulator-cg2f."""
+manual and are not a stable way to name one. phosphor-emulator-cg2f.
+
+TAPPER IS ON THE SAME BOARD BEHIND A DIFFERENT CPU BOARD. Its option switch card
+(Parts and Operating Manual, Dec 1983, PDF p5) puts Switch 1 at B3 and the
+diagnostic Switch 3 at D14 on the Sound I/O board, the positions this board
+carries, and mcr_91490.rs drives the same SsioBoard. The Super Sound I/O
+drawing in Tapper's own package was not opened, so everything above is still
+read from Tron's."""
 
 [[target]]
 id = "tempest-output"
