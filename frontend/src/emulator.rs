@@ -876,14 +876,9 @@ pub fn run(
                         && debug_state.run_mode == RunMode::Paused
                         && hot == Some(HostAction::StepInstruction) =>
                 {
-                    if take_mode != MovieMode::Live {
-                        refuse(
-                            &mut notices,
-                            "Instruction stepping is unavailable while recording or replaying",
-                        );
-                    } else {
-                        debug_state.run_mode = RunMode::StepInstruction;
-                    }
+                    // Queued; the drain refuses it during a take and runs one
+                    // instruction step at the frame boundary otherwise.
+                    commands.submit(crate::session::SessionCommand::StepInstruction);
                 }
 
                 // Step one cycle (debug + paused).
@@ -1226,7 +1221,12 @@ pub fn run(
         // hotkey actions execute, after the poll and before resync, movie
         // delivery, and the frame. Draining before the poll would add a
         // frame of latency to every hotkey; draining after delivery would
-        // reorder commands against recorded input.
+        // reorder commands against recorded input. Panel-staged display
+        // edits join the queue here, ahead of the drain, so they pass
+        // through the same enablement and ordering.
+        if let Some(display) = settings_state.pending_display.take() {
+            commands.submit(crate::session::SessionCommand::SetDisplay { settings: display });
+        }
         {
             let paused = debug_state.global_paused || debug_state.run_mode == RunMode::Paused;
             let mut drain_ctx = crate::session::LoopCtx {

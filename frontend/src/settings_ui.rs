@@ -1,7 +1,7 @@
 //! egui settings panels: the input-rebinding panel, the DIP switch panel and
 //! the display panel.
 
-use phosphor_core::core::display::{DisplaySettings, set_display_settings};
+use phosphor_core::core::display::DisplaySettings;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipSwitchBank, InputControl, InputId, InputKind,
 };
@@ -62,11 +62,13 @@ pub struct SettingsState {
     pub legend_visible: bool,
     /// Whether the display panel is visible.
     pub display_active: bool,
-    /// The display knobs as the panel has them. Applied the moment they move,
-    /// since the point of them is to be turned while looking at the picture;
-    /// `display_changed` tells the emulator loop there is something to persist.
+    /// The display knobs as the panel has them.
     pub display: phosphor_core::core::display::DisplaySettings,
-    pub display_changed: bool,
+    /// A display edit staged by the panel and not yet submitted. The loop
+    /// submits it as a `SetDisplay` command before the drain, so the value
+    /// lands one frame after the edit through the same path as every other
+    /// command.
+    pub pending_display: Option<phosphor_core::core::display::DisplaySettings>,
 }
 
 /// Draw the input-rebinding side panel.
@@ -419,9 +421,10 @@ pub fn draw_dip_panel(
 /// them is measured rather than invented and the numbers mean something: 1.0 is
 /// the figure the tube gives, not an arbitrary middle of a slider.
 ///
-/// Changes apply immediately, since the whole point of them is to be turned
-/// while looking at the result. The emulator loop notices `display_changed` and
-/// persists them.
+/// Changes land one frame after the edit: the panel stages them in
+/// `pending_display` and the loop submits them as `SetDisplay` commands,
+/// so the picture still tracks the slider while passing through the queue.
+/// Exit persists the live value, as before.
 pub fn draw_display_panel(ui: &mut egui::Ui, state: &mut SettingsState) {
     egui::Panel::right("display_settings_panel")
         .default_size(PANEL_WIDTH as f32)
@@ -494,8 +497,7 @@ pub fn draw_display_panel(ui: &mut egui::Ui, state: &mut SettingsState) {
             });
 
             if state.display != before {
-                set_display_settings(state.display);
-                state.display_changed = true;
+                state.pending_display = Some(state.display);
             }
         });
 }

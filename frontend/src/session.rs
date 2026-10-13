@@ -36,6 +36,10 @@ pub fn movie_mode(recording: bool, replaying: bool) -> MovieMode {
 /// A session-level action, submitted by hotkeys or panels and executed at a
 /// frame boundary. Only existing frontend behavior gets a variant; the
 /// catalog never invents emulator features.
+///
+/// Variants are wired slice by slice; until a slice submits one, it is
+/// constructed only in tests, which is what the allowance below says.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum SessionCommand {
     ResetSoft,
@@ -95,6 +99,9 @@ pub enum CommandCategory {
 
 /// Stable id, human-readable label, and category for a command. Labels
 /// reuse the `HostAction` text so the panels and the key legend agree.
+///
+/// Read by tests and by later slices; see the enum allowance.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct CommandMeta {
     pub id: &'static str,
@@ -217,6 +224,7 @@ pub fn meta(cmd: &SessionCommand) -> CommandMeta {
 /// Every variant, with representative payloads for the data-carrying ones.
 /// The id-uniqueness test below walks this list, so a variant added here
 /// without metadata still fails the compile first.
+#[cfg(test)]
 pub fn all() -> Vec<SessionCommand> {
     use phosphor_core::core::WatchpointKind;
     use phosphor_core::core::display::DisplaySettings;
@@ -364,6 +372,7 @@ impl SessionState {
     }
 
     /// How many commands are waiting.
+    #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.queue.len()
     }
@@ -435,6 +444,15 @@ impl SessionState {
                         ctx.notices.error("No saved state to load");
                     }
                 },
+                SessionCommand::StepInstruction => {
+                    // Paused-only, enforced above. Runs now, at the frame
+                    // boundary, rather than arming a mode for the next
+                    // frame: the effect is the same single step.
+                    ctx.machine.debug_tick();
+                }
+                SessionCommand::SetDisplay { settings } => {
+                    phosphor_core::core::display::set_display_settings(settings);
+                }
                 SessionCommand::CaptureFrame => {
                     // Through the harness helper, which is the one definition
                     // of "the frame this cabinet displays" and is what the
