@@ -1461,11 +1461,14 @@ status = "partial"
 notes = """
 MODELED in machines/src/battlezone_sound.rs under phosphor-emulator-battlezone-cli:
 one POKEY at its normalized output plus behavioral engine, shell and
-explosion voices, mixed at the board's conductance weights (100k shell and
-explosion, 41.25k engine, 330k POKEY) and driven into the Regulator/Audio II
-amplifier at rev B's output coupling. The voice part values (envelopes, VCO
-voltages, loud/soft ratio, mixer corners) come from the reference's
-bzone_a.cpp netlist read, not from the drawing.
+explosion voices, summed at the board's conductance weights (100k shell and
+explosion, 41.25k engine, 330k POKEY) into the R29 22k feedback load with the
+reference's output gain. The shell and explosion voices enter through the
+1k/22k divider at the custom-filter stage gains, off the RC envelope nodes,
+and the mix drives the Regulator/Audio II amplifier at rev B's output
+coupling. The voice part values (envelopes, VCO voltages, stage gains, mixer
+corners) come from the reference's bzone_a.cpp netlist read, not from the
+drawing.
 
 NOT READ: the Auxiliary PCB sheet that carries the POKEY's pin-37 load and
 the discrete section (sheet 3 side B of the DP-156 package), and rev C's

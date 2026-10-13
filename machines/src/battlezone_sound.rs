@@ -8,9 +8,9 @@
 //! | Bit | MAME's read of the board | What this models |
 //! |---|---|---|
 //! | D0 | explosion enable | gates the explosion noise |
-//! | D1 | explosion loud (1) / soft (0) | ×3.8 / ×1 gain |
+//! | D1 | explosion loud (1) / soft (0) | ×33 / ×8.7 stage gain |
 //! | D2 | shell enable | gates the shell noise |
-//! | D3 | shell loud (1) / soft (0) | ×3.8 / ×1 gain |
+//! | D3 | shell loud (1) / soft (0) | ×33 / ×8.7 stage gain |
 //! | D4 | engine rev enable | VCO control voltage 2.5 V / 4.1 V |
 //! | D5 | sound enable | mutes everything including the POKEY |
 //! | D6 | start LED | not modeled (no lamp device) |
@@ -31,7 +31,8 @@
 //!   through R8, 0.22 s down through R9), the F4/F5 counter taps (÷12 and ÷10
 //!   pulse trains), and the 41 Hz engine-mixer low-pass (4×33k into 0.47 uF),
 //! - the final mix at the board's conductance weights (100k shell and
-//!   explosion, 41.25k engine, 330k POKEY).
+//!   explosion, 41.25k engine, 330k POKEY) into the R29 22k feedback load,
+//!   with the reference's output gain; the POKEY enters as a 5 V signal.
 //!
 //! What is not: the R11 engine-frequency pot is fixed at the reference's 40%
 //! adjuster position (the pot is a cabinet trim, not a part value); the VCO
@@ -46,15 +47,34 @@ use phosphor_macros::Saveable;
 
 /// 12 kHz board noise clock (MAME `BZ_NOISE_CLOCK`).
 const NOISE_CLOCK_HZ: f64 = 12_000.0;
-/// TTL swing into the custom filters, in volts.
+/// TTL logic swing into the engine mixer, in volts.
 const TTL_V: f64 = 3.4;
-/// Loud/soft gain ratio from the custom filter: the 4066 shorts R12/R19
-/// (33k) to 270 ohm against R13/R18 (10k) into R32/R33 (330k).
-const LOUD_SOFT_RATIO: f64 = 33.1 / 8.67;
-/// Shell envelope: (R14+R15) 23k into C9 4.7 uF.
-const SHELL_TAU_S: f64 = 23_000.0 * 4.7e-6;
-/// Explosion envelope: (R17+R16) 23k into C14 10 uF.
-const EXPLO_TAU_S: f64 = 23_000.0 * 10e-6;
+/// Custom-filter input divider: R15/R16 1k under R14/R17 22k. The noise
+/// envelope enters the filter through it, so the voices peak near 1.8 V
+/// soft instead of at the TTL rail.
+const VOICE_DIV: f64 = 1_000.0 / 23_000.0;
+/// Custom-filter stage gains: R32/R33 330k over R12/R19 33k + R13/R18
+/// 10k (soft); the 4066 shorts R12/R19 to 270 ohm when loud.
+const VOICE_GAIN_SOFT: f64 = 8.67;
+const VOICE_GAIN_LOUD: f64 = 33.1;
+/// Envelope RC nodes: the 4066 switch (270 ohm) against (R14+R15 /
+/// R17+R16) 23k. The two charge paths differ by half a percent, so both
+/// use the switch resistance alone.
+const SW_ON_OHM: f64 = 270.0;
+const ENV_R_OHM: f64 = 23_000.0;
+/// The switch drop the node output is taken through.
+const ENV_V_DROP: f64 = (SW_ON_OHM + ENV_R_OHM) / (2.0 * SW_ON_OHM + ENV_R_OHM);
+/// Charge target under the noise load: 5 V through the same drop.
+const ENV_V_CHG: f64 = 5.0 * ENV_V_DROP;
+/// Shell envelope: C9 4.7 uF. Charges in about a millisecond, discharges
+/// across 23k over ~110 ms.
+const SHELL_C_F: f64 = 4.7e-6;
+const SHELL_TAU_CHG_S: f64 = SW_ON_OHM * SHELL_C_F;
+const SHELL_TAU_DIS_S: f64 = (SW_ON_OHM + ENV_R_OHM) * SHELL_C_F;
+/// Explosion envelope: C14 10 uF, the same shape running slower.
+const EXPLO_C_F: f64 = 10e-6;
+const EXPLO_TAU_CHG_S: f64 = SW_ON_OHM * EXPLO_C_F;
+const EXPLO_TAU_DIS_S: f64 = (SW_ON_OHM + ENV_R_OHM) * EXPLO_C_F;
 /// Custom-filter low-pass: R32/R33 330k into C21/C22 0.0047 uF.
 const VOICE_LP_HZ: f64 = 1.0 / (std::f64::consts::TAU * 330_000.0 * 0.0047e-6);
 /// Engine mixer low-pass: 4×33k into C29 0.47 uF.
@@ -75,6 +95,15 @@ const G_SHELL: f64 = 1.0 / 100_000.0;
 const G_EXPLO: f64 = 1.0 / 100_000.0;
 const G_ENGINE: f64 = 1.0 / 41_250.0;
 const G_POKEY: f64 = 1.0 / 330_000.0;
+/// The final mixer's feedback resistor R29 22k loads the summing node, so
+/// the node's denominator is the input conductances plus its own.
+const R_FEEDBACK: f64 = 22_000.0;
+/// The output stage scales the node to full scale (the reference's
+/// `DISCRETE_OUTPUT` gain).
+const OUT_GAIN: f64 = 48_000.0 / 32_768.0;
+/// The POKEY enters the mix as a 5 V signal (the reference scales its
+/// full-scale stream by 5.0/32768).
+const POKEY_V: f64 = 5.0;
 
 /// Battlezone's discrete voices, driven by the `$1840` latch byte.
 #[derive(Saveable)]
@@ -89,8 +118,8 @@ pub struct BattlezoneSound {
     shell_src: bool,
     nand_acc: f64,
     nand_bit: bool,
-    shell_env: f64,
-    explo_env: f64,
+    shell_cap: f64,
+    explo_cap: f64,
     shell_lp: f64,
     explo_lp: f64,
     /// Engine control voltage, slewing toward the rev-selected target.
@@ -112,8 +141,8 @@ impl BattlezoneSound {
             shell_src: false,
             nand_acc: 0.0,
             nand_bit: false,
-            shell_env: 0.0,
-            explo_env: 0.0,
+            shell_cap: 0.0,
+            explo_cap: 0.0,
             shell_lp: 0.0,
             explo_lp: 0.0,
             cv: CV_REST_V,
@@ -169,6 +198,34 @@ impl BattlezoneSound {
         *state += a * (target - *state);
     }
 
+    /// One step of the envelope RC node: enabled, the cap charges toward
+    /// 5 V (4.94 V under the noise load) in about a millisecond; released,
+    /// it discharges across 23k. The noise bit gates the output, never the
+    /// cap, so a release decays instead of chopping.
+    fn envelope(
+        cap: &mut f64,
+        enabled: bool,
+        bit: bool,
+        tau_chg: f64,
+        tau_dis: f64,
+        dt: f64,
+    ) -> f64 {
+        if enabled {
+            if bit {
+                Self::slew(cap, ENV_V_CHG, tau_chg, tau_chg, dt);
+                *cap * ENV_V_DROP
+            } else {
+                Self::slew(cap, 5.0, tau_chg, tau_chg, dt);
+                0.0
+            }
+        } else if bit {
+            Self::slew(cap, 0.0, tau_dis, tau_dis, dt);
+            *cap * ENV_V_DROP
+        } else {
+            0.0
+        }
+    }
+
     /// Render `pokey.len()` host-rate samples of the mixed voices.
     ///
     /// `pokey` is the POKEY's normalized output (0..1 full scale); with the
@@ -206,31 +263,47 @@ impl BattlezoneSound {
                 }
             }
 
-            // Envelopes chase the enable bits through the RC time constants.
-            let target = f64::from(u8::from(self.shell_on()));
-            Self::slew(&mut self.shell_env, target, SHELL_TAU_S, SHELL_TAU_S, dt);
-            let target = f64::from(u8::from(self.explo_on()));
-            Self::slew(&mut self.explo_env, target, EXPLO_TAU_S, EXPLO_TAU_S, dt);
+            // The envelope RC nodes feed the custom filters through the
+            // input divider. The reference clamps the filter at the
+            // op-amp rail; the loud peak near 7 V never reaches it.
+            let (shell_en, shell_bit) = (self.shell_on(), self.shell_src);
+            let shell_in = Self::envelope(
+                &mut self.shell_cap,
+                shell_en,
+                shell_bit,
+                SHELL_TAU_CHG_S,
+                SHELL_TAU_DIS_S,
+                dt,
+            );
+            let (explo_en, explo_bit) = (self.explo_on(), self.nand_bit);
+            let explo_in = Self::envelope(
+                &mut self.explo_cap,
+                explo_en,
+                explo_bit,
+                EXPLO_TAU_CHG_S,
+                EXPLO_TAU_DIS_S,
+                dt,
+            );
 
             let shell_gain = if self.shell_loud() {
-                LOUD_SOFT_RATIO
+                VOICE_GAIN_LOUD
             } else {
-                1.0
+                VOICE_GAIN_SOFT
             };
             let shell_v = Self::lp(
                 &mut self.shell_lp,
-                TTL_V * f64::from(u8::from(self.shell_src)) * self.shell_env * shell_gain,
+                shell_in * VOICE_DIV * shell_gain,
                 VOICE_LP_HZ,
                 dt,
             );
             let explo_gain = if self.explo_loud() {
-                LOUD_SOFT_RATIO
+                VOICE_GAIN_LOUD
             } else {
-                1.0
+                VOICE_GAIN_SOFT
             };
             let explo_v = Self::lp(
                 &mut self.explo_lp,
-                TTL_V * f64::from(u8::from(self.nand_bit)) * self.explo_env * explo_gain,
+                explo_in * VOICE_DIV * explo_gain,
                 VOICE_LP_HZ,
                 dt,
             );
@@ -255,12 +328,17 @@ impl BattlezoneSound {
                 Self::lp(&mut self.engine_lp, 0.0, ENGINE_LP_HZ, dt)
             };
 
-            // The board's weighted mix, normalized to full scale.
-            let mixed = (shell_v * G_SHELL
+            // The final mixer's Millman node: every voice sinks its node
+            // voltage through its input resistor into the R29 feedback
+            // load, and the output stage scales the node to full scale.
+            // A plain average over the inputs would leave R29 out and run
+            // every voice about 8 dB low.
+            let node = (shell_v * G_SHELL
                 + explo_v * G_EXPLO
                 + engine_v * G_ENGINE
-                + f64::from(p) * TTL_V * G_POKEY)
-                / (TTL_V * (G_SHELL + G_EXPLO + G_ENGINE + G_POKEY));
+                + f64::from(p) * POKEY_V * G_POKEY)
+                / (G_SHELL + G_EXPLO + G_ENGINE + G_POKEY + 1.0 / R_FEEDBACK);
+            let mixed = node * OUT_GAIN;
             let sample = if self.sound_on() { mixed } else { 0.0 };
             out.push((sample.clamp(-1.0, 1.0) * 32767.0) as i16);
         }
@@ -353,5 +431,42 @@ mod tests {
         let pokey: Vec<f32> = (0..4410).map(|i| (i % 2) as f32).collect();
         let out = s.mix_frame(&pokey);
         assert!(rms(&out) > 100.0, "pokey rms = {}", rms(&out));
+    }
+
+    /// The final mix carries the reference's structure: a steady full-scale
+    /// POKEY alone lands on the loaded-node value, about 7844, not on the
+    /// unloaded average near 2100.
+    #[test]
+    fn pokey_only_full_scale_matches_loaded_node() {
+        let mut s = BattlezoneSound::new();
+        s.write_latch(0x20); // sound on, all voices off
+        let out = s.mix_frame(&vec![1.0; 441]);
+        let g_sum = G_SHELL + G_EXPLO + G_ENGINE + G_POKEY + 1.0 / R_FEEDBACK;
+        let expected = POKEY_V * G_POKEY / g_sum * OUT_GAIN * 32767.0;
+        assert!(
+            out.iter().all(|&v| (f64::from(v) - expected).abs() <= 2.0),
+            "pokey-only {expected:.1}, got {:?}",
+            &out[..8]
+        );
+    }
+
+    /// A held shell settles where the reference puts it: the RC node near
+    /// 4.9 V, chopped by the noise tap, through the divider and the soft
+    /// stage gain. A TTL-scaled voice would sit near 8800 instead.
+    #[test]
+    fn shell_settles_at_divided_node_level() {
+        let mut s = BattlezoneSound::new();
+        s.write_latch(0x20 | 0x04); // shell, soft
+        let out = s.mix_frame(&silent(44100));
+        let tail = &out[out.len() / 2..];
+        let mean = tail.iter().map(|&v| f64::from(v)).sum::<f64>() / tail.len() as f64;
+        let g_sum = G_SHELL + G_EXPLO + G_ENGINE + G_POKEY + 1.0 / R_FEEDBACK;
+        let expected = 0.5 * ENV_V_CHG * ENV_V_DROP * VOICE_DIV * VOICE_GAIN_SOFT * G_SHELL / g_sum
+            * OUT_GAIN
+            * 32767.0;
+        assert!(
+            (mean - expected).abs() <= 400.0,
+            "shell mean {mean:.0}, want {expected:.0}"
+        );
     }
 }
