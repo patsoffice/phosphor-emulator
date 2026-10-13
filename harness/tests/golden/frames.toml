@@ -47,6 +47,14 @@ frame = "sha256:412305fa84ceb15190ebadbdf447108d315dc25e15444922d58d11e07cca88ea
 vectors = "sha256:1ffca0922e31bfb41986b177bae1cf04854cf332e7f2ed3bd8a8595e7c1e519a"
 
 [[frame]]
+machine = "battlezone"
+frames = 1800
+shows = "Attract mode game over screen: GAME OVER over the 2 COINS 1 PLAY prompt, SCORE 0000 and HIGH SCORE 5000 across the top with the radar scope between them, ENEMY IN RANGE at upper left, the mountain horizon with an enemy tank on the right, and the 1980 Atari copyright at the bottom."
+size = [727, 501]
+frame = "sha256:7aa86a4e8a8af02ef40a2d73fb23047267508b1d2d88dd7dfda91d49537d736a"
+vectors = "sha256:b32fe7a8917bedbb19442fe350c35786cf11e53b9a48cef49c3126b0e99c5ce4"
+
+[[frame]]
 machine = "blackwidow"
 frames = 1800
 shows = "Attract mode: INSERT COINS in red and SHOOT GRENADE BUGS WITH CAUTION in white across the top, the blue web with the green spider beside the hub, white and green bugs drifting out of it, a cyan ring around a blue 500 at upper left, and CREDITS 0 in green over the blue copyright line at the bottom. The right way up because the model inverts an axis while its latch bit is clear: the program writes both set in an upright cabinet, and modeled as the labels read (1 = invert) the whole picture turns 180 degrees."

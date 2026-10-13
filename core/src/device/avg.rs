@@ -5,7 +5,7 @@
 //! RAM/ROM and generates a display list of colored line segments for rendering
 //! on a color vector CRT.
 //!
-//! Five variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
+//! Six variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
 //! byte-addressed decode), Quantum (1982, word-addressed decode with 12-bit
 //! normalization, Quantum color weights, and an X/Y coordinate swap), Star
 //! Wars (1983, byte-addressed like Tempest but with no XOR-1 swap and a simple
@@ -120,6 +120,12 @@ pub enum AvgVariant {
     /// 4-bit intensity together (no 0x800 select, no color RAM), and the draw
     /// is unswapped. The reference driver's plain `AVG` device.
     SpaceDuel,
+    /// Battlezone (1980): the base AVG's XOR-1 byte decode and 13-bit
+    /// normalization, but black-and-white: the STAT latches a 4-bit intensity
+    /// and the HST/LST clipping switches with no color, and the draw is a
+    /// white vector clipped to the window those switches arm. The reference
+    /// driver's `AVG_BZONE` device.
+    Battlezone,
 }
 
 /// Atari AVG (Tempest / Quantum / Star Wars variants).
@@ -289,6 +295,10 @@ pub struct Avg {
     spkl_shift: u8,
     /// Set once the clip window's top has been latched; cleared by a scale
     /// STAT with DVY bit 11, which re-arms it for the next instruction.
+    ///
+    /// On Battlezone this same bit is the LST clipping switch itself (set by
+    /// the STAT's switch data, cleared with HST by every latch1): the two
+    /// uses never meet, each is gated on its variant.
     #[save(id = 27)]
     lst: bool,
     /// The clip window's top in beam coordinates, if one is latched for this
@@ -298,6 +308,26 @@ pub struct Avg {
     /// The host CPU's low address bits, which seed part of the sparkle LFSR.
     #[save_skip(default)]
     host_address: u8,
+
+    // Battlezone only.
+    /// HST clipping switch on. LST is this bit's complement everywhere but
+    /// latch1's idle state, which holds both on; see [`Avg::latch1`].
+    #[save(id = 29)]
+    hst: bool,
+    /// Z-blank invert, latched from the STAT's switch data and never acted
+    /// on: the game leaves it clear, and the reference notes the same.
+    #[save(id = 30)]
+    izblank: bool,
+    /// The clipping window in beam coordinates, `[xmin, ymin, xmax, ymax]`,
+    /// as last captured by [`Avg::latch1`]. The ends are not ordered (each
+    /// corner is captured separately), so the draw normalizes them at use.
+    #[save(id = 31)]
+    clip_rect: [i32; 4],
+    /// A window has been captured at least once since reset. Until then the
+    /// whole field draws, as the reference's renderer does before its first
+    /// clip entry.
+    #[save(id = 32)]
+    clip_armed: bool,
 }
 
 /// A beam position in fixed point, `(x, y)`.
@@ -472,6 +502,10 @@ impl Avg {
             lst: false,
             clip_top: None,
             host_address: 0,
+            hst: false,
+            izblank: false,
+            clip_rect: [0; 4],
+            clip_armed: false,
         }
     }
 
@@ -545,13 +579,15 @@ impl Avg {
 
     /// Present the byte (Quantum: word) at the address counter to the latches.
     ///
-    /// Tempest and Space Duel address vector memory as `pc ^ 1`, Star Wars in
-    /// native order, and Quantum reads the big-endian word the counter is
-    /// inside.
+    /// Tempest, Space Duel and Battlezone address vector memory as `pc ^ 1`,
+    /// Star Wars in native order, and Quantum reads the big-endian word the
+    /// counter is inside.
     fn update_databus(&mut self, mem: &VectorMemory) {
         let byte = |i: usize| u16::from(mem.byte(i));
         self.data = match self.variant {
-            AvgVariant::Tempest | AvgVariant::SpaceDuel => byte(usize::from(self.pc) ^ 1),
+            AvgVariant::Tempest | AvgVariant::SpaceDuel | AvgVariant::Battlezone => {
+                byte(usize::from(self.pc) ^ 1)
+            }
             AvgVariant::StarWars => byte(usize::from(self.pc)),
             AvgVariant::Quantum => Self::read_word_be(mem, self.pc & !1),
             AvgVariant::MajorHavoc if self.pc & 0x2000 != 0 => {
@@ -607,6 +643,13 @@ impl Avg {
         // arming survive it.
         self.enspkl = false;
         self.xdac_xor = 0x200;
+        // Battlezone's clip window lives in the renderer's clip state on the
+        // reference, which neither GO nor a pass clears; only a reset drops
+        // it, back to a whole-field draw.
+        self.hst = false;
+        self.izblank = false;
+        self.clip_rect = [0; 4];
+        self.clip_armed = false;
     }
 
     /// Clock the sequencer once and return the master-clock cycles it took.
@@ -793,6 +836,25 @@ impl Avg {
             self.clip_top = Some(self.ypos);
             self.lst = true;
         }
+        // Battlezone's clipping hardware watches the HST/LST analog switches:
+        // while either is off, the beam's position is the window corner being
+        // set. The reference remembers the position on the falling edge of
+        // each switch and emits a clip entry when either was off; the idle
+        // state holds both switches on until a STAT's switch data changes one.
+        if self.variant == AvgVariant::Battlezone {
+            if !self.hst {
+                self.clip_rect[2] = self.xpos;
+                self.clip_rect[3] = self.ypos;
+                self.clip_armed = true;
+            }
+            if !self.lst {
+                self.clip_rect[0] = self.xpos;
+                self.clip_rect[1] = self.ypos;
+                self.clip_armed = true;
+            }
+            self.lst = true;
+            self.hst = true;
+        }
         if self.variant == AvgVariant::Quantum {
             self.dvy = self.data & 0x1FFF;
             self.dvy12 = ((self.data >> 12) & 1) as u8;
@@ -939,6 +1001,18 @@ impl Avg {
                     self.color = (self.dvy & 0x7) as u8;
                     self.intensity = ((self.dvy >> 4) & 0xF) as u8;
                 }
+                // Battlezone latches a 4-bit intensity with no color (the
+                // tube is white), and the HST/LST clipping switches with the
+                // Z-blank invert, unless DVY bit 10 says the STAT carries no
+                // switch data.
+                AvgVariant::Battlezone => {
+                    self.intensity = ((self.dvy >> 4) & 0xF) as u8;
+                    if self.dvy & 0x400 == 0 {
+                        self.lst = self.dvy & 0x200 != 0;
+                        self.hst = !self.lst;
+                        self.izblank = self.dvy & 0x100 != 0;
+                    }
+                }
                 // Quantum latches color and intensity together, gated on bit 11.
                 AvgVariant::Quantum => {
                     if self.dvy & 0x800 != 0 {
@@ -1022,6 +1096,7 @@ impl Avg {
             AvgVariant::StarWars => self.draw_starwars(cycles),
             AvgVariant::MajorHavoc => self.draw_major_havoc(cycles, color_ram),
             AvgVariant::SpaceDuel => self.draw_spaceduel(cycles),
+            AvgVariant::Battlezone => self.draw_battlezone(cycles),
         }
         cycles
     }
@@ -1216,6 +1291,35 @@ impl Avg {
         self.add_point(x, y, eff_intensity, [r, g, b], cycles.max(0) as u32);
     }
 
+    /// Battlezone's strobe3 draw: Space Duel's 13-bit position math and
+    /// intensity select, but the tube is white (the reference draws
+    /// `color111(7)`) and there is no color RAM to consult. Clipping to the
+    /// armed window happens in [`Avg::add_point`].
+    fn draw_battlezone(&mut self, cycles: i32) {
+        let (dx, dy) = self.deflect(cycles, 3);
+        self.xpos = self.xpos.wrapping_add(dx);
+        // Y-up, the convention the renderers expect of a display list.
+        self.ypos = self.ypos.wrapping_add(dy);
+
+        // int_latch bits 3:1 == 001 is the DATEA signal, selecting the
+        // intensity the STAT strobe stored; otherwise those bits are the
+        // intensity directly.
+        let eff_intensity = if (self.int_latch >> 1) == 1 {
+            self.intensity
+        } else {
+            self.int_latch & 0xE
+        };
+
+        let (x, y) = self.flipped();
+        self.add_point(
+            x,
+            y,
+            eff_intensity,
+            [0xFF, 0xFF, 0xFF],
+            cycles.max(0) as u32,
+        );
+    }
+
     /// Major Havoc's strobe3 draw: Tempest's 13-bit position math and
     /// intensity select, its own color weights, and sparkle.
     ///
@@ -1331,6 +1435,63 @@ impl Avg {
         }
     }
 
+    /// Clip the segment from `(x0, y0)` to `(x1, y1)` to Battlezone's window,
+    /// which keeps everything inside `[xmin, ymin, xmax, ymax]` (Y-up beam
+    /// coordinates, ends unordered). Returns the visible part and the fraction
+    /// of the segment it is, or `None` if none of it is. Liang-Barsky in the
+    /// same fixed-point integers the beam itself uses, so a corner captured
+    /// from the beam clips exactly the vectors through it.
+    fn clip_window(
+        xmin: i32,
+        ymin: i32,
+        xmax: i32,
+        ymax: i32,
+        (x0, y0): Point,
+        (x1, y1): Point,
+    ) -> Option<(Point, Point, f32)> {
+        let (lox, hix) = (xmin.min(xmax), xmin.max(xmax));
+        let (loy, hiy) = (ymin.min(ymax), ymin.max(ymax));
+        let (dx, dy) = (i64::from(x1) - i64::from(x0), i64::from(y1) - i64::from(y0));
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        // Liang-Barsky: each edge moves the entering or leaving parameter.
+        for (p, q) in [
+            (-dx, i64::from(x0) - i64::from(lox)),
+            (dx, i64::from(hix) - i64::from(x0)),
+            (-dy, i64::from(y0) - i64::from(loy)),
+            (dy, i64::from(hiy) - i64::from(y0)),
+        ] {
+            if p == 0 {
+                if q < 0 {
+                    return None;
+                }
+            } else {
+                let t = q as f64 / p as f64;
+                if p < 0 {
+                    t0 = t0.max(t);
+                } else {
+                    t1 = t1.min(t);
+                }
+                if t0 > t1 {
+                    return None;
+                }
+            }
+        }
+        if t1 <= 0.0 || t0 >= 1.0 {
+            return None;
+        }
+        let at = |t: f64| {
+            (
+                (i64::from(x0) + (dx as f64 * t) as i64) as i32,
+                (i64::from(y0) + (dy as f64 * t) as i64) as i32,
+            )
+        };
+        let frac = (t1 - t0) as f32;
+        if frac <= 0.0 {
+            return None;
+        }
+        Some((at(t0.max(0.0)), at(t1.min(1.0)), frac))
+    }
+
     /// Add a point to the display list, creating a line from the previous point.
     ///
     /// `beam_cycles` is the travel time strobe3 charged for getting here, which
@@ -1369,6 +1530,28 @@ impl Avg {
             let (mut beam, mut dwell) = (beam_cycles, self.idle_cycles);
             if let (AvgVariant::MajorHavoc, Some(top)) = (self.variant, self.clip_top) {
                 match Self::clip_below(top, (self.prev_x, self.prev_y), (x, y)) {
+                    None => {
+                        self.idle_cycles = 0;
+                        self.prev_x = x;
+                        self.prev_y = y;
+                        return;
+                    }
+                    Some((a, b, frac)) => {
+                        if a != (self.prev_x, self.prev_y) {
+                            dwell = 0;
+                        }
+                        (x0, y0) = (a.0 as f32 / UNIT, a.1 as f32 / UNIT);
+                        (x1, y1) = (b.0 as f32 / UNIT, b.1 as f32 / UNIT);
+                        beam = (beam as f32 * frac) as u32;
+                    }
+                }
+            }
+            // Battlezone's clip window: draw only the part inside the armed
+            // rectangle, with that share of the beam time. Same dwell rule.
+            if self.variant == AvgVariant::Battlezone && self.clip_armed {
+                let r = self.clip_rect;
+                match Self::clip_window(r[0], r[1], r[2], r[3], (self.prev_x, self.prev_y), (x, y))
+                {
                     None => {
                         self.idle_cycles = 0;
                         self.prev_x = x;
@@ -2430,5 +2613,210 @@ mod tests {
         assert_eq!((drawn.r, drawn.g, drawn.b), (0x00, 0xFF, 0x00));
         // DATEA (int_latch 2) selects the STAT intensity 0xF.
         assert_eq!(drawn.intensity, 0xF);
+    }
+
+    // --- Battlezone variant ----------------------------------------------
+
+    /// Run a Battlezone list from RAM until it halts; return the generator
+    /// and the lines drawn.
+    fn run_battlezone(bytes: &[u8]) -> (Avg, Vec<VectorLine>) {
+        let vmem = build_vmem(bytes);
+        let mut avg = Avg::with_variant(AvgVariant::Battlezone, 300, 260);
+        avg.go();
+        avg.run_to_stop(&vmem, &default_color_ram());
+        assert!(avg.is_halted(), "the list should end in HALT");
+        let lines = avg.take_display_list();
+        (avg, lines)
+    }
+
+    /// Battlezone reads vector memory XOR-1 like Tempest: HALT is word
+    /// 0x2000, stored [0x00, 0x20], and a native-order decode would see op 0
+    /// and run away instead of halting.
+    #[test]
+    fn battlezone_decodes_xor1_like_tempest() {
+        let (avg, _) = run_battlezone(&[0x00, 0x20]);
+        assert!(avg.is_halted());
+    }
+
+    /// STAT latches the 4-bit intensity with no color, and the switch data:
+    /// DVY 0x2A0 has bit 9 set (LST on, so HST off) and no 0x400, so the next
+    /// latch1 captures the window's max corner at the beam, which is still at
+    /// center, and arms the clip.
+    #[test]
+    fn battlezone_stat_latches_intensity_and_switches() {
+        let stat = word(0x62A0); // STAT, intensity 0xA, LST on
+        let halt = word(0x2000); // HALT
+        let (avg, _) = run_battlezone(&[stat[0], stat[1], halt[0], halt[1]]);
+        assert_eq!(avg.intensity, 0xA);
+        assert!(avg.clip_armed);
+        let (xc, yc) = ((300 / 2) << 16, (260 / 2) << 16);
+        assert_eq!(avg.clip_rect, [xc, yc, xc, yc]);
+        assert!(!avg.izblank);
+    }
+
+    /// DVY bit 10 says the STAT carries no switch data: the intensity still
+    /// latches, but the switches are untouched, so with both preset on no
+    /// latch1 captures anything and the clip stays disarmed. A STAT whose
+    /// data were applied anyway would turn HST off and arm it.
+    #[test]
+    fn battlezone_stat_without_switch_data_leaves_switches_set() {
+        let stat = word(0x64A0); // STAT, intensity 0xA, 0x400 set
+        let halt = word(0x2000); // HALT
+        let vmem = build_vmem(&[stat[0], stat[1], halt[0], halt[1]]);
+        let mut avg = Avg::with_variant(AvgVariant::Battlezone, 300, 260);
+        avg.lst = true;
+        avg.hst = true;
+        avg.go();
+        let mem = VectorMemory::ram_only(&vmem);
+        avg.step(1_000_000, &mem, &default_color_ram());
+        assert!(avg.is_halted());
+        assert_eq!(avg.intensity, 0xA, "the intensity still latches");
+        assert!(
+            !avg.clip_armed,
+            "no capture with both switches on: {:?}",
+            avg.clip_rect
+        );
+    }
+
+    /// A VCTR with DATEA int_latch draws the STAT's intensity in white: the
+    /// tube has no color, so every line is color111(7). The window is armed
+    /// the way the game arms it: one STAT turns LST off so the next latch1
+    /// captures the min corner at the beam, then a second STAT turns HST off
+    /// for the max corner, and only then does the vector draw into the
+    /// window. A run that skipped the corners would clip to the power-on
+    /// point instead.
+    #[test]
+    fn battlezone_vctr_draws_white_line_with_stat_intensity() {
+        let mut avg = Avg::with_variant(AvgVariant::Battlezone, 300, 260);
+        // Idle switches, as latch1 leaves them.
+        avg.lst = true;
+        avg.hst = true;
+        // Min corner down-left of center, max corner up-right.
+        let (ax, ay) = ((300 / 2 - 40) << 16, (260 / 2 - 30) << 16);
+        let (bx, by) = ((300 / 2 + 40) << 16, (260 / 2 + 30) << 16);
+
+        // STAT 0x61A0 (intensity 0xA, LST off), then HALT: captures the min
+        // corner at the beam.
+        avg.xpos = ax;
+        avg.ypos = ay;
+        avg.go();
+        avg.run_to_stop(&build_vmem(&[0xA0, 0x61, 0x00, 0x20]), &default_color_ram());
+        assert!(avg.is_halted());
+
+        // STAT 0x62A0 (intensity 0xA, LST on so HST off), then HALT: captures
+        // the max corner at the beam. The STAT's own latch1 captures nothing
+        // because both switches are still on from the previous latch1.
+        avg.xpos = bx;
+        avg.ypos = by;
+        avg.go();
+        avg.run_to_stop(&build_vmem(&[0xA0, 0x62, 0x00, 0x20]), &default_color_ram());
+        assert!(avg.is_halted());
+        assert!(avg.clip_armed, "both corners captured");
+        assert_eq!(avg.clip_rect, [ax, ay, bx, by]);
+
+        // CNTR, VCTR down-left with DATEA int_latch, then HALT: the center
+        // parks the beam so the vector draws from the window's middle into
+        // its min corner with the STAT intensity. Neither latch1 captures
+        // anything (both switches on), so the window survives the run.
+        avg.go();
+        avg.run_to_stop(
+            &build_vmem(&[0x00, 0x80, 0x00, 0x10, 0x00, 0x30, 0x00, 0x20]),
+            &default_color_ram(),
+        );
+        assert!(avg.is_halted());
+        assert_eq!(avg.clip_rect, [ax, ay, bx, by]);
+        let lines = avg.take_display_list();
+        let drawn = lines
+            .iter()
+            .find(|l| l.intensity != 0)
+            .expect("a lit line from the VCTR");
+        assert_eq!((drawn.r, drawn.g, drawn.b), (0xFF, 0xFF, 0xFF));
+        // DATEA (int_latch 2 or 3) selects the STAT intensity 0xA.
+        assert_eq!(drawn.intensity, 0xA);
+    }
+
+    /// Liang-Barsky on the window: inside stays whole, outside vanishes, a
+    /// crossing is cut to the visible part with its share of the length, and
+    /// unordered ends normalize rather than invert.
+    #[test]
+    fn clip_window_cuts_segments_to_the_armed_rectangle() {
+        // Inside: the whole segment, full share.
+        assert_eq!(
+            Avg::clip_window(0, 0, 10, 10, (2, 3), (8, 9)),
+            Some(((2, 3), (8, 9), 1.0))
+        );
+        // Outside: nothing.
+        assert_eq!(Avg::clip_window(0, 0, 10, 10, (20, 20), (30, 30)), None);
+        // Crossing the right edge: cut at x = 10, a quarter of the length.
+        assert_eq!(
+            Avg::clip_window(0, 0, 10, 10, (5, 5), (25, 5)),
+            Some(((5, 5), (10, 5), 0.25))
+        );
+        // A point window clips everything but the point itself.
+        assert_eq!(Avg::clip_window(4, 4, 4, 4, (0, 0), (8, 8)), None);
+        // Unordered ends describe the same window.
+        assert_eq!(
+            Avg::clip_window(10, 10, 0, 0, (5, 5), (25, 5)),
+            Some(((5, 5), (10, 5), 0.25))
+        );
+        // A zero-length segment inside the window draws whole.
+        assert_eq!(
+            Avg::clip_window(0, 0, 10, 10, (5, 5), (5, 5)),
+            Some(((5, 5), (5, 5), 1.0))
+        );
+    }
+
+    /// A drawn vector honors the armed window: the beam runs from center
+    /// toward +X and the line ends at the window's right edge.
+    #[test]
+    fn battlezone_draw_clips_to_the_armed_window() {
+        let unit = 1 << 16;
+        let mut avg = Avg::with_variant(AvgVariant::Battlezone, 300, 260);
+        avg.has_prev = true;
+        avg.prev_x = avg.xpos;
+        avg.prev_y = avg.ypos;
+        avg.clip_armed = true;
+        avg.clip_rect = [140 * unit, 120 * unit, 160 * unit, 140 * unit];
+        // Horizontal, +X: the DAC centers at raw 0x200, so dvx 0x0800 gives
+        // +256 raw and dvy 0x0000 gives no vertical travel.
+        avg.dvx = 0x0800;
+        avg.dvy = 0x0000;
+        avg.scale = 0x00; // scale factor 0xFF
+        avg.int_latch = 0x08; // direct intensity 8
+        avg.draw_battlezone(256);
+        let lines = avg.take_display_list();
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        // Travel is 256 * 256 * 255 >> 4 = 1044480 fixed-point units (~15.94
+        // display units), so the beam runs from 150 to ~165.94 and the line
+        // ends at the window's right edge.
+        assert!((line.x1 - 160.0).abs() < 0.01, "x1 = {}", line.x1);
+        assert!((line.x0 - 150.0).abs() < 0.01, "x0 = {}", line.x0);
+        assert_eq!(line.intensity, 8);
+        assert_eq!((line.r, line.g, line.b), (0xFF, 0xFF, 0xFF));
+        // 10 of ~15.94 units are visible, so that share of the beam time:
+        // 256 * 10 / 15.9375 ~= 160.6.
+        assert!(
+            (159..=161).contains(&line.beam_cycles),
+            "beam_cycles = {}",
+            line.beam_cycles
+        );
+    }
+
+    /// Reset drops the clip window and the switches, back to a whole-field
+    /// draw; the halt parks the sequencer.
+    #[test]
+    fn battlezone_reset_clears_clip_and_switches() {
+        let mut avg = Avg::with_variant(AvgVariant::Battlezone, 300, 260);
+        avg.hst = true;
+        avg.izblank = true;
+        avg.clip_armed = true;
+        avg.clip_rect = [1, 2, 3, 4];
+        avg.reset();
+        assert!(avg.is_halted());
+        assert!(!avg.clip_armed);
+        assert_eq!(avg.clip_rect, [0; 4]);
+        assert!(!avg.hst);
+        assert!(!avg.izblank);
     }
 }

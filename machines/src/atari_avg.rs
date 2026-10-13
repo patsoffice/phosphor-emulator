@@ -6,7 +6,7 @@ use phosphor_core::core::machine::Renderable;
 
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::cpu::m6502::M6502;
-use phosphor_core::device::avg::{Avg, VectorMemory};
+use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
@@ -74,9 +74,10 @@ const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 
 /// Shared hardware for Atari AVG-based arcade games (1980–1983).
 ///
-/// Hardware: MOS 6502 @ 1.512 MHz, Atari AVG color vector display.
-/// Video: 1024×1024 color vector display via Analog Vector Generator.
-/// Used by: Tempest (initially; potentially Major Havoc, Star Wars later).
+/// Hardware: MOS 6502 @ 1.512 MHz, Atari AVG vector display (color on
+/// Tempest, white on Battlezone).
+/// Video: 1024×1024 vector display via Analog Vector Generator.
+/// Used by: Tempest, Battlezone.
 ///
 /// Each game provides its own memory map, I/O decode, and ROM definitions
 /// via a thin wrapper struct that owns this board and implements `Bus`.
@@ -102,6 +103,23 @@ pub struct AtariAvgBoard {
     #[save(id = 5)]
     pub(crate) irq_pending: bool,
 
+    // NMI routing (Battlezone): the same 250 Hz divider tick drives the 6502's
+    // NMI line as a short pulse instead of the level IRQ, gated by TEST.
+    // Construction config, re-applied by the machine's `new`, so not saved.
+    #[save_skip]
+    pub(crate) tick_drives_nmi: bool,
+    /// The self-test switch's TEST line, which gates the 250 Hz NMI off.
+    /// Re-driven from the game's own input byte every cycle (see
+    /// `AtariDvgBoard::test_asserted`, the same gate on the DVG boards), so
+    /// derived state rather than something to save.
+    #[save_skip]
+    pub(crate) test_asserted: bool,
+    /// The NMI pulse, set by the tick and cleared 16 cycles later (long
+    /// enough for the CPU to detect the edge). `default` so saves written
+    /// before the NMI half existed still load.
+    #[save(id = 7, default)]
+    pub(crate) nmi_pending: bool,
+
     // Watchdog (resets if not written within 8 frames)
     #[save(id = 6)]
     pub(crate) watchdog_frame_count: u8,
@@ -113,6 +131,14 @@ pub struct AtariAvgBoard {
     #[save_skip(default)]
     pub(crate) display_list: Vec<VectorLine>,
 
+    /// The AVG field the display list is expressed in, from construction.
+    /// `render_frame` rasterizes into it; Tempest's is `TIMING`'s 580x570,
+    /// Battlezone's 580x400.
+    #[save_skip]
+    pub(crate) field_width: i32,
+    #[save_skip]
+    pub(crate) field_height: i32,
+
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
     #[save_skip]
@@ -120,6 +146,22 @@ pub struct AtariAvgBoard {
 }
 
 impl AtariAvgBoard {
+    /// Create a new board with a pre-configured memory map, AVG variant, and
+    /// visible area dimensions.
+    ///
+    /// `visible_width`/`visible_height` define the AVG beam center (half of each).
+    /// For Tempest: 580×570.
+    pub fn new_with_variant(
+        map: AddressSpace16,
+        variant: AvgVariant,
+        visible_width: i32,
+        visible_height: i32,
+    ) -> Self {
+        let mut board = Self::new(map, visible_width, visible_height);
+        board.avg = Avg::with_variant(variant, visible_width, visible_height);
+        board
+    }
+
     /// Create a new board with a pre-configured memory map and visible area dimensions.
     ///
     /// `visible_width`/`visible_height` define the AVG beam center (half of each).
@@ -131,17 +173,22 @@ impl AtariAvgBoard {
             clock: 0,
             irq_counter: 0,
             irq_pending: false,
+            tick_drives_nmi: false,
+            test_asserted: false,
+            nmi_pending: false,
             watchdog_frame_count: 0,
             display_list: Vec::with_capacity(2048),
+            field_width: visible_width,
+            field_height: visible_height,
             debug_trace: DebugTraceBuffer::new(),
         }
     }
 
-    /// Board work that leads a CPU cycle: the 250 Hz periodic IRQ and the
-    /// debugger's access-attribution latch. The CPU lives on the machine, which
-    /// passes it in.
+    /// Board work that leads a CPU cycle: the 250 Hz periodic interrupt and
+    /// the debugger's access-attribution latch. The CPU lives on the machine,
+    /// which passes it in.
     pub fn begin_cycle(&mut self, cpu: &M6502) {
-        // IRQ generation: 250 Hz periodic.
+        // Interrupt generation: 250 Hz periodic.
         //
         // Compare before incrementing. Incrementing first makes the counter
         // reach the period on cycle N-1, so the assert lands one cycle before
@@ -149,13 +196,27 @@ impl AtariAvgBoard {
         // reset. Invisible until an instruction boundary falls inside that
         // one-cycle window, and then the CPU takes the interrupt an instruction
         // sooner than the hardware would. See `phosphor-emulator-mtme`.
+        //
+        // The same divider tick drives both lines: a level IRQ the game
+        // acknowledges (Tempest), or a short NMI pulse gated by TEST
+        // (Battlezone). The counter keeps running while TEST holds the NMI
+        // off, because the hardware gate is on the interrupt line and not on
+        // the divider.
         if self.irq_counter >= IRQ_PERIOD_CYCLES {
             self.irq_counter = 0;
-            self.irq_pending = true;
+            if self.tick_drives_nmi {
+                self.nmi_pending = !self.test_asserted;
+            } else {
+                self.irq_pending = true;
+            }
             if self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
                     cpu_index: Some(0),
-                    detail: Some("250 Hz IRQ"),
+                    detail: Some(if self.tick_drives_nmi {
+                        "250 Hz NMI"
+                    } else {
+                        "250 Hz IRQ"
+                    }),
                     ..DebugEvent::new(
                         self.clock,
                         DebugAccessSource::Unknown,
@@ -163,6 +224,11 @@ impl AtariAvgBoard {
                     )
                 });
             }
+        }
+        // Clear the NMI pulse after 16 cycles (long enough for the CPU to
+        // detect the edge), the DVG boards' own pulse width.
+        if self.nmi_pending && self.irq_counter == 16 {
+            self.nmi_pending = false;
         }
         self.irq_counter += 1;
 
@@ -265,10 +331,14 @@ impl AtariAvgBoard {
 
         // Color RAM is read live too: the game rewrites it while the generator
         // is running, and a colour latched by strobe2 is looked up at the draw.
+        // A board with no color RAM (Battlezone's tube is white) hands over
+        // zeroes; its variant never consults the slice.
         let mut color_ram = [0u8; 16];
-        let data = self.map.region_data(Region::ColorRam);
-        let len = data.len().min(16);
-        color_ram[..len].copy_from_slice(&data[..len]);
+        if self.map.has_backing(Region::ColorRam) {
+            let data = self.map.region_data(Region::ColorRam);
+            let len = data.len().min(16);
+            color_ram[..len].copy_from_slice(&data[..len]);
+        }
 
         if self.avg.step(AVG_CYCLES_PER_CPU_CYCLE, &mem, &color_ram) {
             // Branched back to address 0: that pass over the list is a frame.
@@ -281,12 +351,13 @@ impl AtariAvgBoard {
         self.avg.reset();
         self.irq_pending = false;
         self.irq_counter = 0;
+        self.nmi_pending = false;
         self.watchdog_frame_count = 0;
         self.display_list.clear();
     }
 
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        let field = TIMING.display_size();
+        let field = (self.field_width as u32, self.field_height as u32);
         let (rw, rh) = raster_size_for_field(field.0, field.1);
         // flip_y: the display list is Y-up, as the renderers expect, and a
         // framebuffer's row 0 is its top. What comes out is the finished
@@ -337,6 +408,120 @@ impl Renderable for AtariAvgBoard {
 mod tests {
     use super::*;
     use phosphor_core::core::AccessKind;
+
+    /// A Battlezone-like map: RAM, I/O, and the vector regions, but no color
+    /// RAM (the tube is white and the board must step without one).
+    fn board_without_color() -> AtariAvgBoard {
+        let mut map = AddressSpace16::new();
+        map.region(Region::Ram, "RAM", 0x0000, 0x0400, AccessKind::ReadWrite)
+            .region(Region::Io, "I/O", 0x0800, 0x1800, AccessKind::Io)
+            .region(
+                Region::VectorRam,
+                "Vector RAM",
+                0x2000,
+                0x1000,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::VectorRom,
+                "Vector ROM",
+                0x3000,
+                0x1000,
+                AccessKind::ReadOnly,
+            );
+        let mut board = AtariAvgBoard::new_with_variant(map, AvgVariant::Battlezone, 580, 400);
+        board.tick_drives_nmi = true;
+        board
+    }
+
+    /// The NMI tick fires on the same divider as the IRQ: pending after one
+    /// period, cleared 16 cycles later, and the IRQ line stays quiet.
+    #[test]
+    fn nmi_routing_pulses_once_per_period() {
+        let mut b = board_without_color();
+        let cpu = M6502::new();
+        for _ in 0..IRQ_PERIOD_CYCLES + 1 {
+            b.begin_cycle(&cpu);
+            b.end_cycle();
+        }
+        assert!(b.nmi_pending, "the tick raises the NMI pulse");
+        assert!(!b.irq_pending, "the IRQ line stays quiet");
+        for _ in 0..16 {
+            b.begin_cycle(&cpu);
+            b.end_cycle();
+        }
+        assert!(!b.nmi_pending, "the pulse clears 16 cycles later");
+    }
+
+    /// TEST holds the NMI off without stopping the divider: the pulse is
+    /// skipped that period and returns the next.
+    #[test]
+    fn test_asserted_gates_the_nmi_pulse() {
+        let mut b = board_without_color();
+        b.test_asserted = true;
+        let cpu = M6502::new();
+        for _ in 0..IRQ_PERIOD_CYCLES + 1 {
+            b.begin_cycle(&cpu);
+            b.end_cycle();
+        }
+        assert!(!b.nmi_pending, "gated off while TEST is asserted");
+        b.test_asserted = false;
+        for _ in 0..IRQ_PERIOD_CYCLES {
+            b.begin_cycle(&cpu);
+            b.end_cycle();
+        }
+        assert!(b.nmi_pending, "back the next period");
+    }
+
+    /// IRQ routing is unchanged: the tick raises the level IRQ and never the
+    /// NMI pulse.
+    #[test]
+    fn irq_routing_is_unchanged() {
+        // Tempest's region layout (with color RAM): the default routing is
+        // the level IRQ.
+        let mut map = AddressSpace16::new();
+        map.region(Region::Ram, "RAM", 0x0000, 0x0800, AccessKind::ReadWrite)
+            .region(
+                Region::ColorRam,
+                "Color RAM",
+                0x0800,
+                0x100,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::VectorRam,
+                "Vector RAM",
+                0x2000,
+                0x1000,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::VectorRom,
+                "Vector ROM",
+                0x3000,
+                0x1000,
+                AccessKind::ReadOnly,
+            );
+        let mut b = AtariAvgBoard::new(map, 580, 570);
+        let cpu = M6502::new();
+        for _ in 0..IRQ_PERIOD_CYCLES + 1 {
+            b.begin_cycle(&cpu);
+            b.end_cycle();
+        }
+        assert!(b.irq_pending);
+        assert!(!b.nmi_pending);
+    }
+
+    /// A color-RAM-less board steps the generator without panicking: without
+    /// the `has_backing` guard this fails in `region_data`.
+    #[test]
+    fn step_avg_runs_without_color_ram() {
+        let mut b = board_without_color();
+        b.avg.go();
+        for _ in 0..100 {
+            b.step_avg();
+        }
+    }
 
     /// `AVG_CYCLES_PER_CPU_CYCLE` is a hand-derived integer sitting in a
     /// comment. It is the ratio between two domains of the declared tree, so

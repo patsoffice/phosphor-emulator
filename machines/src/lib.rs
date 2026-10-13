@@ -776,6 +776,8 @@ pub mod atari_jsa;
 pub mod atari_regulator_audio;
 pub mod atari_system1;
 pub mod atari_system1_sound;
+pub mod battlezone;
+pub mod battlezone_sound;
 pub mod blackwidow;
 pub mod btime;
 pub mod burgertime;

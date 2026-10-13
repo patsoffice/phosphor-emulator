@@ -1455,6 +1455,32 @@ the POKEYs' source impedances; and any comparison against hardware or the
 reference."""
 
 [[target]]
+id = "battlezone-output"
+machines = ["battlezone"]
+status = "partial"
+notes = """
+MODELED in machines/src/battlezone_sound.rs under phosphor-emulator-battlezone-cli:
+one POKEY at its normalized output plus behavioral engine, shell and
+explosion voices, mixed at the board's conductance weights (100k shell and
+explosion, 41.25k engine, 330k POKEY) and driven into the Regulator/Audio II
+amplifier at rev B's output coupling. The voice part values (envelopes, VCO
+voltages, loud/soft ratio, mixer corners) come from the reference's
+bzone_a.cpp netlist read, not from the drawing.
+
+NOT READ: the Auxiliary PCB sheet that carries the POKEY's pin-37 load and
+the discrete section (sheet 3 side B of the DP-156 package), and rev C's
+output coupling on the 035435-02 amplifier (revs B, E, F and G are
+transcribed; the model runs rev B's 1000 uF, whose 19.9 Hz corner against
+rev E's 6.0 Hz is below any cabinet speaker's range either way). The sheet
+1 side A text says each TDA2002AV runs at a gain of ten against the modeled
+23; gain is a scale the normalization absorbs. Mono is the reference's
+choice (one speaker); the wiring diagram shows two speakers.
+
+NOT MODELED: the R11 engine-frequency trim (fixed at the reference's 40%
+adjuster position); the start LED; coin-counter bookkeeping.
+"""
+
+[[target]]
 id = "blackwidow-output"
 machines = ["blackwidow"]
 status = "partial"
