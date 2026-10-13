@@ -1319,8 +1319,10 @@ pub fn run(
             pb.deliver(machine);
         }
 
-        // Execute based on debug state
-        let frame_executed = debug_ui::execute_frame(machine, &mut debug_state);
+        // Execute based on debug state. During a take the frame goes through
+        // `run_frame()` inside `execute_frame`, never through `debug_tick()`.
+        let frame_executed =
+            debug_ui::execute_frame(machine, &mut debug_state, take_mode != MovieMode::Live);
         // Only whole frames advance a movie. Under the debugger `execute_frame`
         // may step a handful of cycles instead, and counting those would slide
         // every later record one frame early.

@@ -179,6 +179,11 @@ pub struct DebugState {
     pub watchpoint_hits: VecDeque<WatchpointHit>,
     /// True when the UI has modified watchpoints and they need to be synced to the machine.
     pub watchpoints_dirty: bool,
+    /// While a movie records or replays, the sync above is suspended: the
+    /// machine's watchpoints stay cleared so `run_frame()` queues no hits
+    /// for the take, and the dirty flag is left set for the return to live
+    /// play. Set by the loop, never by the panels.
+    pub watchpoints_suspended: bool,
 
     // Event trace
     /// Whether event tracing is enabled (UI checkbox, synced to machine).
@@ -301,6 +306,7 @@ impl DebugState {
             watchpoint_write: true,
             watchpoint_hits: VecDeque::new(),
             watchpoints_dirty: false,
+            watchpoints_suspended: false,
             trace_enabled: false,
             trace_enabled_dirty: false,
             trace_clear_requested: false,
@@ -457,7 +463,20 @@ fn drain_watchpoint_hits(machine: &mut dyn FrontendMachine, state: &mut DebugSta
 
 /// Execute one frame of emulation according to the current run mode.
 /// Returns true if a full frame was executed (caller should drain audio).
-pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) -> bool {
+///
+/// `movie_take` is true while a movie records or replays. Whole-frame
+/// advances then all go through `run_frame()`: the `Running` branch and
+/// `StepFrame` would otherwise run `cycles_per_frame()` calls to
+/// `debug_tick()`, which is different code on some boards (Dig Dug's
+/// `run_frame_scanline_outer` versus `tick_frame_boundary`) and nothing
+/// proves the two agree. Sub-frame steps are refused outright here as well
+/// as in the hotkeys, since the debug panel buttons reach `run_mode`
+/// directly.
+pub fn execute_frame(
+    machine: &mut dyn FrontendMachine,
+    state: &mut DebugState,
+    movie_take: bool,
+) -> bool {
     // Taken unconditionally: see `DebugState::global_step`.
     let step_once = std::mem::take(&mut state.global_step);
 
@@ -473,13 +492,29 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
         return true;
     }
 
-    // Sync watchpoints to machine if the UI changed them
-    if state.watchpoints_dirty {
+    // Sync watchpoints to machine if the UI changed them. Suppressed while
+    // a take suspends them: the flag stays set so the return to live play
+    // re-applies the UI set, and the machine stays clear for the take.
+    if state.watchpoints_suspended {
+        // Deliberately no work: see `watchpoints_suspended`.
+    } else if state.watchpoints_dirty {
         state.watchpoints_dirty = false;
         machine.clear_all_watchpoints();
         for &(cpu_idx, addr, kind) in &state.watchpoints {
             machine.set_watchpoint(cpu_idx, addr, kind);
         }
+    }
+
+    // Sub-frame steps cannot run during a take however they were requested:
+    // panel buttons set `run_mode` directly, bypassing the hotkey guards.
+    if movie_take
+        && matches!(
+            state.run_mode,
+            RunMode::StepInstruction | RunMode::StepCycle
+        )
+    {
+        state.run_mode = RunMode::Paused;
+        return false;
     }
 
     // Sync event-trace controls and snapshot the ring for the panel.
@@ -544,6 +579,20 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
             }
 
             let cpf = machine.cycles_per_frame();
+            // While a take runs, whole frames go through `run_frame()` rather
+            // than `cpf` calls to `debug_tick()`. The cycle counter advances
+            // by the same amount either way, so cycle breakpoints set after
+            // the take still point at the right time (exact where the two
+            // paths agree; see the frame-path equivalence issue).
+            if movie_take {
+                machine.run_frame();
+                state.frame_count += 1;
+                state.cycle_count += cpf;
+                if let Some(bus) = machine.debug_bus() {
+                    state.refresh(bus);
+                }
+                return true;
+            }
             if cpf > 0 {
                 let check_bp = state.has_any_breakpoints();
                 for _ in 0..cpf {
@@ -634,6 +683,18 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
             // Run one full frame's worth of cycles, then pause at the next
             // frame's start. Returns true so the frame's audio is drained.
             let cpf = machine.cycles_per_frame();
+            // During a take the frame goes through `run_frame()`, for the
+            // same reason as the `Running` branch above.
+            if movie_take {
+                machine.run_frame();
+                state.frame_count += 1;
+                state.cycle_count += cpf;
+                if let Some(bus) = machine.debug_bus() {
+                    state.refresh(bus);
+                }
+                state.run_mode = RunMode::Paused;
+                return true;
+            }
             if cpf > 0 {
                 for _ in 0..cpf {
                     machine.debug_tick();
@@ -1942,16 +2003,16 @@ mod tests {
 
         // Paused with no request: nothing runs, and the frame counter is the
         // check that would catch a frame slipping through.
-        assert!(!execute_frame(&mut *m, &mut s));
+        assert!(!execute_frame(&mut *m, &mut s, false));
         assert_eq!(s.frame_count, 0);
 
         // One request, one frame.
         s.global_step = true;
-        assert!(execute_frame(&mut *m, &mut s));
+        assert!(execute_frame(&mut *m, &mut s, false));
         assert_eq!(s.frame_count, 1);
 
         // And it re-holds rather than running free.
-        assert!(!execute_frame(&mut *m, &mut s));
+        assert!(!execute_frame(&mut *m, &mut s, false));
         assert_eq!(s.frame_count, 1);
     }
 
@@ -1967,12 +2028,59 @@ mod tests {
         s.run_mode = RunMode::Paused;
         s.global_step = true;
 
-        execute_frame(&mut *m, &mut s);
+        execute_frame(&mut *m, &mut s, false);
         assert!(!s.global_step, "a stale request would spend itself later");
 
         s.active = false;
-        assert!(!execute_frame(&mut *m, &mut s));
+        assert!(!execute_frame(&mut *m, &mut s, false));
         assert_eq!(s.frame_count, 0, "closing the panel must not run a frame");
+    }
+
+    /// While a take runs, whole frames go through `run_frame()` rather than
+    /// `debug_tick()`: the debugger path is different code on some boards
+    /// and nothing proves the two agree. A sub-frame step requested during
+    /// a take (the panel buttons bypass the hotkey guards) is refused and
+    /// re-holds instead of running.
+    #[test]
+    fn take_routes_whole_frames_through_run_frame() {
+        let mut m = bare_machine();
+        let mut s = DebugState::new();
+        s.active = true;
+        s.run_mode = RunMode::Running;
+
+        assert!(execute_frame(&mut *m, &mut s, true));
+        assert_eq!(s.frame_count, 1);
+
+        s.run_mode = RunMode::StepInstruction;
+        assert!(!execute_frame(&mut *m, &mut s, true));
+        assert_eq!(s.run_mode, RunMode::Paused);
+        assert_eq!(s.frame_count, 1, "no partial frame may run during a take");
+    }
+
+    /// While suspension holds, the dirty sync does nothing and leaves the
+    /// flag set, so the machine stays clear for the take and the return to
+    /// live play re-applies the UI set.
+    #[test]
+    fn suspended_watchpoint_sync_leaves_the_flag_set() {
+        use phosphor_core::core::WatchpointKind;
+
+        let mut m = bare_machine();
+        let mut s = DebugState::new();
+        s.active = true;
+        s.run_mode = RunMode::Paused;
+        s.watchpoints = vec![(0, 0x1000, WatchpointKind::Write)];
+        s.watchpoints_dirty = true;
+        s.watchpoints_suspended = true;
+
+        assert!(!execute_frame(&mut *m, &mut s, true));
+        assert!(
+            s.watchpoints_dirty,
+            "the return to live must still re-apply the UI set"
+        );
+
+        s.watchpoints_suspended = false;
+        assert!(!execute_frame(&mut *m, &mut s, false));
+        assert!(!s.watchpoints_dirty);
     }
 
     #[test]
