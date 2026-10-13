@@ -1,0 +1,32 @@
+# Battlezone (Atari, 1980)
+#
+# A red strip over the score band and a green field over the rest of the
+# tube. The board draws in white only, so the red scores and the green
+# battlefield a player saw were this sheet.
+#
+# Geometry and colors are the reference emulator's artwork (bzone.lay):
+# a red rect over rows 0-160 and a green rect over rows 160-801 of an
+# 801-row sheet, colors [1.0, 0.125, 0.125] and [0.125, 1.0, 0.125].
+# 160/801 is 0.1998, transcribed here as 0.2; at 512 texels the difference
+# is a fraction of one texel. The manual's parts list names the same two
+# sheets: 036263-01 Red Monitor Overlay and 036263-02 Green Monitor
+# Overlay. (Desert Wars, the prototype on this hardware, uses a blue
+# sheet instead; that is a different machine's overlay, not this one.)
+#
+# The figures are transmissions of the displayed value rather than of
+# radiance: they were chosen against a compositor that multiplies encoded
+# color, which is what this pipeline does too. See `screen_overlay.rs`
+# on why that distinction is load bearing and must not be "corrected"
+# into linear light.
+
+name = "Color Overlay"
+
+[[region]]
+shape = "rect"
+bounds = [0.0, 0.0, 1.0, 0.2]
+color = [1.0, 0.125, 0.125]
+
+[[region]]
+shape = "rect"
+bounds = [0.0, 0.2, 1.0, 1.0]
+color = [0.125, 1.0, 0.125]

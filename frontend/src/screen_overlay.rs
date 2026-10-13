@@ -45,10 +45,13 @@ use serde::Deserialize;
 /// does not depend on the working directory and a stray copy cannot shadow the
 /// committed one. A file in the user's overlay directory still wins; see
 /// [`ScreenOverlay::for_machine`].
-const BUILT_IN: &[(&str, &str)] = &[(
-    "asteroidsdeluxe",
-    include_str!("../overlays/asteroidsdeluxe.toml"),
-)];
+const BUILT_IN: &[(&str, &str)] = &[
+    (
+        "asteroidsdeluxe",
+        include_str!("../overlays/asteroidsdeluxe.toml"),
+    ),
+    ("battlezone", include_str!("../overlays/battlezone.toml")),
+];
 
 /// Edge length of the rasterized sheet, in texels.
 ///
@@ -309,6 +312,17 @@ mod tests {
         }
     }
 
+    /// Battlezone's sheet is red over the score band and green over the
+    /// field, which is why neither renders white.
+    #[test]
+    fn battlezone_is_red_over_the_score_band_and_green_below() {
+        let o = ScreenOverlay::for_machine("battlezone").expect("battlezone has an overlay");
+        let [r, g, b] = texel(&o, 0.5, 0.1);
+        assert!(r > 0.9 && g < 0.2 && b < 0.2, "score band is {r}, {g}, {b}");
+        let [r, g, b] = texel(&o, 0.5, 0.6);
+        assert!(r < 0.2 && g > 0.9 && b < 0.2, "field is {r}, {g}, {b}");
+    }
+
     /// A machine with no overlay gets none, rather than a clear sheet. The
     /// difference matters: `None` lets the renderers skip the sample entirely.
     #[test]
@@ -318,8 +332,8 @@ mod tests {
     }
 
     /// Bands, which is the shape of every overlay that is not a single tint:
-    /// the reference's Battlezone artwork is a red strip over a green field.
-    /// Transcribed here rather than shipped, because we do not emulate it.
+    /// Battlezone's shipped overlay is the example, a red strip over a green
+    /// field; the numbers below match `overlays/battlezone.toml`.
     #[test]
     fn regions_land_where_their_bounds_put_them() {
         let text = r#"
