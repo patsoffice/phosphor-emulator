@@ -50,7 +50,13 @@ pub struct DebugSession {
     hang: Option<HangDetector>,
     /// Hang reports collected while running frames.
     hang_reports: Vec<HangReport>,
+    /// When true, every method except the pure reads is refused (see
+    /// [`set_locked`](Self::set_locked)).
+    locked: bool,
 }
+
+/// Why a locked session refuses a call, reported to the caller.
+pub const LOCKED_REASON: &str = "session is locked while recording or replaying";
 
 impl DebugSession {
     /// Boot `machine_name` from the ROM set at `rom_path` (via the shared
@@ -85,7 +91,30 @@ impl DebugSession {
             audio: None,
             hang: None,
             hang_reports: Vec::new(),
+            locked: false,
         }
+    }
+
+    /// Lock or unlock the mutating surface.
+    ///
+    /// The frontend sets this from the derived movie mode each frame: while a
+    /// movie records or replays, a console verb must not change machine state
+    /// outside the recorded input stream. The lock is an allowlist, not a
+    /// denylist: while locked, every method is refused except the pure reads
+    /// (`read`, `pc`, `regs`, `disasm`, `cpu_count`, `device_names`,
+    /// `device_registers`, `trace_enabled`), so a verb added later is locked
+    /// by default. That includes `input` (game input past the recording tee),
+    /// the DIP setters (flips the recorder never sees), `load_movie`, and
+    /// `take_hits`/`take_events` (they consume queues the debugger UI also
+    /// drains). Direct machine access via [`machine_mut`](Self::machine_mut)
+    /// is the loop's own path and is not gated.
+    pub fn set_locked(&mut self, locked: bool) {
+        self.locked = locked;
+    }
+
+    /// Whether the mutating surface is currently locked.
+    pub fn is_locked(&self) -> bool {
+        self.locked
     }
 
     /// Wrap an already-booted machine (the in-frontend console binds its *live*
@@ -115,6 +144,9 @@ impl DebugSession {
     /// and trace events after each (so neither overflows the machine's finite
     /// queues across the run) and sampling the hang detector once per frame.
     pub fn run_frames(&mut self, n: u64) {
+        if self.locked {
+            return;
+        }
         for _ in 0..n {
             self.harness.run_frame();
             self.drain_audio();
@@ -131,11 +163,17 @@ impl DebugSession {
     /// coin, a start and a held joystick, none of which a device-level capture
     /// can produce.
     pub fn capture_audio(&mut self) {
+        if self.locked {
+            return;
+        }
         self.audio = Some(Vec::new());
     }
 
     /// Stop accumulating and write what was captured as a 16-bit mono WAV.
     pub fn write_audio(&mut self, path: &str) -> Result<usize, String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         let samples = self
             .audio
             .take()
@@ -184,6 +222,9 @@ impl DebugSession {
     /// someone else built has no such record, so the machine check falls back
     /// to the machine id there and the digest check is skipped.
     pub fn load_movie(&mut self, path: &str) -> Result<(), String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         let bytes = std::fs::read(path).map_err(|e| format!("reading movie {path}: {e}"))?;
         let movie = Movie::decode(&bytes).map_err(|e| format!("reading movie {path}: {e}"))?;
 
@@ -226,6 +267,9 @@ impl DebugSession {
     /// Drains watchpoint hits and trace events, but does not sample the hang
     /// detector — hang detection is frame-granular (one PC sample per frame).
     pub fn step(&mut self) -> u32 {
+        if self.locked {
+            return 0;
+        }
         let mask = self.harness.machine_mut().debug_tick();
         self.drain_watchpoint_hits();
         self.drain_trace_events();
@@ -343,6 +387,9 @@ impl DebugSession {
     /// explicit debug operation, distinct from the legitimate machine inputs
     /// [`input`](Self::input) drives.
     pub fn poke(&mut self, cpu: usize, addr: u32, data: u8) -> bool {
+        if self.locked {
+            return false;
+        }
         match self.harness.machine_mut().debug_bus_mut() {
             Some(bus) => {
                 bus.poke(cpu, addr, data);
@@ -408,6 +455,9 @@ impl DebugSession {
     /// still tell which CPU fired. Use [`watch_cpu`](Self::watch_cpu) to target
     /// one CPU deliberately.
     pub fn watch(&mut self, addr: u32, kind: WatchpointKind, cond: WatchpointCondition) -> usize {
+        if self.locked {
+            return 0;
+        }
         let n = self.cpu_count();
         for cpu in 0..n {
             self.harness
@@ -425,6 +475,9 @@ impl DebugSession {
         kind: WatchpointKind,
         cond: WatchpointCondition,
     ) {
+        if self.locked {
+            return;
+        }
         self.harness
             .machine_mut()
             .set_watchpoint_cond(cpu, addr, kind, cond);
@@ -432,12 +485,18 @@ impl DebugSession {
 
     /// Clear every watchpoint across all CPUs. Already-collected hits are kept.
     pub fn clear_watchpoints(&mut self) {
+        if self.locked {
+            return;
+        }
         self.harness.machine_mut().clear_all_watchpoints();
     }
 
     /// Drain and return every watchpoint hit collected so far (also sweeps any
     /// still queued in the machine). Leaves the accumulator empty.
     pub fn take_hits(&mut self) -> Vec<WatchpointHit> {
+        if self.locked {
+            return Vec::new();
+        }
         self.drain_watchpoint_hits();
         std::mem::take(&mut self.hits)
     }
@@ -450,6 +509,9 @@ impl DebugSession {
     /// written, and when within a frame". Note: bus-event tracing is wired for
     /// `AddressSpace16/32` boards; a machine without it records nothing.
     pub fn set_trace(&mut self, enabled: bool) {
+        if self.locked {
+            return;
+        }
         let machine = self.harness.machine_mut();
         machine.set_trace_enabled(enabled);
         machine.clear_trace_events();
@@ -464,6 +526,9 @@ impl DebugSession {
     /// Drain and return every trace event collected so far (also sweeps the
     /// machine's current ring). Leaves the accumulator empty.
     pub fn take_events(&mut self) -> Vec<DebugEvent> {
+        if self.locked {
+            return Vec::new();
+        }
         self.drain_trace_events();
         std::mem::take(&mut self.events)
     }
@@ -472,12 +537,18 @@ impl DebugSession {
     /// frame `threshold`. `run_frames` then samples each CPU's PC per frame; a
     /// CPU stuck within `window` for `threshold` frames produces a report.
     pub fn detect_hangs(&mut self, window: u32, threshold: u32) {
+        if self.locked {
+            return;
+        }
         self.hang = Some(HangDetector::with_params(window, threshold));
         self.hang_reports.clear();
     }
 
     /// Drain and return every hang report collected so far.
     pub fn take_hangs(&mut self) -> Vec<HangReport> {
+        if self.locked {
+            return Vec::new();
+        }
         std::mem::take(&mut self.hang_reports)
     }
 
@@ -489,6 +560,9 @@ impl DebugSession {
 
     /// Restore a snapshot taken by [`save_state`](Self::save_state).
     pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         self.harness
             .machine_mut()
             .load_state(data)
@@ -498,6 +572,9 @@ impl DebugSession {
     /// Reset the machine to power-on and zero the frame counter, clearing the
     /// watchpoint/event/hang accumulators (stale after a reset).
     pub fn reset(&mut self) {
+        if self.locked {
+            return;
+        }
         self.harness.reset();
         self.hits.clear();
         self.events.clear();
@@ -520,11 +597,17 @@ impl DebugSession {
 
     /// Replace the whole live byte of DIP bank `bank`.
     pub fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if self.locked {
+            return;
+        }
         self.harness.machine_mut().set_dip_bank_value(bank, value);
     }
 
     /// Set one option within a bank, masking `value` into the bank byte.
     pub fn set_dip_option(&mut self, bank: usize, option: usize, value: u8) {
+        if self.locked {
+            return;
+        }
         self.harness
             .machine_mut()
             .set_dip_option(bank, option, value);
@@ -535,6 +618,9 @@ impl DebugSession {
     /// configs (`set_dip("Difficulty", "Hard")`). Note: an option whose `apply`
     /// timing is `OnReset` only takes effect after [`reset`](Self::reset).
     pub fn set_dip_by_name(&mut self, option: &str, choice: &str) -> bool {
+        if self.locked {
+            return false;
+        }
         let banks = self.harness.machine().dip_banks();
         for (bi, bank) in banks.iter().enumerate() {
             for (oi, opt) in bank.options.iter().enumerate() {
@@ -577,6 +663,9 @@ impl DebugSession {
     /// drive a timeline imperatively
     /// (`input("coin", true); run_frames(8); input("coin", false)`).
     pub fn input(&mut self, name: &str, pressed: bool) -> Result<(), String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         let id = self.control_id(name)?;
         self.harness
             .machine_mut()
@@ -587,6 +676,9 @@ impl DebugSession {
     /// Apply an *immediate* absolute analog value (`-1.0..=1.0`) to the control
     /// named `name`.
     pub fn input_axis(&mut self, name: &str, value: f32) -> Result<(), String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         let id = self.control_id(name)?;
         self.harness
             .machine_mut()
@@ -604,6 +696,9 @@ impl DebugSession {
     /// silently does nothing. Deltas accumulate until the machine drains them,
     /// so sustained motion means one call per frame, not one large call.
     pub fn input_relative(&mut self, name: &str, delta: f32) -> Result<(), String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         let id = self.control_id(name)?;
         self.harness
             .machine_mut()
@@ -618,6 +713,9 @@ impl DebugSession {
     /// cabinet shows). Raster-only — vector machines render through
     /// `vector_display_list`, the same limitation frameshot has.
     pub fn screenshot(&mut self, path: &str) -> Result<(), String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
         let (nw, nh) = self.harness.machine().display_size();
         self.fb.resize(nw as usize * nh as usize * 3, 0);
 
@@ -1100,5 +1198,46 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "PNG magic");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A locked session refuses every verb that changes machine state, while
+    /// the pure reads keep working. The frontend locks the console surface
+    /// while a movie records or replays, so a scripted poke, reset, or input
+    /// cannot silently diverge the take.
+    #[test]
+    fn locked_session_refuses_mutation_but_allows_reads() {
+        use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointKind};
+
+        let (mut s, rec) = session(true);
+        assert!(!s.is_locked());
+        s.set_locked(true);
+        assert!(s.is_locked());
+
+        assert!(!s.poke(0, 0x20, 0xEE));
+        assert_eq!(s.step(), 0);
+        assert_eq!(
+            s.watch(0x20, WatchpointKind::Write, WatchpointCondition::Always),
+            0
+        );
+        assert!(s.input("coin", true).is_err());
+        assert!(s.load_state(&[]).is_err());
+        assert!(s.take_hits().is_empty());
+        s.reset();
+        assert!(
+            rec.borrow().inputs.is_empty(),
+            "locked input must reach the machine as nothing at all"
+        );
+
+        assert_eq!(s.read(0, 0x10), Some(0x11));
+        assert_eq!(s.pc(0), Some(0x1234));
+        assert!(!s.regs(0).is_empty());
+        assert!(s.disasm(0, 0x1000).is_some());
+        assert_eq!(s.cpu_count(), 1);
+        assert!(!s.device_names().is_empty());
+        assert!(s.trace_enabled() == s.trace_enabled());
+
+        s.set_locked(false);
+        assert!(s.poke(0, 0x20, 0xEE));
+        assert!(s.input("coin", true).is_ok());
     }
 }
