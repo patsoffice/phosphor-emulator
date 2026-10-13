@@ -563,6 +563,11 @@ pub fn run(
     // `needs_resync`, which is declared below the rebuild.
     let mut pending_resync = false;
 
+    // The session command queue. Hotkeys and panels submit; the drain after
+    // the event poll executes. Slice 1 wires the pure commands (reset,
+    // save, load, capture); the rest follow in later slices.
+    let mut commands = crate::session::SessionState::default();
+
     'main: loop {
         let t0 = Instant::now();
 
@@ -928,34 +933,17 @@ pub fn run(
                     settings_state.legend_visible = !settings_state.legend_visible;
                 }
 
-                // Soft reset: the reset button on the cabinet.
+                // Soft reset: the reset button on the cabinet. Queued; the
+                // drain after the poll executes it (and refuses it during a
+                // take) so the order against game input is defined.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Reset) => {
-                    if take_mode != MovieMode::Live {
-                        refuse(
-                            &mut notices,
-                            "Reset is unavailable while recording or replaying",
-                        );
-                    } else {
-                        machine.reset();
-                        debug_state.frame_count = 0;
-                        // reset() clears the machine's port bits, but a key held
-                        // across it produces no new KeyDown — without this the
-                        // input is dead until the user releases and re-presses.
-                        needs_resync = true;
-                    }
+                    commands.submit(crate::session::SessionCommand::ResetSoft);
                 }
 
-                // Hard reset: the power switch. Deferred, because rebuilding
-                // cannot happen while the machine is borrowed for this frame.
+                // Hard reset: the power switch. Queued for the same reason;
+                // the drain returns a rebuild the loop top services.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::HardReset) => {
-                    if take_mode != MovieMode::Live {
-                        refuse(
-                            &mut notices,
-                            "Hard reset is unavailable while recording or replaying",
-                        );
-                    } else {
-                        hard_reset_requested = true;
-                    }
+                    commands.submit(crate::session::SessionCommand::ResetHard);
                 }
 
                 // Record input movie. Arming resets to power-on, because a
@@ -988,54 +976,16 @@ pub fn run(
                     }
                 }
 
-                // Quick save
+                // Quick save. Queued; the drain executes it, so a save and
+                // game input in the same batch keep a defined order.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickSave) => {
-                    if let Some(data) = machine.save_state() {
-                        match std::fs::write(save_path, &data) {
-                            Ok(()) => {
-                                log::info!("Save state written ({} bytes)", data.len());
-                                notices.info("State saved");
-                            }
-                            Err(e) => {
-                                log::error!("save state failed: {e}");
-                                notices.error(format!("Save state failed: {e}"));
-                            }
-                        }
-                    } else {
-                        log::warn!("save states not supported for this machine");
-                        notices.error("Save states not supported for this machine");
-                    }
+                    commands.submit(crate::session::SessionCommand::SaveState);
                 }
 
-                // Quick load
+                // Quick load. Queued for the same reason; the drain refuses
+                // it during a take and resyncs after it.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickLoad) => {
-                    if take_mode != MovieMode::Live {
-                        refuse(
-                            &mut notices,
-                            "Loading a state is unavailable while recording or replaying",
-                        );
-                    } else {
-                        match std::fs::read(save_path) {
-                            Ok(data) => match machine.load_state(&data) {
-                                Ok(()) => {
-                                    log::info!("Save state loaded");
-                                    notices.info("State loaded");
-                                    // Port bits live inside the snapshot, so the
-                                    // restored state can contradict what is physically
-                                    // held right now.
-                                    needs_resync = true;
-                                }
-                                Err(e) => {
-                                    log::error!("load state failed: {e}");
-                                    notices.error(format!("Load state failed: {e}"));
-                                }
-                            },
-                            Err(e) => {
-                                log::warn!("no save file found: {e}");
-                                notices.error("No saved state to load");
-                            }
-                        }
-                    }
+                    commands.submit(crate::session::SessionCommand::LoadState);
                 }
 
                 // Toggle the profiler
@@ -1198,39 +1148,12 @@ pub fn run(
                     );
                 }
 
-                // Screenshot
+                // Screenshot. Queued; the drain renders through the harness
+                // helper (the one definition of "the frame this cabinet
+                // displays", which the golden pins hash), applies the
+                // cabinet's gel, and writes the PNG.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Screenshot) => {
-                    // Through the harness helper, which is the one definition of
-                    // "the frame this cabinet displays" and is what the golden
-                    // pins hash. This used to render straight into the native
-                    // buffer and write it at native dimensions, which is the
-                    // picture turned a quarter turn on every machine with a
-                    // rotated monitor.
-                    let (sw, sh, mut shot) = phosphor_harness::render_oriented(machine);
-                    // Then the cabinet's gel over it, because a screenshot is
-                    // meant to be what the player was looking at. The harness
-                    // helper deliberately does not know about overlays: it is
-                    // also what the golden pins hash, and those pin what the
-                    // board draws rather than what the cabinet showed.
-                    if let Some(o) = &screen_overlay {
-                        o.apply(&mut shot, sw, sh);
-                    }
-                    match crate::screenshot::save_screenshot(
-                        &shot,
-                        sw,
-                        sh,
-                        screenshot_dir,
-                        machine_name,
-                    ) {
-                        Ok(path) => {
-                            log::info!("Screenshot saved: {}", path.display());
-                            notices.info(format!("Screenshot saved: {}", file_name(&path)));
-                        }
-                        Err(e) => {
-                            log::error!("screenshot failed: {e}");
-                            notices.error(format!("Screenshot failed: {e}"));
-                        }
-                    }
+                    commands.submit(crate::session::SessionCommand::CaptureFrame);
                 }
 
                 // Controller hotplug
@@ -1296,6 +1219,45 @@ pub fn run(
                         }
                     }
                 }
+            }
+        }
+
+        // Drain the session command queue: the single point where queued
+        // hotkey actions execute, after the poll and before resync, movie
+        // delivery, and the frame. Draining before the poll would add a
+        // frame of latency to every hotkey; draining after delivery would
+        // reorder commands against recorded input.
+        {
+            let paused = debug_state.global_paused || debug_state.run_mode == RunMode::Paused;
+            let mut drain_ctx = crate::session::LoopCtx {
+                machine: &mut *machine,
+                save_path,
+                screenshot_dir,
+                machine_name,
+                movies: &mut movie_capture,
+                overlay: screen_overlay.as_ref(),
+                notices: &mut notices,
+                frame_count: &mut debug_state.frame_count,
+                paused,
+            };
+            let (cmd_effects, rejections) = commands.drain(&mut drain_ctx, take_mode);
+            for r in &rejections {
+                log::warn!(
+                    "refused {}: {}",
+                    crate::session::meta(&r.cmd).label,
+                    r.reason
+                );
+                drain_ctx.notices.error(&r.reason);
+            }
+            if cmd_effects.resync_input {
+                // reset() and load_state() clear or replace the machine's
+                // port bits; a key held across either produces no new
+                // KeyDown, so without this the input is dead until the user
+                // releases and re-presses.
+                needs_resync = true;
+            }
+            if cmd_effects.rebuild.is_some() {
+                hard_reset_requested = true;
             }
         }
 
@@ -1930,7 +1892,7 @@ pub fn fit_aspect(available: egui::Vec2, aspect: f32) -> (egui::Vec2, egui::Vec2
 /// during a replay, and it is the number a golden pin's `frames` field wants
 /// read off the screen.
 /// A path's file name, for a notice over the picture; the log keeps the path.
-fn file_name(path: &std::path::Path) -> String {
+pub(crate) fn file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())

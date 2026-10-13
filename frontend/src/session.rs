@@ -7,6 +7,8 @@
 
 use std::collections::VecDeque;
 
+use phosphor_core::core::machine::FrontendMachine;
+
 use crate::debug_ui::DeviceAction;
 use crate::host_keys::HostAction;
 
@@ -365,6 +367,153 @@ impl SessionState {
     pub fn pending(&self) -> usize {
         self.queue.len()
     }
+
+    /// Run every queued command against `ctx`, in order. Enablement is
+    /// re-checked per command against a freshly built snapshot, so an
+    /// earlier command cannot stale a later answer. A rebuild ends the
+    /// drain; the rest stays queued for the new machine. Slice 1 executes
+    /// the pure-dispatch commands (reset, save, load, capture); variants
+    /// from later slices come back as rejections until they are wired.
+    pub fn drain(&mut self, ctx: &mut LoopCtx<'_>, mode: MovieMode) -> (Effects, Vec<Rejection>) {
+        let mut effects = Effects::default();
+        let mut rejections = Vec::new();
+
+        while let Some(cmd) = self.queue.pop_front() {
+            let snapshot = EnableCtx {
+                has_debug_bus: ctx.machine.debug_bus().is_some(),
+                mode,
+                save_file_exists: ctx.save_path.exists(),
+                dip_banks: ctx.machine.dip_banks().len(),
+                paused: ctx.paused,
+            };
+            if let Err(reason) = enable(&snapshot, &cmd) {
+                rejections.push(Rejection { cmd, reason });
+                continue;
+            }
+            match cmd {
+                SessionCommand::ResetSoft => {
+                    ctx.machine.reset();
+                    *ctx.frame_count = 0;
+                    effects.resync_input = true;
+                }
+                SessionCommand::ResetHard => {
+                    effects.rebuild = Some(Rebuild::HardReset);
+                    break;
+                }
+                SessionCommand::SaveState => match ctx.machine.save_state() {
+                    Some(data) => match std::fs::write(ctx.save_path, &data) {
+                        Ok(()) => {
+                            log::info!("Save state written ({} bytes)", data.len());
+                            ctx.notices.info("State saved");
+                        }
+                        Err(e) => {
+                            log::error!("save state failed: {e}");
+                            ctx.notices.error(format!("Save state failed: {e}"));
+                        }
+                    },
+                    None => {
+                        log::warn!("save states not supported for this machine");
+                        ctx.notices
+                            .error("Save states not supported for this machine");
+                    }
+                },
+                SessionCommand::LoadState => match std::fs::read(ctx.save_path) {
+                    Ok(data) => match ctx.machine.load_state(&data) {
+                        Ok(()) => {
+                            log::info!("State loaded");
+                            ctx.notices.info("State loaded");
+                            *ctx.frame_count = 0;
+                            effects.resync_input = true;
+                        }
+                        Err(e) => {
+                            log::error!("load state failed: {e}");
+                            ctx.notices.error(format!("Load state failed: {e}"));
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("no save file found: {e}");
+                        ctx.notices.error("No saved state to load");
+                    }
+                },
+                SessionCommand::CaptureFrame => {
+                    // Through the harness helper, which is the one definition
+                    // of "the frame this cabinet displays" and is what the
+                    // golden pins hash. Then the cabinet's gel over it,
+                    // because a screenshot is meant to be what the player
+                    // was looking at.
+                    let (sw, sh, mut shot) = phosphor_harness::render_oriented(ctx.machine);
+                    if let Some(o) = ctx.overlay {
+                        o.apply(&mut shot, sw, sh);
+                    }
+                    match crate::screenshot::save_screenshot(
+                        &shot,
+                        sw,
+                        sh,
+                        ctx.screenshot_dir,
+                        ctx.machine_name,
+                    ) {
+                        Ok(path) => {
+                            log::info!("Screenshot saved: {}", path.display());
+                            ctx.notices.info(format!(
+                                "Screenshot saved: {}",
+                                crate::emulator::file_name(&path)
+                            ));
+                        }
+                        Err(e) => {
+                            log::error!("screenshot failed: {e}");
+                            ctx.notices.error(format!("Screenshot failed: {e}"));
+                        }
+                    }
+                }
+                other => {
+                    let reason = format!("{} is not wired yet", meta(&other).label);
+                    rejections.push(Rejection { cmd: other, reason });
+                }
+            }
+        }
+
+        (effects, rejections)
+    }
+}
+
+/// Everything the drain may touch, borrowed from the loop for the call.
+/// The drain applies DIPs, screenshots, IO, and feedback itself; what
+/// returns is only what the loop must still do.
+pub struct LoopCtx<'a> {
+    pub machine: &'a mut dyn FrontendMachine,
+    pub save_path: &'a std::path::Path,
+    pub screenshot_dir: &'a std::path::Path,
+    pub machine_name: &'a str,
+    // Unread until slice 4 wires the recorder push; kept in the context so
+    // the drain signature is stable across slices.
+    #[allow(dead_code)]
+    pub movies: &'a mut crate::movie::MovieCapture,
+    pub overlay: Option<&'a crate::screen_overlay::ScreenOverlay>,
+    pub notices: &'a mut crate::overlay::Notices,
+    pub frame_count: &'a mut u64,
+    pub paused: bool,
+}
+
+/// The only effects the drain cannot apply itself. Plain struct, public
+/// fields, no Default bypass: a rebuild implies the drain stops.
+#[derive(Debug, Default)]
+pub struct Effects {
+    pub resync_input: bool,
+    pub rebuild: Option<Rebuild>,
+}
+
+/// A rebuild the loop services at its top, where the machine is not
+/// borrowed for the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rebuild {
+    HardReset,
+}
+
+/// A refused or unwired command with its display-ready reason.
+#[derive(Debug)]
+pub struct Rejection {
+    pub cmd: SessionCommand,
+    pub reason: String,
 }
 
 #[cfg(test)]
