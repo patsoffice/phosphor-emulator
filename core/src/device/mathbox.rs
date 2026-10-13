@@ -165,11 +165,11 @@ impl Mathbox {
                 self.reg[3] = (self.reg[3] & 0xFF) | (d << 8);
                 self.reg[2] = self.reg[2].wrapping_sub(self.reg[0]);
                 if self.reg[2] < 0 {
-                    self.reg[2] = -self.reg[2];
+                    self.reg[2] = self.reg[2].wrapping_neg();
                 }
                 self.reg[3] = self.reg[3].wrapping_sub(self.reg[1]);
                 if self.reg[3] < 0 {
-                    self.reg[3] = -self.reg[3];
+                    self.reg[3] = self.reg[3].wrapping_neg();
                 }
                 self.do_distance();
             }
@@ -279,8 +279,8 @@ impl Mathbox {
             regd = mb_q_init;
             mb_q = regc_init;
         } else {
-            regd = (-mb_q_init).wrapping_sub(1);
-            mb_q = (-regc_init).wrapping_sub(1);
+            regd = mb_q_init.wrapping_neg().wrapping_sub(1);
+            mb_q = regc_init.wrapping_neg().wrapping_sub(1);
             if mb_q < 0 && mb_q.wrapping_add(1) < 0 {
                 regd = regd.wrapping_add(1);
             }
@@ -288,7 +288,11 @@ impl Mathbox {
         }
 
         // abs(REG7)
-        let regc = if reg[7] >= 0 { reg[7] } else { -reg[7] };
+        let regc = if reg[7] >= 0 {
+            reg[7]
+        } else {
+            reg[7].wrapping_neg()
+        };
 
         let mut regf = reg[6]; // step counter
 
@@ -314,7 +318,7 @@ impl Mathbox {
             }
         }
 
-        self.result = if rege >= 0 { mb_q } else { -mb_q };
+        self.result = if rege >= 0 { mb_q } else { mb_q.wrapping_neg() };
     }
 
     /// Window test computation.
@@ -454,5 +458,38 @@ mod tests {
         mb.result = 0x1234;
         assert_eq!(mb.lo_r(), 0x34);
         assert_eq!(mb.hi_r(), 0x12);
+    }
+
+    /// Division with the most-negative operand must not panic: the hardware
+    /// negates in 16-bit two's complement, where negating 0x8000 yields
+    /// 0x8000. Battlezone's matrix code reaches this in real play.
+    #[test]
+    fn division_with_min_operand_does_not_panic() {
+        let mut mb = Mathbox::new();
+        mb.go_w(0x1A, 0x00); // REG8 low
+        mb.go_w(0x1B, 0x80); // REG8 high -> REG8 = 0x8000
+        mb.go_w(0x13, 0x00); // divide REG9 by REG8
+        let _ = (mb.lo_r(), mb.hi_r());
+    }
+
+    /// The distance path takes absolute values the same way; 0x8000 must
+    /// not panic there either.
+    #[test]
+    fn distance_with_min_leg_does_not_panic() {
+        let mut mb = Mathbox::new();
+        mb.go_w(0x04, 0x00); // REG2 low
+        mb.go_w(0x05, 0x80); // REG2 high -> REG2 = 0x8000
+        mb.go_w(0x1D, 0x00);
+        let _ = (mb.lo_r(), mb.hi_r());
+    }
+
+    /// A most-negative REG7 divisor takes the same negation path.
+    #[test]
+    fn division_with_min_reg7_does_not_panic() {
+        let mut mb = Mathbox::new();
+        mb.go_w(0x15, 0x00); // REG7 low
+        mb.go_w(0x16, 0x80); // REG7 high -> REG7 = 0x8000
+        mb.go_w(0x13, 0x00);
+        let _ = (mb.lo_r(), mb.hi_r());
     }
 }
