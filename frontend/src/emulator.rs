@@ -13,6 +13,7 @@ use crate::debug_ui::{self, DebugState, RunMode};
 use crate::host_keys::{HostAction, HostBindings, HostChord};
 use crate::input::{self, AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::profile::ProfileState;
+use crate::session::{MovieMode, movie_mode};
 use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
 
@@ -159,26 +160,6 @@ impl SdlDevices<'_> {
 /// `InputControl::player`.
 fn pad_slot_of(index: usize) -> u8 {
     index as u8 + 1
-}
-
-/// What a movie is doing right now, derived fresh wherever it is needed
-/// rather than stored. A finished playback is `Live`: the "ended" readout
-/// may still show, but the guards treat the take as over.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MovieMode {
-    Live,
-    Recording,
-    Replaying,
-}
-
-fn movie_mode(recording: bool, replaying: bool) -> MovieMode {
-    if recording {
-        MovieMode::Recording
-    } else if replaying {
-        MovieMode::Replaying
-    } else {
-        MovieMode::Live
-    }
 }
 
 /// Refuse a host action with the reason shown in the window and the log.
@@ -2030,17 +2011,6 @@ mod tests {
         let (w, h, a) = presentation(580, 570, Some((3, 4)), true);
         assert!(w < h, "rotated 3:4 must be portrait, got {w}x{h}");
         assert!((a - 3.0 / 4.0).abs() < 1e-2);
-    }
-
-    /// The take mode is derived, never stored. Recording wins over replaying
-    /// (the two cannot be live at once, but the order makes the refusal
-    /// tables total), and a finished playback is Live for guard purposes.
-    #[test]
-    fn movie_mode_derives_from_live_capture_and_playback() {
-        assert_eq!(movie_mode(false, false), MovieMode::Live);
-        assert_eq!(movie_mode(true, false), MovieMode::Recording);
-        assert_eq!(movie_mode(false, true), MovieMode::Replaying);
-        assert_eq!(movie_mode(true, true), MovieMode::Recording);
     }
 
     #[test]

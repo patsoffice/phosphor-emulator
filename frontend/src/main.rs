@@ -20,6 +20,7 @@ mod overlay;
 mod profile;
 mod screen_overlay;
 mod screenshot;
+mod session;
 mod settings_ui;
 mod state;
 mod vector_gl;
