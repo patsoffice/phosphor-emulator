@@ -852,9 +852,12 @@ pub fn run(
                         if let Some(bus) = machine.debug_bus() {
                             debug_state.refresh(bus);
                         }
-                        debug_state.run_mode = RunMode::Paused;
+                        // Opening pauses, and records whether the machine was
+                        // already held: closing restores that stored state
+                        // instead of forcing a resume.
+                        commands.note_debug_panel(true, &mut debug_state);
                     } else {
-                        debug_state.run_mode = RunMode::Running;
+                        commands.note_debug_panel(false, &mut debug_state);
                     }
                     video.resize_window(
                         win_w * scale
@@ -907,18 +910,14 @@ pub fn run(
                     debug_state.run_mode = RunMode::StepFrame;
                 }
 
-                // Toggle run <-> pause (running -> paused, otherwise continue)
+                // Toggle run <-> pause with the debugger open. F8 stays a
+                // debugger-modal key: with the debugger closed the game
+                // keeps the key, as `HostAction` documents. Queued like F5;
+                // the drain resolves it.
                 Event::KeyDown { repeat: false, .. }
                     if debug_state.active && hot == Some(HostAction::ToggleDebugPause) =>
                 {
-                    if debug_state.run_mode == RunMode::Running {
-                        debug_state.run_mode = RunMode::Paused;
-                    } else {
-                        // The watchpoint hit history survives a resume so a
-                        // sequence of hits accumulates across breaks; the
-                        // panel's Clear button empties it.
-                        debug_state.run_mode = RunMode::Running;
-                    }
+                    commands.submit(crate::session::SessionCommand::TogglePause);
                 }
 
                 // ?: Toggle the key legend (works with no other panel open)
@@ -1125,22 +1124,21 @@ pub fn run(
                 // It pauses first if the machine is running, so one press always
                 // means "hold here, one frame on" rather than depending on which
                 // state you happened to be in.
+                // Pause and advance a single frame. Autorepeat is deliberate:
+                // held down, this walks the machine forward a frame at a time,
+                // which is the point of the key. Queued; the drain resolves
+                // the auto-pause (from Running the machine holds after the
+                // single frame) and runs through the unified pause state, so
+                // the key also works with the debugger open.
                 Event::KeyDown { .. } if hot == Some(HostAction::FrameAdvance) => {
-                    debug_state.global_paused = true;
-                    debug_state.global_step = true;
+                    commands.submit(crate::session::SessionCommand::AdvanceFrame);
                 }
 
-                // Toggle global pause (frontend-level control, not a game input)
+                // Toggle pause (frontend-level control, not a game input).
+                // Queued and resolved at the drain, so two toggles in one
+                // batch toggle twice.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::TogglePause) => {
-                    debug_state.global_paused = !debug_state.global_paused;
-                    log::info!(
-                        "{}",
-                        if debug_state.global_paused {
-                            "Paused"
-                        } else {
-                            "Resumed"
-                        }
-                    );
+                    commands.submit(crate::session::SessionCommand::TogglePause);
                 }
 
                 // Screenshot. Queued; the drain renders through the harness
@@ -1228,17 +1226,15 @@ pub fn run(
             commands.submit(crate::session::SessionCommand::SetDisplay { settings: display });
         }
         {
-            let paused = debug_state.global_paused || debug_state.run_mode == RunMode::Paused;
             let mut drain_ctx = crate::session::LoopCtx {
                 machine: &mut *machine,
+                debug: &mut debug_state,
                 save_path,
                 screenshot_dir,
                 machine_name,
                 movies: &mut movie_capture,
                 overlay: screen_overlay.as_ref(),
                 notices: &mut notices,
-                frame_count: &mut debug_state.frame_count,
-                paused,
             };
             let (cmd_effects, rejections) = commands.drain(&mut drain_ctx, take_mode);
             for r in &rejections {
@@ -1433,7 +1429,7 @@ pub fn run(
                 // orientation flags. Only ROT270 (portrait vector monitors, e.g.
                 // Tempest) is exercised today; the shader special-cases it.
                 let rot = orientation_degrees(machine.orientation());
-                let paused = debug_state.global_paused;
+                let paused = debug_state.run_mode == RunMode::Paused;
                 let recording = movie_capture.is_recording();
                 if show_fps || paused || movie_status.is_some() {
                     let fps = show_fps.then(|| fps_text.clone());
@@ -1657,7 +1653,7 @@ pub fn run(
                         show_fps.then(|| machine.overlay_stats()).flatten(),
                         movie_status.as_deref(),
                     );
-                    let paused = debug_state.global_paused;
+                    let paused = debug_state.run_mode != RunMode::Running;
                     let recording = movie_capture.is_recording();
                     video.present_game_only(view_aspect, |ui| {
                         crate::overlay::draw_overlay(
@@ -1687,10 +1683,9 @@ pub fn run(
         }
 
         // Frame throttling
-        if debug_state.run_mode == RunMode::Paused || debug_state.global_paused {
-            // When paused (debug step-mode or the global P pause), sleep to keep
-            // the UI responsive without burning CPU, regardless of the throttle
-            // setting.
+        if debug_state.run_mode != RunMode::Running {
+            // When held, sleep to keep the UI responsive without burning
+            // CPU, regardless of the throttle setting.
             std::thread::sleep(Duration::from_millis(16));
         } else if throttle {
             // Track the sound card's clock rather than assuming it matches the

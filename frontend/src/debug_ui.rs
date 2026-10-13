@@ -130,18 +130,13 @@ pub enum DeviceAction {
 ///   Column 1..N: one per CPU (registers + disassembly/memory)
 pub struct DebugState {
     pub active: bool,
+    /// The single pause state. It replaced the old pair of `global_paused`
+    /// plus `RunMode`: with the debugger closed or open, one mode governs,
+    /// so Pause and frame advance mean the same thing everywhere.
     pub run_mode: RunMode,
-    /// Global pause, independent of the debug UI. When the debug UI is inactive
-    /// this gates emulation in [`execute_frame`]; while the debug UI is active
-    /// it is ignored and `run_mode` governs instead.
-    pub global_paused: bool,
-    /// Let exactly one frame through the global pause, then re-hold.
-    ///
-    /// [`execute_frame`] consumes this on every call, whether or not it is in a
-    /// position to honour it. Clearing it only on the path that uses it would
-    /// let a request made while the debug panel governs sit there and spend
-    /// itself later, jumping a frame the moment the panel closed.
-    pub global_step: bool,
+    /// Set by `AdvanceFrame` from `Running`: after the single frame,
+    /// `execute_frame` resumes instead of holding.
+    pub resume_after_step: bool,
     pub cpu_panels: Vec<CpuPanel>,
     pub device_panels: Vec<DevicePanel>,
     pub step_cpu: usize,
@@ -287,8 +282,7 @@ impl DebugState {
         Self {
             active: false,
             run_mode: RunMode::Running,
-            global_paused: false,
-            global_step: false,
+            resume_after_step: false,
             cpu_panels: Vec::new(),
             device_panels: Vec::new(),
             step_cpu: 0,
@@ -477,15 +471,27 @@ pub fn execute_frame(
     state: &mut DebugState,
     movie_take: bool,
 ) -> bool {
-    // Taken unconditionally: see `DebugState::global_step`.
-    let step_once = std::mem::take(&mut state.global_step);
-
     if !state.active {
-        // Global pause: hold the machine without running a frame, so no audio is
-        // drained. The audio callback repeats its last sample, so the output
-        // stays silent rather than buzzing.
-        if state.global_paused && !step_once {
-            return false;
+        // One pause state governs with the debugger closed or open. Holding
+        // runs no frame, so no audio is drained; the audio callback repeats
+        // its last sample, so the output stays silent rather than buzzing.
+        match state.run_mode {
+            RunMode::Paused => return false,
+            RunMode::StepFrame => {
+                machine.run_frame();
+                state.frame_count += 1;
+                if state.resume_after_step {
+                    state.resume_after_step = false;
+                    state.run_mode = RunMode::Running;
+                } else {
+                    state.run_mode = RunMode::Paused;
+                }
+                return true;
+            }
+            // Sub-frame steps are debugger-modal and never arm here; the
+            // drain and the panel both require the debugger open.
+            RunMode::StepInstruction | RunMode::StepCycle => return false,
+            RunMode::Running => {}
         }
         machine.run_frame();
         state.frame_count += 1;
@@ -695,6 +701,10 @@ pub fn execute_frame(
                 state.run_mode = RunMode::Paused;
                 return true;
             }
+            // NOTE: `resume_after_step` is deliberately not consulted on the
+            // debugger path: `AdvanceFrame` with the debugger open is defined
+            // as a plain single step, and only the closed-debugger key keeps
+            // the auto-pause-then-resume semantic.
             if cpf > 0 {
                 for _ in 0..cpf {
                     machine.debug_tick();
@@ -708,7 +718,12 @@ pub fn execute_frame(
             if let Some(bus) = machine.debug_bus() {
                 state.refresh(bus);
             }
-            state.run_mode = RunMode::Paused;
+            if state.resume_after_step {
+                state.resume_after_step = false;
+                state.run_mode = RunMode::Running;
+            } else {
+                state.run_mode = RunMode::Paused;
+            }
             true
         }
     }
@@ -1996,10 +2011,10 @@ mod tests {
     }
 
     #[test]
-    fn frame_advance_lets_exactly_one_frame_through_the_global_pause() {
+    fn frame_advance_lets_exactly_one_frame_through_the_pause() {
         let mut m = bare_machine();
         let mut s = DebugState::new();
-        s.global_paused = true;
+        s.run_mode = RunMode::Paused;
 
         // Paused with no request: nothing runs, and the frame counter is the
         // check that would catch a frame slipping through.
@@ -2007,9 +2022,10 @@ mod tests {
         assert_eq!(s.frame_count, 0);
 
         // One request, one frame.
-        s.global_step = true;
+        s.run_mode = RunMode::StepFrame;
         assert!(execute_frame(&mut *m, &mut s, false));
         assert_eq!(s.frame_count, 1);
+        assert_eq!(s.run_mode, RunMode::Paused);
 
         // And it re-holds rather than running free.
         assert!(!execute_frame(&mut *m, &mut s, false));
@@ -2017,23 +2033,17 @@ mod tests {
     }
 
     #[test]
-    fn a_step_request_cannot_outlive_the_frame_it_asked_for() {
-        // Requested while the debug panel governs, so `execute_frame` is in no
-        // position to honour it. If it were left set instead of consumed, the
-        // machine would jump a frame the moment the panel closed.
+    fn advance_from_running_resumes_after_the_single_frame() {
         let mut m = bare_machine();
         let mut s = DebugState::new();
-        s.global_paused = true;
-        s.active = true;
-        s.run_mode = RunMode::Paused;
-        s.global_step = true;
+        s.run_mode = RunMode::Running;
+        s.resume_after_step = true;
+        s.run_mode = RunMode::StepFrame;
 
-        execute_frame(&mut *m, &mut s, false);
-        assert!(!s.global_step, "a stale request would spend itself later");
-
-        s.active = false;
-        assert!(!execute_frame(&mut *m, &mut s, false));
-        assert_eq!(s.frame_count, 0, "closing the panel must not run a frame");
+        assert!(execute_frame(&mut *m, &mut s, false));
+        assert_eq!(s.frame_count, 1);
+        assert_eq!(s.run_mode, RunMode::Running);
+        assert!(!s.resume_after_step);
     }
 
     /// While a take runs, whole frames go through `run_frame()` rather than

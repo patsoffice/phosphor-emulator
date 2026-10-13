@@ -362,6 +362,9 @@ pub fn enable(ctx: &EnableCtx, cmd: &SessionCommand) -> Result<(), String> {
 #[derive(Debug, Default)]
 pub struct SessionState {
     queue: VecDeque<SessionCommand>,
+    /// Whether the machine was held before the debugger opened. Closing
+    /// restores this instead of forcing a resume.
+    debug_was_paused: bool,
 }
 
 impl SessionState {
@@ -375,6 +378,19 @@ impl SessionState {
     #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Record the debugger panel opening or closing against `debug`.
+    /// Opening pauses and remembers whether the machine was already held;
+    /// closing restores the remembered state instead of forcing a resume.
+    pub fn note_debug_panel(&mut self, open: bool, debug: &mut crate::debug_ui::DebugState) {
+        use crate::debug_ui::RunMode;
+        if open {
+            self.debug_was_paused = debug.run_mode != RunMode::Running;
+            debug.run_mode = RunMode::Paused;
+        } else if !self.debug_was_paused {
+            debug.run_mode = RunMode::Running;
+        }
     }
 
     /// Run every queued command against `ctx`, in order. Enablement is
@@ -393,7 +409,7 @@ impl SessionState {
                 mode,
                 save_file_exists: ctx.save_path.exists(),
                 dip_banks: ctx.machine.dip_banks().len(),
-                paused: ctx.paused,
+                paused: paused(ctx.debug),
             };
             if let Err(reason) = enable(&snapshot, &cmd) {
                 rejections.push(Rejection { cmd, reason });
@@ -402,12 +418,38 @@ impl SessionState {
             match cmd {
                 SessionCommand::ResetSoft => {
                     ctx.machine.reset();
-                    *ctx.frame_count = 0;
+                    ctx.debug.frame_count = 0;
                     effects.resync_input = true;
                 }
                 SessionCommand::ResetHard => {
                     effects.rebuild = Some(Rebuild::HardReset);
                     break;
+                }
+                SessionCommand::TogglePause => {
+                    use crate::debug_ui::RunMode;
+                    // Resolved here, at the drain, so two toggles in one
+                    // batch toggle twice rather than resolving to the same
+                    // value at submit time.
+                    ctx.debug.run_mode = if ctx.debug.run_mode == RunMode::Running {
+                        log::info!("Paused");
+                        RunMode::Paused
+                    } else {
+                        log::info!("Resumed");
+                        RunMode::Running
+                    };
+                }
+                SessionCommand::AdvanceFrame => {
+                    use crate::debug_ui::RunMode;
+                    // Auto-pause, preserved from the old global key: from
+                    // Running the machine holds after the single frame,
+                    // from Paused it just steps it. With the debugger open
+                    // the key is a plain single step (see the NOTE on the
+                    // debugger path), so the resume flag is only set with
+                    // the debugger closed, where it cannot go stale.
+                    if ctx.debug.run_mode == RunMode::Running && !ctx.debug.active {
+                        ctx.debug.resume_after_step = true;
+                    }
+                    ctx.debug.run_mode = RunMode::StepFrame;
                 }
                 SessionCommand::SaveState => match ctx.machine.save_state() {
                     Some(data) => match std::fs::write(ctx.save_path, &data) {
@@ -431,7 +473,7 @@ impl SessionState {
                         Ok(()) => {
                             log::info!("State loaded");
                             ctx.notices.info("State loaded");
-                            *ctx.frame_count = 0;
+                            ctx.debug.frame_count = 0;
                             effects.resync_input = true;
                         }
                         Err(e) => {
@@ -496,9 +538,11 @@ impl SessionState {
 
 /// Everything the drain may touch, borrowed from the loop for the call.
 /// The drain applies DIPs, screenshots, IO, and feedback itself; what
-/// returns is only what the loop must still do.
+/// returns is only what the loop must still do. Debug state travels as one
+/// borrow so the drain sees run mode, counters, and flags together.
 pub struct LoopCtx<'a> {
     pub machine: &'a mut dyn FrontendMachine,
+    pub debug: &'a mut crate::debug_ui::DebugState,
     pub save_path: &'a std::path::Path,
     pub screenshot_dir: &'a std::path::Path,
     pub machine_name: &'a str,
@@ -508,8 +552,13 @@ pub struct LoopCtx<'a> {
     pub movies: &'a mut crate::movie::MovieCapture,
     pub overlay: Option<&'a crate::screen_overlay::ScreenOverlay>,
     pub notices: &'a mut crate::overlay::Notices,
-    pub frame_count: &'a mut u64,
-    pub paused: bool,
+}
+
+/// Paused in either of the old senses: the debugger closed and holding, or
+/// the debugger governing and held.
+fn paused(debug: &crate::debug_ui::DebugState) -> bool {
+    use crate::debug_ui::RunMode;
+    !matches!(debug.run_mode, RunMode::Running)
 }
 
 /// The only effects the drain cannot apply itself. Plain struct, public
@@ -650,5 +699,27 @@ mod tests {
         s.submit(SessionCommand::ResetSoft);
         s.submit(SessionCommand::TogglePause);
         assert_eq!(s.pending(), 2);
+    }
+
+    /// Closing the debugger restores the remembered pause state instead of
+    /// forcing a resume: a machine paused before the panel opened stays
+    /// paused, and one that was running resumes.
+    #[test]
+    fn debug_panel_close_restores_prior_pause_state() {
+        use crate::debug_ui::{DebugState, RunMode};
+
+        let mut s = SessionState::default();
+        let mut debug = DebugState::new();
+        debug.run_mode = RunMode::Running;
+
+        s.note_debug_panel(true, &mut debug);
+        assert_eq!(debug.run_mode, RunMode::Paused);
+        s.note_debug_panel(false, &mut debug);
+        assert_eq!(debug.run_mode, RunMode::Running);
+
+        debug.run_mode = RunMode::Paused;
+        s.note_debug_panel(true, &mut debug);
+        s.note_debug_panel(false, &mut debug);
+        assert_eq!(debug.run_mode, RunMode::Paused);
     }
 }
