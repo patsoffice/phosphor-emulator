@@ -604,6 +604,10 @@ pub fn run(
             crate::movie::MovieCapture::adopt_conditions(&mut *fresh, nvram.as_deref(), &dip);
             *session.borrow_mut() = DebugSession::from_machine(fresh);
             debug_state.frame_count = 0;
+            // A rebuild replaces the machine without its watchpoints or
+            // trace settings; the UI still lists them, so re-apply both.
+            debug_state.watchpoints_dirty = true;
+            debug_state.trace_enabled_dirty = true;
             // The new machine's ports start clear and a key held across the
             // rebuild raises no fresh KeyDown, so it would be dead until
             // released and pressed again.
@@ -625,6 +629,10 @@ pub fn run(
             movie_capture.arm_fresh(&mut *fresh, nvram, dip);
             *session.borrow_mut() = DebugSession::from_machine(fresh);
             debug_state.frame_count = 0;
+            // Same re-apply as the hard-reset rebuild above: a fresh machine
+            // carries neither watchpoints nor trace settings.
+            debug_state.watchpoints_dirty = true;
+            debug_state.trace_enabled_dirty = true;
             log::info!("{}", movie_capture.armed_message());
             notices.info("Recording movie from power-on");
         }
@@ -638,6 +646,23 @@ pub fn run(
 
         let mut sess = session.borrow_mut();
         let machine: &mut dyn FrontendMachine = sess.machine_mut();
+
+        // Movie-mode transitions, observed every iteration before any work
+        // runs. Entering a take suspends watchpoints with a notice; the
+        // return to live play re-applies the UI set through the normal
+        // dirty sync, which stays suppressed while suspension holds.
+        let was_suspended = debug_state.watchpoints_suspended;
+        let now_suspended = take_mode != MovieMode::Live;
+        if now_suspended && !was_suspended {
+            machine.clear_all_watchpoints();
+            while machine.take_watchpoint_hit().is_some() {}
+            debug_state.watchpoints_suspended = true;
+            log::info!("Breakpoints and watchpoints are suspended while recording or replaying");
+            notices.info("Breakpoints and watchpoints suspended for this take");
+        } else if !now_suspended && was_suspended {
+            debug_state.watchpoints_suspended = false;
+            debug_state.watchpoints_dirty = true;
+        }
 
         // Set when something invalidates the machine's idea of held input
         // (reset, state load, focus regain, controller unplug). Reconciled once
@@ -1344,6 +1369,12 @@ pub fn run(
                 format!("MOVIE {f}/{t}")
             }
         });
+        // A finished playback unbinds: the "ended" readout above is display
+        // state, but game input must reach the machine again and the guards
+        // must treat the take as over. One word, one meaning.
+        if movie_playback.as_ref().is_some_and(|pb| pb.finished()) {
+            movie_playback = None;
+        }
         let t2 = Instant::now();
 
         // Drain audio samples only when a full frame was executed
@@ -1754,6 +1785,12 @@ pub fn run(
         // Release the machine borrow, then evaluate any console command against
         // the now-free session. Its output shows on the next frame's panel draw.
         drop(sess);
+        // The console lock follows the derived mode: mutating verbs are
+        // refused while a take runs, reads stay available. Set every frame,
+        // since the mode changes outside the console path.
+        session
+            .borrow_mut()
+            .set_locked(take_mode != MovieMode::Live);
         if let Some(cmd) = console_state.take_pending() {
             let result = console_engine.eval_with_scope::<rhai::Dynamic>(&mut console_scope, &cmd);
             for line in console_output.borrow_mut().drain(..) {
