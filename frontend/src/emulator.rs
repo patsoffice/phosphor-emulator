@@ -161,6 +161,34 @@ fn pad_slot_of(index: usize) -> u8 {
     index as u8 + 1
 }
 
+/// What a movie is doing right now, derived fresh wherever it is needed
+/// rather than stored. A finished playback is `Live`: the "ended" readout
+/// may still show, but the guards treat the take as over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MovieMode {
+    Live,
+    Recording,
+    Replaying,
+}
+
+fn movie_mode(recording: bool, replaying: bool) -> MovieMode {
+    if recording {
+        MovieMode::Recording
+    } else if replaying {
+        MovieMode::Replaying
+    } else {
+        MovieMode::Live
+    }
+}
+
+/// Refuse a host action with the reason shown in the window and the log.
+/// Used by the movie-take guards: silently ignoring the key would read as
+/// a dead hotkey rather than a deliberate refusal.
+fn refuse(notices: &mut crate::overlay::Notices, reason: &str) {
+    log::warn!("{reason}");
+    notices.error(reason);
+}
+
 impl input::DeviceState for SdlDevices<'_> {
     fn key_pressed(&self, scancode: Scancode) -> bool {
         self.keyboard.is_scancode_pressed(scancode)
@@ -601,6 +629,13 @@ pub fn run(
             notices.info("Recording movie from power-on");
         }
 
+        // Derived every iteration, never stored: a finished playback counts
+        // as Live for guard purposes (the "ended" readout may still show).
+        let take_mode = movie_mode(
+            movie_capture.is_recording(),
+            movie_playback.as_ref().is_some_and(|pb| !pb.finished()),
+        );
+
         let mut sess = session.borrow_mut();
         let machine: &mut dyn FrontendMachine = sess.machine_mut();
 
@@ -830,7 +865,14 @@ pub fn run(
                         && debug_state.run_mode == RunMode::Paused
                         && hot == Some(HostAction::StepInstruction) =>
                 {
-                    debug_state.run_mode = RunMode::StepInstruction;
+                    if take_mode != MovieMode::Live {
+                        refuse(
+                            &mut notices,
+                            "Instruction stepping is unavailable while recording or replaying",
+                        );
+                    } else {
+                        debug_state.run_mode = RunMode::StepInstruction;
+                    }
                 }
 
                 // Step one cycle (debug + paused).
@@ -839,7 +881,14 @@ pub fn run(
                         && debug_state.run_mode == RunMode::Paused
                         && hot == Some(HostAction::StepCycle) =>
                 {
-                    debug_state.run_mode = RunMode::StepCycle;
+                    if take_mode != MovieMode::Live {
+                        refuse(
+                            &mut notices,
+                            "Cycle stepping is unavailable while recording or replaying",
+                        );
+                    } else {
+                        debug_state.run_mode = RunMode::StepCycle;
+                    }
                 }
 
                 // Step frame — run one frame, pause at the next frame start
@@ -875,18 +924,32 @@ pub fn run(
 
                 // Soft reset: the reset button on the cabinet.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Reset) => {
-                    machine.reset();
-                    debug_state.frame_count = 0;
-                    // reset() clears the machine's port bits, but a key held
-                    // across it produces no new KeyDown — without this the
-                    // input is dead until the user releases and re-presses.
-                    needs_resync = true;
+                    if take_mode != MovieMode::Live {
+                        refuse(
+                            &mut notices,
+                            "Reset is unavailable while recording or replaying",
+                        );
+                    } else {
+                        machine.reset();
+                        debug_state.frame_count = 0;
+                        // reset() clears the machine's port bits, but a key held
+                        // across it produces no new KeyDown — without this the
+                        // input is dead until the user releases and re-presses.
+                        needs_resync = true;
+                    }
                 }
 
                 // Hard reset: the power switch. Deferred, because rebuilding
                 // cannot happen while the machine is borrowed for this frame.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::HardReset) => {
-                    hard_reset_requested = true;
+                    if take_mode != MovieMode::Live {
+                        refuse(
+                            &mut notices,
+                            "Hard reset is unavailable while recording or replaying",
+                        );
+                    } else {
+                        hard_reset_requested = true;
+                    }
                 }
 
                 // Record input movie. Arming resets to power-on, because a
@@ -904,6 +967,14 @@ pub fn run(
                                 notices.error(e);
                             }
                         }
+                    } else if take_mode == MovieMode::Replaying {
+                        // Arming rebuilds the machine, which would destroy the
+                        // replay being watched. Stopping a recording (above)
+                        // stays enabled in every mode.
+                        refuse(
+                            &mut notices,
+                            "Cannot arm a recording while replaying a movie",
+                        );
                     } else {
                         // Deferred: arming rebuilds the machine from ROM, which
                         // cannot happen while it is borrowed for this frame.
@@ -932,24 +1003,31 @@ pub fn run(
 
                 // Quick load
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickLoad) => {
-                    match std::fs::read(save_path) {
-                        Ok(data) => match machine.load_state(&data) {
-                            Ok(()) => {
-                                log::info!("Save state loaded");
-                                notices.info("State loaded");
-                                // Port bits live inside the snapshot, so the
-                                // restored state can contradict what is physically
-                                // held right now.
-                                needs_resync = true;
-                            }
+                    if take_mode != MovieMode::Live {
+                        refuse(
+                            &mut notices,
+                            "Loading a state is unavailable while recording or replaying",
+                        );
+                    } else {
+                        match std::fs::read(save_path) {
+                            Ok(data) => match machine.load_state(&data) {
+                                Ok(()) => {
+                                    log::info!("Save state loaded");
+                                    notices.info("State loaded");
+                                    // Port bits live inside the snapshot, so the
+                                    // restored state can contradict what is physically
+                                    // held right now.
+                                    needs_resync = true;
+                                }
+                                Err(e) => {
+                                    log::error!("load state failed: {e}");
+                                    notices.error(format!("Load state failed: {e}"));
+                                }
+                            },
                             Err(e) => {
-                                log::error!("load state failed: {e}");
-                                notices.error(format!("Load state failed: {e}"));
+                                log::warn!("no save file found: {e}");
+                                notices.error("No saved state to load");
                             }
-                        },
-                        Err(e) => {
-                            log::warn!("no save file found: {e}");
-                            notices.error("No saved state to load");
                         }
                     }
                 }
@@ -1561,7 +1639,18 @@ pub fn run(
                     // Apply DIP edits recorded by the panel this frame. A DIP
                     // change alters gameplay (coinage, lives, difficulty), so a
                     // recording has to carry it or replay diverges from the
-                    // point the operator flipped it.
+                    // point the operator flipped it. A flip during replay is
+                    // in neither the movie nor its header, so it is refused
+                    // rather than replayed wrong.
+                    if take_mode == MovieMode::Replaying
+                        && !settings_state.pending_dip_changes.is_empty()
+                    {
+                        settings_state.pending_dip_changes.clear();
+                        refuse(
+                            &mut notices,
+                            "DIP changes are unavailable while replaying a movie",
+                        );
+                    }
                     for change in settings_state.pending_dip_changes.drain(..) {
                         machine.set_dip_option(change.bank, change.option, change.value);
                         movie_capture
@@ -1902,6 +1991,17 @@ mod tests {
         let (w, h, a) = presentation(580, 570, Some((3, 4)), true);
         assert!(w < h, "rotated 3:4 must be portrait, got {w}x{h}");
         assert!((a - 3.0 / 4.0).abs() < 1e-2);
+    }
+
+    /// The take mode is derived, never stored. Recording wins over replaying
+    /// (the two cannot be live at once, but the order makes the refusal
+    /// tables total), and a finished playback is Live for guard purposes.
+    #[test]
+    fn movie_mode_derives_from_live_capture_and_playback() {
+        assert_eq!(movie_mode(false, false), MovieMode::Live);
+        assert_eq!(movie_mode(true, false), MovieMode::Recording);
+        assert_eq!(movie_mode(false, true), MovieMode::Replaying);
+        assert_eq!(movie_mode(true, true), MovieMode::Recording);
     }
 
     #[test]
