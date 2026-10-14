@@ -73,6 +73,11 @@ pub enum SessionCommand {
         addr: u32,
         kind: phosphor_core::core::WatchpointKind,
     },
+    ClearWatchpoint {
+        cpu: usize,
+        addr: u32,
+        kind: phosphor_core::core::WatchpointKind,
+    },
     ClearWatchpoints,
     SetTraceEnabled(bool),
     ClearTrace,
@@ -188,6 +193,11 @@ pub fn meta(cmd: &SessionCommand) -> CommandMeta {
             label: "Set watchpoint",
             category: CommandCategory::Debugger,
         },
+        SessionCommand::ClearWatchpoint { .. } => CommandMeta {
+            id: "debug.clear_watchpoint",
+            label: "Clear watchpoint",
+            category: CommandCategory::Debugger,
+        },
         SessionCommand::ClearWatchpoints => CommandMeta {
             id: "debug.clear_watchpoints",
             label: "Clear watchpoints",
@@ -251,6 +261,11 @@ pub fn all() -> Vec<SessionCommand> {
         SessionCommand::SetBreakpoint { cpu: 0, addr: 0 },
         SessionCommand::ClearBreakpoint { cpu: 0, addr: 0 },
         SessionCommand::SetWatchpoint {
+            cpu: 0,
+            addr: 0,
+            kind: WatchpointKind::Write,
+        },
+        SessionCommand::ClearWatchpoint {
             cpu: 0,
             addr: 0,
             kind: WatchpointKind::Write,
@@ -491,9 +506,115 @@ impl SessionState {
                     // boundary, rather than arming a mode for the next
                     // frame: the effect is the same single step.
                     ctx.machine.debug_tick();
+                    ctx.debug.cycle_count += 1;
+                }
+                SessionCommand::StepCycle => {
+                    // Same shape as the instruction step: one cycle now.
+                    ctx.machine.debug_tick();
+                    ctx.debug.cycle_count += 1;
+                }
+                SessionCommand::StepFrame => {
+                    // Paused-only, enforced above. Arms the mode; the next
+                    // `execute_frame` runs exactly one frame and re-holds.
+                    // (From Running, `AdvanceFrame` is the key that also
+                    // records the resume.)
+                    ctx.debug.run_mode = crate::debug_ui::RunMode::StepFrame;
                 }
                 SessionCommand::SetDisplay { settings } => {
                     phosphor_core::core::display::set_display_settings(settings);
+                }
+                SessionCommand::SetBreakpoint { cpu, addr } => {
+                    while ctx.debug.breakpoints.len() <= cpu {
+                        ctx.debug.breakpoints.push(std::collections::HashSet::new());
+                    }
+                    if let Some(set) = ctx.debug.breakpoints.get_mut(cpu) {
+                        set.insert(addr);
+                    }
+                }
+                SessionCommand::ClearBreakpoint { cpu, addr } => {
+                    if let Some(set) = ctx.debug.breakpoints.get_mut(cpu) {
+                        set.remove(&addr);
+                    }
+                }
+                SessionCommand::SetWatchpoint { cpu, addr, kind } => {
+                    let entry = (cpu, addr, kind);
+                    if !ctx.debug.watchpoints.contains(&entry) {
+                        ctx.debug.watchpoints.push(entry);
+                        ctx.debug.watchpoints_dirty = true;
+                    }
+                }
+                SessionCommand::ClearWatchpoint { cpu, addr, kind } => {
+                    ctx.debug
+                        .watchpoints
+                        .retain(|&(c, a, k)| !(c == cpu && a == addr && k == kind));
+                    ctx.debug.watchpoints_dirty = true;
+                }
+                SessionCommand::ClearWatchpoints => {
+                    ctx.debug.watchpoints.clear();
+                    ctx.debug.watchpoints_dirty = true;
+                }
+                SessionCommand::SetTraceEnabled(on) => {
+                    ctx.debug.trace_enabled = on;
+                    ctx.debug.trace_enabled_dirty = true;
+                }
+                SessionCommand::ClearTrace => {
+                    ctx.debug.trace_clear_requested = true;
+                }
+                SessionCommand::PokeMemory { cpu, addr, value } => {
+                    // `poke`, not `write`: a debugger write is tagged
+                    // `DebugAccessSource::Frontend`, matching the old
+                    // `pending_memory_writes` path in `execute_frame`.
+                    if let Some(bus) = ctx.machine.debug_bus_mut() {
+                        bus.poke(cpu, addr, value);
+                    }
+                }
+                SessionCommand::DeviceControl(action) => {
+                    if let Some(bus) = ctx.machine.debug_bus_mut() {
+                        match action {
+                            crate::debug_ui::DeviceAction::Reset(device_index) => {
+                                bus.reset_device(device_index)
+                            }
+                            crate::debug_ui::DeviceAction::WriteRegister {
+                                device_index,
+                                offset,
+                                value,
+                            } => bus.write_device_register(device_index, offset, value),
+                        }
+                    }
+                }
+                SessionCommand::SetDipOption {
+                    bank,
+                    option,
+                    value,
+                } => {
+                    ctx.machine.set_dip_option(bank, option, value);
+                    ctx.movies
+                        .push_dip(bank as u8, ctx.machine.dip_bank_value(bank));
+                }
+                SessionCommand::MovieRecordToggle => {
+                    if mode == MovieMode::Recording {
+                        // Stopping writes the file and stays enabled in
+                        // every mode.
+                        match ctx.movies.stop() {
+                            Ok(saved) => {
+                                log::info!("{}", saved.message);
+                                ctx.notices.info(format!(
+                                    "Movie saved: {}",
+                                    crate::emulator::file_name(&saved.path)
+                                ));
+                            }
+                            Err(e) => {
+                                log::error!("{e}");
+                                ctx.notices.error(e);
+                            }
+                        }
+                    } else {
+                        // Arming rebuilds the machine from ROM; the loop top
+                        // services it. Reaching here while replaying is
+                        // refused by `enable` above.
+                        effects.rebuild = Some(Rebuild::MovieArm);
+                        break;
+                    }
                 }
                 SessionCommand::CaptureFrame => {
                     // Through the harness helper, which is the one definition
@@ -524,10 +645,6 @@ impl SessionState {
                             ctx.notices.error(format!("Screenshot failed: {e}"));
                         }
                     }
-                }
-                other => {
-                    let reason = format!("{} is not wired yet", meta(&other).label);
-                    rejections.push(Rejection { cmd: other, reason });
                 }
             }
         }
@@ -574,6 +691,7 @@ pub struct Effects {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rebuild {
     HardReset,
+    MovieArm,
 }
 
 /// A refused or unwired command with its display-ready reason.
