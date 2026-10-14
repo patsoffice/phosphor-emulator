@@ -1,9 +1,8 @@
 //! Typed session commands for the native frontend.
 //!
-//! One `SessionCommand` enum, one metadata table, one enablement function.
-//! The queue, the drain, and the execution state arrive in later slices;
-//! this module starts with the vocabulary plus the rules for when each
-//! command may run. See `docs/designs/session-commands.md`.
+//! One `SessionCommand` enum, one metadata table, one enablement function,
+//! one queue drained at the frame boundary. See
+//! `docs/designs/session-commands.md`.
 
 use std::collections::VecDeque;
 
@@ -14,7 +13,7 @@ use crate::host_keys::HostAction;
 
 /// What a movie is doing right now, derived fresh wherever it is needed
 /// rather than stored. A finished playback is `Live`: the "ended" readout
-/// may still show, but the guards treat the take as over.
+/// shows on the final frame, but the guards treat the take as over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MovieMode {
     Live,
@@ -36,10 +35,6 @@ pub fn movie_mode(recording: bool, replaying: bool) -> MovieMode {
 /// A session-level action, submitted by hotkeys or panels and executed at a
 /// frame boundary. Only existing frontend behavior gets a variant; the
 /// catalog never invents emulator features.
-///
-/// Variants are wired slice by slice; until a slice submits one, it is
-/// constructed only in tests, which is what the allowance below says.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum SessionCommand {
     ResetSoft,
@@ -78,7 +73,6 @@ pub enum SessionCommand {
         addr: u32,
         kind: phosphor_core::core::WatchpointKind,
     },
-    ClearWatchpoints,
     SetTraceEnabled(bool),
     ClearTrace,
     PokeMemory {
@@ -105,12 +99,19 @@ pub enum CommandCategory {
 /// Stable id, human-readable label, and category for a command. Labels
 /// reuse the `HostAction` text so the panels and the key legend agree.
 ///
-/// Read by tests and by later slices; see the enum allowance.
-#[allow(dead_code)]
+/// The label feeds the refusal log and notices. The id and category are
+/// read by tests today; per-call-site UI hints are the follow-up that reads
+/// them in production (the drain enforces `enable`, the panels do not
+/// consult it yet).
 #[derive(Clone, Copy, Debug)]
 pub struct CommandMeta {
+    // Dead until the UI-hints follow-up; kept because the metadata table
+    // promises every variant a stable id and a category.
+    #[allow(dead_code)]
     pub id: &'static str,
     pub label: &'static str,
+    // Same allowance and reason as `id`.
+    #[allow(dead_code)]
     pub category: CommandCategory,
 }
 
@@ -198,11 +199,6 @@ pub fn meta(cmd: &SessionCommand) -> CommandMeta {
             label: "Clear watchpoint",
             category: CommandCategory::Debugger,
         },
-        SessionCommand::ClearWatchpoints => CommandMeta {
-            id: "debug.clear_watchpoints",
-            label: "Clear watchpoints",
-            category: CommandCategory::Debugger,
-        },
         SessionCommand::SetTraceEnabled(..) => CommandMeta {
             id: "debug.set_trace",
             label: "Trace enable",
@@ -270,7 +266,6 @@ pub fn all() -> Vec<SessionCommand> {
             addr: 0,
             kind: WatchpointKind::Write,
         },
-        SessionCommand::ClearWatchpoints,
         SessionCommand::SetTraceEnabled(true),
         SessionCommand::ClearTrace,
         SessionCommand::PokeMemory {
@@ -292,6 +287,7 @@ pub struct EnableCtx {
     pub save_file_exists: bool,
     pub dip_banks: usize,
     pub paused: bool,
+    pub debug_open: bool,
 }
 
 /// Whether a command may run, or the display-ready reason it may not. A
@@ -345,7 +341,21 @@ pub fn enable(ctx: &EnableCtx, cmd: &SessionCommand) -> Result<(), String> {
 
     // Capability and state checks.
     match cmd {
-        SessionCommand::StepInstruction | SessionCommand::StepCycle | SessionCommand::StepFrame => {
+        SessionCommand::StepInstruction | SessionCommand::StepCycle => {
+            // Debugger-modal, like the keys and the panel buttons: a step
+            // queued while the debugger is open but drained after it closes
+            // (one event batch can hold both) must be refused, or the armed
+            // mode sits in the closed-debugger branch forever and the
+            // machine stops running frames.
+            if !ctx.debug_open {
+                return Err("Stepping needs the debugger open".to_string());
+            }
+            if !ctx.paused {
+                return Err("Stepping needs the emulator paused".to_string());
+            }
+            Ok(())
+        }
+        SessionCommand::StepFrame => {
             if !ctx.paused {
                 return Err("Stepping needs the emulator paused".to_string());
             }
@@ -411,11 +421,12 @@ impl SessionState {
     /// Run every queued command against `ctx`, in order. Enablement is
     /// re-checked per command against a freshly built snapshot, so an
     /// earlier command cannot stale a later answer. A rebuild ends the
-    /// drain; the rest stays queued for the new machine. Slice 1 executes
-    /// the pure-dispatch commands (reset, save, load, capture); variants
-    /// from later slices come back as rejections until they are wired.
+    /// drain; the rest stays queued for the new machine.
     pub fn drain(&mut self, ctx: &mut LoopCtx<'_>, mode: MovieMode) -> (Effects, Vec<Rejection>) {
-        let mut effects = Effects::default();
+        let mut effects = Effects {
+            resync_input: false,
+            rebuild: None,
+        };
         let mut rejections = Vec::new();
 
         while let Some(cmd) = self.queue.pop_front() {
@@ -425,6 +436,7 @@ impl SessionState {
                 save_file_exists: ctx.save_path.exists(),
                 dip_banks: ctx.machine.dip_banks().len(),
                 paused: paused(ctx.debug),
+                debug_open: ctx.debug.active,
             };
             if let Err(reason) = enable(&snapshot, &cmd) {
                 rejections.push(Rejection { cmd, reason });
@@ -454,17 +466,11 @@ impl SessionState {
                     };
                 }
                 SessionCommand::AdvanceFrame => {
-                    use crate::debug_ui::RunMode;
                     // Auto-pause, preserved from the old global key: from
-                    // Running the machine holds after the single frame,
-                    // from Paused it just steps it. With the debugger open
-                    // the key is a plain single step (see the NOTE on the
-                    // debugger path), so the resume flag is only set with
-                    // the debugger closed, where it cannot go stale.
-                    if ctx.debug.run_mode == RunMode::Running && !ctx.debug.active {
-                        ctx.debug.resume_after_step = true;
-                    }
-                    ctx.debug.run_mode = RunMode::StepFrame;
+                    // Running the machine holds after the single frame, from
+                    // Paused it just steps it. `StepFrame` always re-holds,
+                    // so no resume flag is needed.
+                    ctx.debug.run_mode = crate::debug_ui::RunMode::StepFrame;
                 }
                 SessionCommand::SaveState => match ctx.machine.save_state() {
                     Some(data) => match std::fs::write(ctx.save_path, &data) {
@@ -502,22 +508,22 @@ impl SessionState {
                     }
                 },
                 SessionCommand::StepInstruction => {
-                    // Paused-only, enforced above. Runs now, at the frame
-                    // boundary, rather than arming a mode for the next
-                    // frame: the effect is the same single step.
-                    ctx.machine.debug_tick();
-                    ctx.debug.cycle_count += 1;
+                    // Modal and paused-only, enforced above. Arms the mode;
+                    // the next `execute_frame` runs to the selected CPU's
+                    // next instruction boundary and re-holds. Arming rather
+                    // than running keeps one definition of the step: the
+                    // hotkey and the panel button share the `RunMode` path.
+                    ctx.debug.run_mode = crate::debug_ui::RunMode::StepInstruction;
                 }
                 SessionCommand::StepCycle => {
-                    // Same shape as the instruction step: one cycle now.
-                    ctx.machine.debug_tick();
-                    ctx.debug.cycle_count += 1;
+                    // Same shape: one cycle in the next `execute_frame`,
+                    // with its watchpoint drain, so a hit on that cycle
+                    // stops there instead of surfacing at the next resume.
+                    ctx.debug.run_mode = crate::debug_ui::RunMode::StepCycle;
                 }
                 SessionCommand::StepFrame => {
                     // Paused-only, enforced above. Arms the mode; the next
                     // `execute_frame` runs exactly one frame and re-holds.
-                    // (From Running, `AdvanceFrame` is the key that also
-                    // records the resume.)
                     ctx.debug.run_mode = crate::debug_ui::RunMode::StepFrame;
                 }
                 SessionCommand::SetDisplay { settings } => {
@@ -547,10 +553,6 @@ impl SessionState {
                     ctx.debug
                         .watchpoints
                         .retain(|&(c, a, k)| !(c == cpu && a == addr && k == kind));
-                    ctx.debug.watchpoints_dirty = true;
-                }
-                SessionCommand::ClearWatchpoints => {
-                    ctx.debug.watchpoints.clear();
                     ctx.debug.watchpoints_dirty = true;
                 }
                 SessionCommand::SetTraceEnabled(on) => {
@@ -663,9 +665,6 @@ pub struct LoopCtx<'a> {
     pub save_path: &'a std::path::Path,
     pub screenshot_dir: &'a std::path::Path,
     pub machine_name: &'a str,
-    // Unread until slice 4 wires the recorder push; kept in the context so
-    // the drain signature is stable across slices.
-    #[allow(dead_code)]
     pub movies: &'a mut crate::movie::MovieCapture,
     pub overlay: Option<&'a crate::screen_overlay::ScreenOverlay>,
     pub notices: &'a mut crate::overlay::Notices,
@@ -679,8 +678,10 @@ fn paused(debug: &crate::debug_ui::DebugState) -> bool {
 }
 
 /// The only effects the drain cannot apply itself. Plain struct, public
-/// fields, no Default bypass: a rebuild implies the drain stops.
-#[derive(Debug, Default)]
+/// fields, no `Default`: the drain spells out both fields at construction,
+/// so a new field breaks the drain until it is considered. A rebuild
+/// implies the drain stops.
+#[derive(Debug)]
 pub struct Effects {
     pub resync_input: bool,
     pub rebuild: Option<Rebuild>,
@@ -741,6 +742,7 @@ mod tests {
             save_file_exists: true,
             dip_banks: 1,
             paused: true,
+            debug_open: true,
         }
     }
 
@@ -750,6 +752,18 @@ mod tests {
     fn disabled_commands_return_reasons() {
         let mut ctx = live();
         assert!(enable(&ctx, &SessionCommand::StepInstruction).is_ok());
+
+        ctx.debug_open = false;
+        assert_eq!(
+            enable(&ctx, &SessionCommand::StepInstruction),
+            Err("Stepping needs the debugger open".to_string())
+        );
+        assert_eq!(
+            enable(&ctx, &SessionCommand::StepCycle),
+            Err("Stepping needs the debugger open".to_string())
+        );
+        assert!(enable(&ctx, &SessionCommand::StepFrame).is_ok());
+        ctx.debug_open = true;
 
         ctx.paused = false;
         assert_eq!(
@@ -825,6 +839,8 @@ mod tests {
     /// pause in the same batch is accepted because enablement is rebuilt
     /// per command; a step while running and a load with no save file
     /// come back as rejections with reasons, and the machine is untouched.
+    /// Take guards, a poke round trip, and a DIP flip run through the same
+    /// drain below, in Recording, Replaying, and Live modes.
     #[test]
     fn commands_run_across_frames_on_a_booted_machine() {
         use crate::debug_ui::{DebugState, RunMode};
@@ -849,7 +865,8 @@ mod tests {
                    debug: &mut DebugState,
                    machine: &mut dyn FrontendMachine,
                    notices: &mut Notices,
-                   movies: &mut MovieCapture| {
+                   movies: &mut MovieCapture,
+                   mode: MovieMode| {
             let mut ctx = LoopCtx {
                 machine,
                 debug,
@@ -860,12 +877,42 @@ mod tests {
                 overlay: None,
                 notices,
             };
-            s.drain(&mut ctx, MovieMode::Live)
+            s.drain(&mut ctx, mode)
         };
 
         let mut s = SessionState::default();
 
+        // With the debugger closed, a sub-frame step is refused even paused:
+        // arming it would park the closed-debugger branch in a mode that
+        // never runs frames. The pause itself is accepted.
+        s.submit(SessionCommand::TogglePause);
+        s.submit(SessionCommand::StepInstruction);
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            MovieMode::Live,
+        );
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(meta(&rejections[0].cmd).id, "exec.step_instruction");
+        assert_eq!(rejections[0].reason, "Stepping needs the debugger open");
+        assert_eq!(debug.run_mode, RunMode::Paused);
+
         // Pause, then step in the same batch: the step sees the pause.
+        // The drain arms the instruction step without running it; the next
+        // `execute_frame` runs it to the selected CPU's next instruction
+        // boundary and re-holds, exactly like the panel's Instr button.
+        // Asserting the armed-but-unrun state pins the contract a
+        // run-it-in-the-drain regression would break: that version leaves
+        // the mode Paused with cycles already spent.
+        // Sub-frame steps are debugger-modal, so the debugger is open for
+        // this section, as the hotkeys require. The machine is running
+        // again: the closed case above left it paused.
+        debug.active = true;
+        debug.run_mode = RunMode::Running;
+        let cycles_before = debug.cycle_count;
         s.submit(SessionCommand::TogglePause);
         s.submit(SessionCommand::StepInstruction);
         let (effects, rejections) = run(
@@ -874,11 +921,18 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
+            MovieMode::Live,
         );
         assert!(rejections.is_empty());
         assert!(!effects.resync_input);
+        assert_eq!(debug.run_mode, RunMode::StepInstruction);
+        assert_eq!(
+            debug.cycle_count, cycles_before,
+            "the drain arms the step; only execute_frame runs it"
+        );
+        crate::debug_ui::execute_frame(machine.as_mut(), &mut debug, false);
         assert_eq!(debug.run_mode, RunMode::Paused);
-        assert_eq!(debug.cycle_count, 1);
+        assert!(debug.cycle_count > cycles_before);
 
         // Two toggles in one batch toggle twice.
         s.submit(SessionCommand::TogglePause);
@@ -889,6 +943,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
+            MovieMode::Live,
         );
         assert_eq!(debug.run_mode, RunMode::Paused);
 
@@ -905,6 +960,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
+            MovieMode::Live,
         );
         assert!(debug.breakpoints.iter().any(|set| set.contains(&0x100)));
         assert!(rejections.is_empty());
@@ -918,6 +974,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
+            MovieMode::Live,
         );
         assert_eq!(rejections.len(), 2);
         assert!(
@@ -925,6 +982,205 @@ mod tests {
             "every refusal carries its reason"
         );
         assert_eq!(debug.run_mode, RunMode::Running);
+
+        // Take guards through the same drain. In Recording, a reset, a
+        // sub-frame step, and a poke are refused with reasons and the
+        // machine is untouched; a whole-frame step and a DIP flip stay
+        // enabled. The machine is Running here, so pause first: the step
+        // and the flip both need it.
+        let frames_before = debug.frame_count;
+        let cycles_before = debug.cycle_count;
+        let dip_ok = !machine.dip_banks().is_empty();
+        s.submit(SessionCommand::TogglePause);
+        s.submit(SessionCommand::ResetSoft);
+        s.submit(SessionCommand::StepInstruction);
+        s.submit(SessionCommand::PokeMemory {
+            cpu: 0,
+            addr: 0x200,
+            value: 0xAA,
+        });
+        s.submit(SessionCommand::StepFrame);
+        s.submit(SessionCommand::SetDipOption {
+            bank: 0,
+            option: 0,
+            value: 0,
+        });
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            MovieMode::Recording,
+        );
+        let refused: Vec<&str> = rejections.iter().map(|r| meta(&r.cmd).id).collect();
+        for id in [
+            "session.reset_soft",
+            "exec.step_instruction",
+            "debug.poke_memory",
+        ] {
+            assert!(
+                refused.contains(&id),
+                "{id} must be refused while recording"
+            );
+        }
+        assert!(
+            !refused.contains(&"exec.step_frame"),
+            "whole-frame steps stay enabled while recording"
+        );
+        assert_eq!(
+            refused.contains(&"dip.set_option"),
+            !dip_ok,
+            "a DIP flip is the one state change the recorder captures"
+        );
+        assert!(
+            rejections.iter().all(|r| !r.reason.is_empty()),
+            "every refusal carries its reason"
+        );
+        assert_eq!(debug.frame_count, frames_before);
+        assert_eq!(debug.cycle_count, cycles_before);
+        // The step armed but did not run: the drain only stages it.
+        assert_eq!(debug.run_mode, RunMode::StepFrame);
+
+        // In Replaying, the DIP flip and arming a recording join the
+        // refused set; pausing stays available.
+        s.submit(SessionCommand::SetDipOption {
+            bank: 0,
+            option: 0,
+            value: 0,
+        });
+        s.submit(SessionCommand::MovieRecordToggle);
+        s.submit(SessionCommand::TogglePause);
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            MovieMode::Replaying,
+        );
+        let refused: Vec<&str> = rejections.iter().map(|r| meta(&r.cmd).id).collect();
+        assert!(refused.contains(&"dip.set_option"));
+        assert!(refused.contains(&"movie.toggle_record"));
+        assert!(
+            !refused.contains(&"session.pause"),
+            "pausing stays available while replaying"
+        );
+
+        // AdvanceFrame through the drain: from Running with the debugger
+        // closed it arms one frame and holds afterwards, the hold-here
+        // contract the resume flag used to break. The closed debugger is
+        // the point: the old code only set the flag when
+        // `run_mode == Running && !debug.active`, so an open-debugger test
+        // passes with the bug back in. State is set explicitly, not
+        // inherited from whatever the previous batch left behind.
+        debug.active = false;
+        debug.run_mode = RunMode::Running;
+        let frames_before = debug.frame_count;
+        s.submit(SessionCommand::AdvanceFrame);
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            MovieMode::Live,
+        );
+        assert!(rejections.is_empty());
+        assert_eq!(debug.run_mode, RunMode::StepFrame);
+        crate::debug_ui::execute_frame(machine.as_mut(), &mut debug, false);
+        assert_eq!(debug.frame_count, frames_before + 1);
+        assert_eq!(debug.run_mode, RunMode::Paused);
+
+        // A poke round trip in Live: the value lands in the machine's own
+        // memory, proving dispatch reaches the operation. The probe scans
+        // for debugger-backed bytes first, so the test does not assume any
+        // machine's map.
+        let probe = [0x100u32, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000]
+            .into_iter()
+            .find(|&addr| {
+                machine.debug_bus().is_some_and(|bus| {
+                    matches!(
+                        bus.peek(0, addr),
+                        phosphor_core::core::DebugRead::Backed { .. }
+                    )
+                })
+            })
+            .expect("the bare machine exposes backed memory to the debugger");
+        let before = machine
+            .debug_bus()
+            .and_then(|bus| match bus.peek(0, probe) {
+                phosphor_core::core::DebugRead::Backed { value, .. } => Some(value as u8),
+                _ => None,
+            })
+            .expect("probed address is backed");
+        let poked = before.wrapping_add(1);
+        s.submit(SessionCommand::PokeMemory {
+            cpu: 0,
+            addr: probe,
+            value: poked,
+        });
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            MovieMode::Live,
+        );
+        assert!(rejections.is_empty());
+        let after = machine
+            .debug_bus()
+            .and_then(|bus| match bus.peek(0, probe) {
+                phosphor_core::core::DebugRead::Backed { value, .. } => Some(value as u8),
+                _ => None,
+            });
+        assert_eq!(after, Some(poked), "the poke reached machine memory");
+
+        // Reset, save/load, and capture reach their operations in Live,
+        // through a real temp dir. The save lands before the load drains,
+        // so per-command enablement sees the file the earlier command
+        // wrote. When the machine cannot save, the save writes nothing and
+        // the load is refused with its reason instead.
+        let tmp =
+            std::env::temp_dir().join(format!("phosphor-session-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("temp dir for the session test");
+        let save_file = tmp.join("quick.save");
+        let _ = std::fs::remove_file(&save_file);
+        let supports_save = machine.save_state().is_some();
+        s.submit(SessionCommand::ResetSoft);
+        s.submit(SessionCommand::SaveState);
+        s.submit(SessionCommand::LoadState);
+        s.submit(SessionCommand::CaptureFrame);
+        let (effects, rejections) = {
+            let mut ctx = LoopCtx {
+                machine: machine.as_mut(),
+                debug: &mut debug,
+                save_path: &save_file,
+                screenshot_dir: &tmp,
+                machine_name: "test",
+                movies: &mut movies,
+                overlay: None,
+                notices: &mut notices,
+            };
+            s.drain(&mut ctx, MovieMode::Live)
+        };
+        assert_eq!(save_file.exists(), supports_save);
+        if supports_save {
+            assert!(rejections.is_empty());
+            assert!(effects.resync_input);
+            assert_eq!(debug.frame_count, 0);
+        } else {
+            assert_eq!(rejections.len(), 1, "only the load is refused");
+            assert!(!rejections[0].reason.is_empty());
+        }
+        let entries: Vec<_> = std::fs::read_dir(&tmp).expect("temp dir").collect();
+        assert_eq!(
+            entries.len(),
+            if supports_save { 2 } else { 1 },
+            "save file plus screenshot, or screenshot alone"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Closing the debugger restores the remembered pause state instead of

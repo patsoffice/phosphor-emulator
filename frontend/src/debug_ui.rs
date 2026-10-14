@@ -134,9 +134,6 @@ pub struct DebugState {
     /// plus `RunMode`: with the debugger closed or open, one mode governs,
     /// so Pause and frame advance mean the same thing everywhere.
     pub run_mode: RunMode,
-    /// Set by `AdvanceFrame` from `Running`: after the single frame,
-    /// `execute_frame` resumes instead of holding.
-    pub resume_after_step: bool,
     pub cpu_panels: Vec<CpuPanel>,
     pub device_panels: Vec<DevicePanel>,
     pub step_cpu: usize,
@@ -287,7 +284,6 @@ impl DebugState {
         Self {
             active: false,
             run_mode: RunMode::Running,
-            resume_after_step: false,
             cpu_panels: Vec::new(),
             device_panels: Vec::new(),
             step_cpu: 0,
@@ -470,8 +466,8 @@ fn drain_watchpoint_hits(machine: &mut dyn FrontendMachine, state: &mut DebugSta
 /// `debug_tick()`, which is different code on some boards (Dig Dug's
 /// `run_frame_scanline_outer` versus `tick_frame_boundary`) and nothing
 /// proves the two agree. Sub-frame steps are refused outright here as well
-/// as in the hotkeys, since the debug panel buttons reach `run_mode`
-/// directly.
+/// as in the drain, as a backstop for any caller that sets `run_mode`
+/// without passing through the queue.
 pub fn execute_frame(
     machine: &mut dyn FrontendMachine,
     state: &mut DebugState,
@@ -486,17 +482,18 @@ pub fn execute_frame(
             RunMode::StepFrame => {
                 machine.run_frame();
                 state.frame_count += 1;
-                if state.resume_after_step {
-                    state.resume_after_step = false;
-                    state.run_mode = RunMode::Running;
-                } else {
-                    state.run_mode = RunMode::Paused;
-                }
+                state.run_mode = RunMode::Paused;
                 return true;
             }
             // Sub-frame steps are debugger-modal and never arm here; the
-            // drain and the panel both require the debugger open.
-            RunMode::StepInstruction | RunMode::StepCycle => return false,
+            // drain refuses them while the debugger is closed, and the
+            // panel cannot stage them. A leftover mode (armed while open,
+            // closed before the next frame) re-holds instead of sitting
+            // here forever with frames stopped and no pause shown.
+            RunMode::StepInstruction | RunMode::StepCycle => {
+                state.run_mode = RunMode::Paused;
+                return false;
+            }
             RunMode::Running => {}
         }
         machine.run_frame();
@@ -518,7 +515,8 @@ pub fn execute_frame(
     }
 
     // Sub-frame steps cannot run during a take however they were requested:
-    // panel buttons set `run_mode` directly, bypassing the hotkey guards.
+    // a backstop for any caller that sets `run_mode` without passing
+    // through the queue.
     if movie_take
         && matches!(
             state.run_mode,
@@ -686,10 +684,6 @@ pub fn execute_frame(
                 state.run_mode = RunMode::Paused;
                 return true;
             }
-            // NOTE: `resume_after_step` is deliberately not consulted on the
-            // debugger path: `AdvanceFrame` with the debugger open is defined
-            // as a plain single step, and only the closed-debugger key keeps
-            // the auto-pause-then-resume semantic.
             if cpf > 0 {
                 for _ in 0..cpf {
                     machine.debug_tick();
@@ -703,12 +697,7 @@ pub fn execute_frame(
             if let Some(bus) = machine.debug_bus() {
                 state.refresh(bus);
             }
-            if state.resume_after_step {
-                state.resume_after_step = false;
-                state.run_mode = RunMode::Running;
-            } else {
-                state.run_mode = RunMode::Paused;
-            }
+            state.run_mode = RunMode::Paused;
             true
         }
     }
@@ -871,33 +860,47 @@ fn draw_controls_column(ui: &mut egui::Ui, state: &mut DebugState, min_top_heigh
     let keys = state.key_hints.clone();
 
     ui.horizontal(|ui| {
-        // The pause key toggles run <-> pause (see emulator.rs).
+        // The pause button stages a toggle for the loop's queue (see
+        // emulator.rs): the drain resolves it, so the button and the pause
+        // key share one enablement and one ordering.
         if state.run_mode == RunMode::Running {
             if ui.button(format!("Pause ({})", keys.pause)).clicked() {
-                state.run_mode = RunMode::Paused;
+                state
+                    .pending_commands
+                    .push(crate::session::SessionCommand::TogglePause);
             }
         } else if ui.button(format!("Continue ({})", keys.pause)).clicked() {
             // The hit history deliberately survives a resume — see
             // `draw_watchpoint_hits`.
-            state.run_mode = RunMode::Running;
+            state
+                .pending_commands
+                .push(crate::session::SessionCommand::TogglePause);
         }
     });
 
     // Ordered by increasing granularity, matching the key row (see
-    // `host_keys::DEFAULTS`).
+    // `host_keys::DEFAULTS`). Steps stage into the queue for the same
+    // reason: during a take the drain refuses them with a notice instead
+    // of bypassing the recording guards.
     ui.horizontal(|ui| {
         let step = |ui: &mut egui::Ui, label: String| {
             ui.add_enabled(is_paused, egui::Button::new(label))
                 .clicked()
         };
         if step(ui, format!("Cycle ({})", keys.step_cycle)) {
-            state.run_mode = RunMode::StepCycle;
+            state
+                .pending_commands
+                .push(crate::session::SessionCommand::StepCycle);
         }
         if step(ui, format!("Instr ({})", keys.step_instruction)) {
-            state.run_mode = RunMode::StepInstruction;
+            state
+                .pending_commands
+                .push(crate::session::SessionCommand::StepInstruction);
         }
         if step(ui, format!("Frame ({})", keys.step_frame)) {
-            state.run_mode = RunMode::StepFrame;
+            state
+                .pending_commands
+                .push(crate::session::SessionCommand::StepFrame);
         }
     });
 
@@ -2040,25 +2043,24 @@ mod tests {
         assert_eq!(s.frame_count, 1);
     }
 
+    /// Frame advance from Running holds after the single frame: one press
+    /// means "hold here, one frame on", never a resume.
     #[test]
-    fn advance_from_running_resumes_after_the_single_frame() {
+    fn advance_from_running_holds_after_the_single_frame() {
         let mut m = bare_machine();
         let mut s = DebugState::new();
         s.run_mode = RunMode::Running;
-        s.resume_after_step = true;
         s.run_mode = RunMode::StepFrame;
 
         assert!(execute_frame(&mut *m, &mut s, false));
         assert_eq!(s.frame_count, 1);
-        assert_eq!(s.run_mode, RunMode::Running);
-        assert!(!s.resume_after_step);
+        assert_eq!(s.run_mode, RunMode::Paused);
     }
 
     /// While a take runs, whole frames go through `run_frame()` rather than
     /// `debug_tick()`: the debugger path is different code on some boards
     /// and nothing proves the two agree. A sub-frame step requested during
-    /// a take (the panel buttons bypass the hotkey guards) is refused and
-    /// re-holds instead of running.
+    /// a take is refused and re-holds instead of running.
     #[test]
     fn take_routes_whole_frames_through_run_frame() {
         let mut m = bare_machine();
@@ -2073,6 +2075,16 @@ mod tests {
         assert!(!execute_frame(&mut *m, &mut s, true));
         assert_eq!(s.run_mode, RunMode::Paused);
         assert_eq!(s.frame_count, 1, "no partial frame may run during a take");
+
+        // Control case: the same step outside a take does run.
+        let cycles_before = s.cycle_count;
+        s.run_mode = RunMode::StepInstruction;
+        assert!(!execute_frame(&mut *m, &mut s, false));
+        assert_eq!(s.run_mode, RunMode::Paused);
+        assert!(
+            s.cycle_count > cycles_before,
+            "the refusal above is the take guard, not a dead step path"
+        );
     }
 
     /// While suspension holds, the dirty sync does nothing and leaves the

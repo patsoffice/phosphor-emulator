@@ -556,8 +556,7 @@ pub fn run(
     let mut pending_resync = false;
 
     // The session command queue. Hotkeys and panels submit; the drain after
-    // the event poll executes. Slice 1 wires the pure commands (reset,
-    // save, load, capture); the rest follow in later slices.
+    // the event poll executes.
     let mut commands = crate::session::SessionState::default();
 
     'main: loop {
@@ -616,7 +615,8 @@ pub fn run(
         }
 
         // Derived every iteration, never stored: a finished playback counts
-        // as Live for guard purposes (the "ended" readout may still show).
+        // as Live for guard purposes (the "ended" readout shows on the
+        // final frame).
         let take_mode = movie_mode(
             movie_capture.is_recording(),
             movie_playback.as_ref().is_some_and(|pb| !pb.finished()),
@@ -871,14 +871,14 @@ pub fn run(
                         && debug_state.run_mode == RunMode::Paused
                         && hot == Some(HostAction::StepInstruction) =>
                 {
-                    // Queued; the drain refuses it during a take and runs one
-                    // instruction step at the frame boundary otherwise.
+                    // Queued; the drain refuses it during a take and arms
+                    // the mode for execute_frame otherwise.
                     commands.submit(crate::session::SessionCommand::StepInstruction);
                 }
 
                 // Step one cycle (debug + paused). Queued; the drain
-                // refuses it during a take and runs one cycle at the frame
-                // boundary otherwise.
+                // refuses it during a take and arms the mode for
+                // execute_frame otherwise.
                 Event::KeyDown { repeat: false, .. }
                     if debug_state.active
                         && debug_state.run_mode == RunMode::Paused
@@ -1228,7 +1228,7 @@ pub fn run(
             };
             let (cmd_effects, rejections) = commands.drain(&mut drain_ctx, take_mode);
             for r in &rejections {
-                log::warn!(
+                log::error!(
                     "refused {}: {}",
                     crate::session::meta(&r.cmd).label,
                     r.reason

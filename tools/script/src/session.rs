@@ -99,12 +99,16 @@ impl DebugSession {
     ///
     /// The frontend sets this from the derived movie mode each frame: while a
     /// movie records or replays, a console verb must not change machine state
-    /// outside the recorded input stream. The lock is an allowlist, not a
-    /// denylist: while locked, every method is refused except the pure reads
+    /// outside the recorded input stream. While locked, every mutating method
+    /// takes the early refusal below and only the pure reads stay available
     /// (`read`, `pc`, `regs`, `disasm`, `cpu_count`, `device_names`,
-    /// `device_registers`, `trace_enabled`), so a verb added later is locked
-    /// by default. That includes `input` (game input past the recording tee),
-    /// the DIP setters (flips the recorder never sees), `load_movie`, and
+    /// `device_registers`, `trace_enabled`). That allowlist shape is a
+    /// per-method convention, not a gate: each mutating verb carries its own
+    /// `if self.locked` line, so a verb added without one is callable while
+    /// locked. Centralizing the enforcement is filed work (the silent
+    /// refusals issue). The easy-to-miss verbs that must keep their lines
+    /// are `input` (game input past the recording tee), the DIP setters
+    /// (flips the recorder never sees), `load_movie`, and
     /// `take_hits`/`take_events` (they consume queues the debugger UI also
     /// drains). Direct machine access via [`machine_mut`](Self::machine_mut)
     /// is the loop's own path and is not gated.
@@ -1234,7 +1238,7 @@ mod tests {
         assert!(s.disasm(0, 0x1000).is_some());
         assert_eq!(s.cpu_count(), 1);
         assert!(!s.device_names().is_empty());
-        assert!(s.trace_enabled() == s.trace_enabled());
+        assert!(!s.trace_enabled());
 
         s.set_locked(false);
         assert!(s.poke(0, 0x20, 0xEE));
