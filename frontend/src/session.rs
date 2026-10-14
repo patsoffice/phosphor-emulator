@@ -819,6 +819,114 @@ mod tests {
         assert_eq!(s.pending(), 2);
     }
 
+    /// End to end across frames on a ROM-less machine: pause, step, and a
+    /// breakpoint flow through submit and the drain, and the batch order
+    /// decides. Two toggles in one batch toggle twice; a step after a
+    /// pause in the same batch is accepted because enablement is rebuilt
+    /// per command; a step while running and a load with no save file
+    /// come back as rejections with reasons, and the machine is untouched.
+    #[test]
+    fn commands_run_across_frames_on_a_booted_machine() {
+        use crate::debug_ui::{DebugState, RunMode};
+        use crate::movie::MovieCapture;
+        use crate::overlay::Notices;
+
+        let mut machine = (phosphor_machines::registry::all()
+            .first()
+            .expect("the registry is not empty")
+            .create_bare)();
+        let mut debug = DebugState::new();
+        let mut notices = Notices::default();
+        let mut movies = MovieCapture::new(
+            std::path::Path::new("/nonexistent-dir"),
+            "test",
+            "test",
+            [0u8; 32],
+        );
+        let save_path = std::path::Path::new("/nonexistent-dir/quick.save");
+
+        let run = |s: &mut SessionState,
+                   debug: &mut DebugState,
+                   machine: &mut dyn FrontendMachine,
+                   notices: &mut Notices,
+                   movies: &mut MovieCapture| {
+            let mut ctx = LoopCtx {
+                machine,
+                debug,
+                save_path,
+                screenshot_dir: std::path::Path::new("/nonexistent-dir"),
+                machine_name: "test",
+                movies,
+                overlay: None,
+                notices,
+            };
+            s.drain(&mut ctx, MovieMode::Live)
+        };
+
+        let mut s = SessionState::default();
+
+        // Pause, then step in the same batch: the step sees the pause.
+        s.submit(SessionCommand::TogglePause);
+        s.submit(SessionCommand::StepInstruction);
+        let (effects, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+        );
+        assert!(rejections.is_empty());
+        assert!(!effects.resync_input);
+        assert_eq!(debug.run_mode, RunMode::Paused);
+        assert_eq!(debug.cycle_count, 1);
+
+        // Two toggles in one batch toggle twice.
+        s.submit(SessionCommand::TogglePause);
+        s.submit(SessionCommand::TogglePause);
+        run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+        );
+        assert_eq!(debug.run_mode, RunMode::Paused);
+
+        // A breakpoint lands in the set; a step while running and a load
+        // with no save file are refused with reasons.
+        s.submit(SessionCommand::SetBreakpoint {
+            cpu: 0,
+            addr: 0x100,
+        });
+        s.submit(SessionCommand::TogglePause);
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+        );
+        assert!(debug.breakpoints.iter().any(|set| set.contains(&0x100)));
+        assert!(rejections.is_empty());
+        assert_eq!(debug.run_mode, RunMode::Running);
+
+        s.submit(SessionCommand::StepInstruction);
+        s.submit(SessionCommand::LoadState);
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+        );
+        assert_eq!(rejections.len(), 2);
+        assert!(
+            rejections.iter().all(|r| !r.reason.is_empty()),
+            "every refusal carries its reason"
+        );
+        assert_eq!(debug.run_mode, RunMode::Running);
+    }
+
     /// Closing the debugger restores the remembered pause state instead of
     /// forcing a resume: a machine paused before the panel opened stays
     /// paused, and one that was running resumes.
