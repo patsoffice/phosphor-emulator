@@ -198,6 +198,11 @@ pub struct DebugState {
     pub trace_addr_input: String,
 
     // Device controls
+    /// Session commands staged by the panels, submitted by the loop ahead
+    /// of the drain. Panels cannot reach the queue; the loop converts each
+    /// staging vec (this one plus the device, memory, and DIP vecs) into
+    /// submits so every edit passes through one enablement and ordering.
+    pub pending_commands: Vec<crate::session::SessionCommand>,
     /// Device actions requested by the UI, applied on the next frame.
     pub pending_device_actions: Vec<DeviceAction>,
     /// Per-device-panel (offset, value) hex input buffers for register writes.
@@ -307,6 +312,7 @@ impl DebugState {
             trace_events: Vec::new(),
             trace_filter: EventFilter::all(),
             trace_addr_input: String::new(),
+            pending_commands: Vec::new(),
             pending_device_actions: Vec::new(),
             device_write_inputs: Vec::new(),
             pending_memory_writes: Vec::new(),
@@ -540,34 +546,13 @@ pub fn execute_frame(
         state.trace_events.extend_from_slice(machine.trace_events());
     }
 
-    // Apply device controls and memory edits requested by the UI.
-    if !state.pending_device_actions.is_empty() || !state.pending_memory_writes.is_empty() {
-        if let Some(bus) = machine.debug_bus_mut() {
-            for action in &state.pending_device_actions {
-                match *action {
-                    DeviceAction::Reset(device_index) => bus.reset_device(device_index),
-                    DeviceAction::WriteRegister {
-                        device_index,
-                        offset,
-                        value,
-                    } => bus.write_device_register(device_index, offset, value),
-                }
-            }
-            // `poke`, not `write`: a memory-viewer edit is a debugger write and
-            // is tagged `DebugAccessSource::Frontend`, so it shows up in the
-            // event trace as a frontend poke instead of masquerading as a
-            // hardware store.
-            for w in &state.pending_memory_writes {
-                bus.poke(w.cpu_index, w.addr, w.value);
-            }
-        }
-        state.pending_device_actions.clear();
-        state.pending_memory_writes.clear();
-        // Show the effect immediately, even while paused.
-        if let Some(bus) = machine.debug_bus() {
-            state.refresh(bus);
-        }
-    }
+    // Device controls and memory edits run through the command drain,
+    // which consumes the staging vecs before the frame; by the time
+    // execution reaches here there is nothing left to apply. (`poke`, not
+    // `write`: a debugger write is tagged `DebugAccessSource::Frontend`,
+    // so it shows up in the event trace as a frontend poke instead of
+    // masquerading as a hardware store. That tagging lives on the drain
+    // arms now.)
 
     match state.run_mode {
         RunMode::Running => {
@@ -1145,9 +1130,15 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                         u32::from_str_radix(s.trim_start_matches('$'), 16).ok()
                     })
                 {
-                    if let Some(bp_set) = state.breakpoints.get_mut(state.step_cpu) {
-                        bp_set.insert(addr);
-                    }
+                    // Staged, not applied: the loop submits it ahead of the
+                    // drain, so the edit passes through enablement with
+                    // everything else.
+                    state
+                        .pending_commands
+                        .push(crate::session::SessionCommand::SetBreakpoint {
+                            cpu: state.step_cpu,
+                            addr,
+                        });
                     state.breakpoint_input.clear();
                 }
                 if !hex_input_ok(&state.breakpoint_input) {
@@ -1170,10 +1161,11 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                 }
                 if let Some(addr) = to_remove {
                     state
-                        .breakpoints
-                        .get_mut(state.step_cpu)
-                        .unwrap()
-                        .remove(&addr);
+                        .pending_commands
+                        .push(crate::session::SessionCommand::ClearBreakpoint {
+                            cpu: state.step_cpu,
+                            addr,
+                        });
                 }
             }
 
@@ -1254,11 +1246,13 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                     .flatten()
                     .collect();
                     for kind in kinds {
-                        let entry = (state.step_cpu, addr, kind);
-                        if !state.watchpoints.contains(&entry) {
-                            state.watchpoints.push(entry);
-                            state.watchpoints_dirty = true;
-                        }
+                        state.pending_commands.push(
+                            crate::session::SessionCommand::SetWatchpoint {
+                                cpu: state.step_cpu,
+                                addr,
+                                kind,
+                            },
+                        );
                     }
                     state.watchpoint_input.clear();
                 }
@@ -1289,9 +1283,16 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                     }
                 });
             }
-            if let Some(idx) = to_remove {
-                state.watchpoints.remove(idx);
-                state.watchpoints_dirty = true;
+            if let Some(idx) = to_remove
+                && let Some(&(cpu_idx, addr, kind)) = state.watchpoints.get(idx)
+            {
+                state
+                    .pending_commands
+                    .push(crate::session::SessionCommand::ClearWatchpoint {
+                        cpu: cpu_idx,
+                        addr,
+                        kind,
+                    });
             }
 
             draw_watchpoint_hits(ui, state);
@@ -1456,10 +1457,17 @@ fn draw_event_trace_panel(ui: &mut egui::Ui, state: &mut DebugState) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut state.trace_enabled, "Record").changed() {
-                    state.trace_enabled_dirty = true;
+                    // The checkbox shows the new value now; the machine
+                    // follows at the next drain through the command.
+                    let on = state.trace_enabled;
+                    state
+                        .pending_commands
+                        .push(crate::session::SessionCommand::SetTraceEnabled(on));
                 }
                 if ui.button("Clear").clicked() {
-                    state.trace_clear_requested = true;
+                    state
+                        .pending_commands
+                        .push(crate::session::SessionCommand::ClearTrace);
                 }
             });
 

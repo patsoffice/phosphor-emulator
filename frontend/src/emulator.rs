@@ -162,14 +162,6 @@ fn pad_slot_of(index: usize) -> u8 {
     index as u8 + 1
 }
 
-/// Refuse a host action with the reason shown in the window and the log.
-/// Used by the movie-take guards: silently ignoring the key would read as
-/// a dead hotkey rather than a deliberate refusal.
-fn refuse(notices: &mut crate::overlay::Notices, reason: &str) {
-    log::warn!("{reason}");
-    notices.error(reason);
-}
-
 impl input::DeviceState for SdlDevices<'_> {
     fn key_pressed(&self, scancode: Scancode) -> bool {
         self.keyboard.is_scancode_pressed(scancode)
@@ -884,30 +876,26 @@ pub fn run(
                     commands.submit(crate::session::SessionCommand::StepInstruction);
                 }
 
-                // Step one cycle (debug + paused).
+                // Step one cycle (debug + paused). Queued; the drain
+                // refuses it during a take and runs one cycle at the frame
+                // boundary otherwise.
                 Event::KeyDown { repeat: false, .. }
                     if debug_state.active
                         && debug_state.run_mode == RunMode::Paused
                         && hot == Some(HostAction::StepCycle) =>
                 {
-                    if take_mode != MovieMode::Live {
-                        refuse(
-                            &mut notices,
-                            "Cycle stepping is unavailable while recording or replaying",
-                        );
-                    } else {
-                        debug_state.run_mode = RunMode::StepCycle;
-                    }
+                    commands.submit(crate::session::SessionCommand::StepCycle);
                 }
 
                 // Step frame — run one frame, pause at the next frame start
-                // (debug + paused)
+                // (debug + paused). Queued; the drain arms the mode and the
+                // next `execute_frame` runs exactly one frame.
                 Event::KeyDown { repeat: false, .. }
                     if debug_state.active
                         && debug_state.run_mode == RunMode::Paused
                         && hot == Some(HostAction::StepFrame) =>
                 {
-                    debug_state.run_mode = RunMode::StepFrame;
+                    commands.submit(crate::session::SessionCommand::StepFrame);
                 }
 
                 // Toggle run <-> pause with the debugger open. F8 stays a
@@ -942,32 +930,11 @@ pub fn run(
 
                 // Record input movie. Arming resets to power-on, because a
                 // movie carries no save state and can only be replayed from
-                // there; stopping writes the file.
+                // there; stopping writes the file. Queued; the drain stops
+                // a live recording, refuses arming during a replay, and
+                // returns a rebuild for arming otherwise.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::MovieRecord) => {
-                    if movie_capture.is_recording() {
-                        match movie_capture.stop() {
-                            Ok(saved) => {
-                                log::info!("{}", saved.message);
-                                notices.info(format!("Movie saved: {}", file_name(&saved.path)));
-                            }
-                            Err(e) => {
-                                log::error!("{e}");
-                                notices.error(e);
-                            }
-                        }
-                    } else if take_mode == MovieMode::Replaying {
-                        // Arming rebuilds the machine, which would destroy the
-                        // replay being watched. Stopping a recording (above)
-                        // stays enabled in every mode.
-                        refuse(
-                            &mut notices,
-                            "Cannot arm a recording while replaying a movie",
-                        );
-                    } else {
-                        // Deferred: arming rebuilds the machine from ROM, which
-                        // cannot happen while it is borrowed for this frame.
-                        arm_requested = true;
-                    }
+                    commands.submit(crate::session::SessionCommand::MovieRecordToggle);
                 }
 
                 // Quick save. Queued; the drain executes it, so a save and
@@ -1225,6 +1192,29 @@ pub fn run(
         if let Some(display) = settings_state.pending_display.take() {
             commands.submit(crate::session::SessionCommand::SetDisplay { settings: display });
         }
+        // Panel-staged debugger and DIP edits join the queue here, ahead of
+        // the drain, so every edit passes through one enablement and
+        // ordering. Panels cannot reach the queue themselves.
+        for cmd in debug_state.pending_commands.drain(..) {
+            commands.submit(cmd);
+        }
+        for action in debug_state.pending_device_actions.drain(..) {
+            commands.submit(crate::session::SessionCommand::DeviceControl(action));
+        }
+        for w in debug_state.pending_memory_writes.drain(..) {
+            commands.submit(crate::session::SessionCommand::PokeMemory {
+                cpu: w.cpu_index,
+                addr: w.addr,
+                value: w.value,
+            });
+        }
+        for change in settings_state.pending_dip_changes.drain(..) {
+            commands.submit(crate::session::SessionCommand::SetDipOption {
+                bank: change.bank,
+                option: change.option,
+                value: change.value,
+            });
+        }
         {
             let mut drain_ctx = crate::session::LoopCtx {
                 machine: &mut *machine,
@@ -1252,8 +1242,14 @@ pub fn run(
                 // releases and re-presses.
                 needs_resync = true;
             }
-            if cmd_effects.rebuild.is_some() {
-                hard_reset_requested = true;
+            match cmd_effects.rebuild {
+                Some(crate::session::Rebuild::HardReset) => {
+                    hard_reset_requested = true;
+                }
+                Some(crate::session::Rebuild::MovieArm) => {
+                    arm_requested = true;
+                }
+                None => {}
             }
         }
 
@@ -1608,26 +1604,11 @@ pub fn run(
                         *bindings = crate::input::build_bindings(&*machine);
                         settings_state.reset_requested = false;
                     }
-                    // Apply DIP edits recorded by the panel this frame. A DIP
-                    // change alters gameplay (coinage, lives, difficulty), so a
-                    // recording has to carry it or replay diverges from the
-                    // point the operator flipped it. A flip during replay is
-                    // in neither the movie nor its header, so it is refused
-                    // rather than replayed wrong.
-                    if take_mode == MovieMode::Replaying
-                        && !settings_state.pending_dip_changes.is_empty()
-                    {
-                        settings_state.pending_dip_changes.clear();
-                        refuse(
-                            &mut notices,
-                            "DIP changes are unavailable while replaying a movie",
-                        );
-                    }
-                    for change in settings_state.pending_dip_changes.drain(..) {
-                        machine.set_dip_option(change.bank, change.option, change.value);
-                        movie_capture
-                            .push_dip(change.bank as u8, machine.dip_bank_value(change.bank));
-                    }
+                    // DIP edits travel through the command queue: the panel
+                    // stages them in `pending_dip_changes`, the loop submits
+                    // each as `SetDipOption` ahead of the drain, and the
+                    // drain applies them plus the recorder push (or refuses
+                    // them during a replay).
                     // Hotkey rebinds and resets recorded by the panel.
                     if settings_state.host_reset_requested {
                         host_bindings.reset();
