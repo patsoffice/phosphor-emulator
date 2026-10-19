@@ -336,6 +336,25 @@ impl MoviePlayback {
     }
 }
 
+/// Unbind a finished playback: drop everything the movie may be holding and
+/// report the sticky "ended" readout the overlay keeps until the next movie
+/// starts.
+///
+/// The release goes through [`MovieCapture::release_all_inputs`], so a take
+/// recording alongside the replay stays in sync. The caller still owns the
+/// second half of the handoff: re-asserting the physical devices (the
+/// frontend's resync), since a button held across the unbind raises no fresh
+/// event on its own.
+pub fn finish_playback(
+    frame: u32,
+    total: u32,
+    machine: &mut dyn InputConfigurable,
+    capture: &mut MovieCapture,
+) -> String {
+    capture.release_all_inputs(machine);
+    format!("MOVIE {frame}/{total} ended")
+}
+
 /// Load a movie for playback against an already-built machine, checking it
 /// belongs here before anything is reset.
 ///
@@ -448,6 +467,54 @@ mod tests {
         assert_eq!(spy.releases, 1, "the release was not forwarded");
         let rec = cap.recorder.as_ref().expect("still recording");
         assert_eq!(rec.len(), 1, "the release bypassed the recording tee");
+    }
+
+    /// Ending a replay hands the machine back to live input: anything the
+    /// movie held is released (through the tee, so a concurrent recording
+    /// stays in sync), and the caller keeps the returned readout until the
+    /// next movie starts.
+    #[test]
+    fn finishing_a_playback_releases_holds_and_reports_ended() {
+        let mut spy = Spy::default();
+        let mut cap = MovieCapture::new(Path::new("/tmp"), "t", "t", [0; 32]);
+        cap.recorder = Some(MovieRecorder::new(
+            "t",
+            "t",
+            [0; 32],
+            CONTROLS,
+            Vec::new(),
+            None,
+        ));
+
+        // A take in progress: a press recorded against frame 0, one frame run.
+        {
+            let rec = cap.recorder.as_mut().expect("recording");
+            let mut tee = Recording::new(&mut spy, rec);
+            tee.handle_input(InputEvent::Button {
+                id: InputId(3),
+                pressed: true,
+            });
+        }
+        cap.advance_frame();
+
+        // The replay runs out, then live input drives the machine again.
+        let ended = finish_playback(6, 6, &mut spy, &mut cap);
+        spy.handle_input(InputEvent::Button {
+            id: InputId(3),
+            pressed: true,
+        });
+
+        assert_eq!(ended, "MOVIE 6/6 ended");
+        assert_eq!(spy.releases, 1, "the movie's holds were never dropped");
+        let rec = cap.recorder.as_ref().expect("still recording");
+        assert_eq!(rec.len(), 2, "press plus release, in order");
+        assert!(
+            matches!(
+                spy.events.last(),
+                Some(InputEvent::Button { pressed: true, .. })
+            ),
+            "live input after unbind must reach the machine"
+        );
     }
 
     #[test]

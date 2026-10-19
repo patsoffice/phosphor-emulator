@@ -440,8 +440,10 @@ is bound and not finished. The playback is unbound when it finishes, so
 game input and resync are no longer suppressed and reset, load, and poke
 work again; the "ended" readout shows on the final frame. Stopping a
 recording returns to `Live` immediately. (Keeping the readout visible past
-the final frame, and releasing movie-held inputs on unbind, are filed
-follow-ups, not part of this design.)
+the final frame, and releasing movie-held inputs on unbind, landed after
+this design as phosphor-emulator-czrq: the unbind parks a sticky readout,
+releases through the recording tee, and resyncs from the physical devices
+on the next iteration.)
 
 Console evaluation keeps working while recording or replaying, but its
 mutating verbs are locked. A blanket refusal would also block reads, which

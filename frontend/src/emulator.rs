@@ -535,6 +535,11 @@ pub fn run(
         playback
     });
 
+    // The finished replay's readout, kept after the unbind until the next
+    // movie starts. Playback binds once, before the first frame, so nothing
+    // clears this mid-session today.
+    let mut movie_ended: Option<String> = None;
+
     // Set by the movie-record hotkey, serviced at the top of the next
     // iteration. The rebuild cannot
     // happen in the event handler: the machine is borrowed out of the session
@@ -1296,19 +1301,35 @@ pub fn run(
         // Shown for the whole of playback, not gated behind the FPS toggle:
         // reading the frame number off the screen is the point of watching a
         // replay, and it is what a golden pin's `frames` field wants.
-        let movie_status = movie_playback.as_ref().map(|pb| {
-            let (f, t) = pb.progress();
-            if pb.finished() {
-                format!("MOVIE {f}/{t} ended")
-            } else {
-                format!("MOVIE {f}/{t}")
-            }
-        });
-        // A finished playback unbinds: the "ended" readout above is display
-        // state, but game input must reach the machine again and the guards
-        // must treat the take as over. One word, one meaning.
+        let movie_status = movie_playback
+            .as_ref()
+            .map(|pb| {
+                let (f, t) = pb.progress();
+                if pb.finished() {
+                    format!("MOVIE {f}/{t} ended")
+                } else {
+                    format!("MOVIE {f}/{t}")
+                }
+            })
+            .or_else(|| movie_ended.clone());
+        // A finished playback unbinds: the take is over, so game input must
+        // reach the machine again. The unbind drops whatever the movie held
+        // (through the recording tee when one runs) and parks the "ended"
+        // readout above; the resync carries into the next iteration, where
+        // the guards already treat the session as live, and re-asserts the
+        // physical devices before the next frame runs.
         if movie_playback.as_ref().is_some_and(|pb| pb.finished()) {
-            movie_playback = None;
+            let pb = movie_playback.take().expect("a finished playback");
+            let (f, t) = pb.progress();
+            movie_ended = Some(crate::movie::finish_playback(
+                f,
+                t,
+                machine,
+                &mut movie_capture,
+            ));
+            pending_resync = true;
+            log::info!("Movie ended at frame {f}/{t}: live input restored");
+            notices.info("Movie ended");
         }
         let t2 = Instant::now();
 
