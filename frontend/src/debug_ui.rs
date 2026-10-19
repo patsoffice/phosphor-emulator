@@ -2087,6 +2087,101 @@ mod tests {
         );
     }
 
+    /// A machine double that records *how* it was advanced: whole frames via
+    /// `run_frame` versus cycle-by-cycle via `debug_tick`. This is what the
+    /// take-routing test above cannot see on a real machine, where both
+    /// paths advance the same clock.
+    struct FrameSpy {
+        run_frames: usize,
+        debug_ticks: usize,
+    }
+
+    impl phosphor_core::core::machine::MachineCore for FrameSpy {
+        fn run_frame(&mut self) {
+            self.run_frames += 1;
+        }
+        fn reset(&mut self) {}
+    }
+    impl phosphor_core::core::machine::Renderable for FrameSpy {
+        fn display_size(&self) -> (u32, u32) {
+            (1, 1)
+        }
+        fn render_frame(&self, _buffer: &mut [u8]) {}
+    }
+    impl phosphor_core::core::machine::AudioSource for FrameSpy {}
+    impl phosphor_core::core::machine::InputConfigurable for FrameSpy {
+        fn input_controls(&self) -> &'static [phosphor_core::core::machine::InputControl] {
+            &[]
+        }
+        fn handle_input(&mut self, _event: phosphor_core::core::machine::InputEvent) {}
+    }
+    impl phosphor_core::core::machine::MachineDebug for FrameSpy {
+        fn cycles_per_frame(&self) -> u64 {
+            100
+        }
+        fn debug_tick(&mut self) -> u32 {
+            self.debug_ticks += 1;
+            0
+        }
+    }
+    impl phosphor_core::core::debug_trace::DebugTrace for FrameSpy {}
+    impl phosphor_core::core::machine::DipSwitches for FrameSpy {}
+    impl phosphor_core::core::machine::SaveState for FrameSpy {}
+    impl phosphor_core::core::machine::Nvram for FrameSpy {}
+    impl phosphor_core::core::machine::Profilable for FrameSpy {}
+
+    /// A take frame must enter the machine through `run_frame`, never through
+    /// the cycle stepper: the debugger path is different code on some boards
+    /// and nothing proves the two agree. Fails if `execute_frame` ever stops
+    /// routing take frames through `run_frame`.
+    #[test]
+    fn take_frames_enter_through_run_frame_not_debug_tick() {
+        let mut spy = FrameSpy {
+            run_frames: 0,
+            debug_ticks: 0,
+        };
+        let mut s = DebugState::new();
+        s.active = true;
+        s.run_mode = RunMode::Running;
+
+        assert!(execute_frame(&mut spy, &mut s, true));
+        assert_eq!(spy.run_frames, 1, "the take frame ran");
+        assert_eq!(
+            spy.debug_ticks, 0,
+            "take frames must not step cycle-by-cycle"
+        );
+
+        // Control case: the same frame outside a take steps cycle-by-cycle,
+        // so a zero `debug_ticks` above is the routing, not a dead stepper.
+        let mut live = FrameSpy {
+            run_frames: 0,
+            debug_ticks: 0,
+        };
+        let mut l = DebugState::new();
+        l.active = true;
+        l.run_mode = RunMode::Running;
+        assert!(execute_frame(&mut live, &mut l, false));
+        assert_eq!(live.debug_ticks, 100, "live frames step every cycle");
+        assert_eq!(live.run_frames, 0);
+
+        // The single-step take path routes the same way: one whole frame
+        // through `run_frame`, then hold.
+        let mut step = FrameSpy {
+            run_frames: 0,
+            debug_ticks: 0,
+        };
+        let mut t = DebugState::new();
+        t.active = true;
+        t.run_mode = RunMode::StepFrame;
+        assert!(execute_frame(&mut step, &mut t, true));
+        assert_eq!(t.run_mode, RunMode::Paused);
+        assert_eq!(step.run_frames, 1);
+        assert_eq!(
+            step.debug_ticks, 0,
+            "take steps must not step cycle-by-cycle either"
+        );
+    }
+
     /// While suspension holds, the dirty sync does nothing and leaves the
     /// flag set, so the machine stays clear for the take and the return to
     /// live play re-applies the UI set.
