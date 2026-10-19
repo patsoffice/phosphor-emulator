@@ -110,6 +110,22 @@ impl MovieCapture {
         self.recorder.as_mut()
     }
 
+    /// Release every input on `machine`, through the recording tee while a
+    /// take is running.
+    ///
+    /// The ungrab, controller-hotplug and focus-loss paths release outside
+    /// `input::dispatch`/`input::resync`, so they cannot reach for the
+    /// machine directly: a release the recorder never sees leaves the replay
+    /// holding whatever was down at that moment. Routing every such path
+    /// through here keeps the tee the only way input reaches the machine
+    /// during a take.
+    pub fn release_all_inputs(&mut self, machine: &mut dyn InputConfigurable) {
+        match &mut self.recorder {
+            Some(sink) => Recording::new(machine, sink).release_all_inputs(),
+            None => machine.release_all_inputs(),
+        }
+    }
+
     /// The starting conditions a recording must be armed on: the NVRAM and DIP
     /// bytes the live session had, carried across to a freshly built machine.
     pub fn starting_conditions(machine: &dyn FrontendMachine) -> (Option<Vec<u8>>, Vec<u8>) {
@@ -408,6 +424,41 @@ mod tests {
         assert_eq!(spy.releases, 1);
         // ...and captured, release_all kept whole rather than expanded.
         assert_eq!(rec.len(), 3);
+    }
+
+    /// The ungrab, hotplug and focus-loss paths release every input outside
+    /// `dispatch`/`resync`. While a take is running that release has to be
+    /// recorded as well as forwarded, or the replay keeps holding whatever
+    /// was down at that moment.
+    #[test]
+    fn release_all_during_a_take_is_recorded_and_forwarded() {
+        let mut spy = Spy::default();
+        let mut cap = MovieCapture::new(Path::new("/tmp"), "t", "t", [0; 32]);
+        cap.recorder = Some(MovieRecorder::new(
+            "t",
+            "t",
+            [0; 32],
+            CONTROLS,
+            Vec::new(),
+            None,
+        ));
+
+        cap.release_all_inputs(&mut spy);
+
+        assert_eq!(spy.releases, 1, "the release was not forwarded");
+        let rec = cap.recorder.as_ref().expect("still recording");
+        assert_eq!(rec.len(), 1, "the release bypassed the recording tee");
+    }
+
+    #[test]
+    fn release_all_when_not_recording_still_forwards() {
+        let mut spy = Spy::default();
+        let mut cap = MovieCapture::new(Path::new("/tmp"), "t", "t", [0; 32]);
+
+        cap.release_all_inputs(&mut spy);
+
+        assert_eq!(spy.releases, 1);
+        assert!(!cap.is_recording());
     }
 
     #[test]

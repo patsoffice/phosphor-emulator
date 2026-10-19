@@ -1080,7 +1080,7 @@ pub fn run(
                     // Ungrabbing stops mouse events reaching the game, so a
                     // button held at that moment would never see its release.
                     if !mouse_grabbed && !replaying {
-                        machine.release_all_inputs();
+                        movie_capture.release_all_inputs(machine);
                     }
                 }
 
@@ -1131,7 +1131,7 @@ pub fn run(
                     // holding. Clear everything, then re-assert from the pads
                     // that are still connected.
                     if !replaying {
-                        machine.release_all_inputs();
+                        movie_capture.release_all_inputs(machine);
                         needs_resync = true;
                     }
                 }
@@ -1143,7 +1143,7 @@ pub fn run(
                     ..
                 } => {
                     if !replaying {
-                        machine.release_all_inputs();
+                        movie_capture.release_all_inputs(machine);
                     }
                 }
 
