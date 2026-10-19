@@ -342,6 +342,8 @@ Three notes on the pattern, so it is maintained rather than replaced:
 
 - Prefix: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`
 - Summary line under 80 chars with counts where relevant
+- Write the summary in the imperative mood and keep it near 50 chars, so `git log --oneline` shows it whole
+- Wrap the body at 72 columns
 - Body: each logical change on its own `-` bullet
 - Summarize what was added/changed and why, not just file names
 
