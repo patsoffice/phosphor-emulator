@@ -27,14 +27,22 @@ fn all_cpu_watch_catches_sub_cpu_writes() {
     let mut session = DebugSession::open(MACHINE, path).expect("open galaga");
     assert_eq!(session.cpu_count(), 3, "galaga has three Z80s");
 
-    session.run_frames(3100); // past the power-on self-test, into attract
+    session.mutate().unwrap().run_frames(3100).unwrap(); // past the power-on self-test, into attract
 
-    let n = session.watch(0x9100, WatchpointKind::Write, WatchpointCondition::Always);
+    let n = session
+        .mutate()
+        .unwrap()
+        .watch(0x9100, WatchpointKind::Write, WatchpointCondition::Always)
+        .unwrap();
     assert_eq!(n, 3, "watch set on every CPU");
-    session.watch(0x9800, WatchpointKind::Write, WatchpointCondition::Always);
-    session.run_frames(600);
+    session
+        .mutate()
+        .unwrap()
+        .watch(0x9800, WatchpointKind::Write, WatchpointCondition::Always)
+        .unwrap();
+    session.mutate().unwrap().run_frames(600).unwrap();
 
-    let hits = session.take_hits();
+    let hits = session.mutate().unwrap().take_hits().unwrap();
     assert!(!hits.is_empty(), "expected watchpoint hits during attract");
 
     let mut per_cpu = [0usize; 3];

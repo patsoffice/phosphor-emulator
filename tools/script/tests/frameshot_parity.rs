@@ -96,8 +96,10 @@ fn scripted_render_matches_frameshot() {
     let _ = std::fs::remove_file(&out);
     {
         let mut session = DebugSession::open(MACHINE, path).expect("session open");
-        session.run_frames(FRAMES);
+        session.mutate().unwrap().run_frames(FRAMES).unwrap();
         session
+            .mutate()
+            .unwrap()
             .screenshot(out.to_str().unwrap())
             .expect("screenshot");
     }

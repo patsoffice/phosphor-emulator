@@ -447,9 +447,11 @@ on the next iteration.)
 
 Console evaluation keeps working while recording or replaying, but its
 mutating verbs are locked. A blanket refusal would also block reads, which
-are what observe-only debugging of a replay consists of. The lock is an
-allowlist, not a denylist, because a denylist goes wrong the next time a
-verb is added. While locked, every `DebugSession` method is refused except
+are what observe-only debugging of a replay consists of. The lock is
+structural, not a per-method convention: the mutating verbs live on
+`SessionMut` and are reachable only through `DebugSession::mutate`, which
+refuses while locked, so a verb added there is locked without its own
+check. While locked, every mutating verb is refused except
 the pure reads: `read`, `pc`, `regs`, `disasm`, `cpu_count`,
 `device_names`, `device_registers`, `trace_enabled`. Everything else is
 locked by default, including the easy-to-miss ones: `input`,
@@ -458,10 +460,12 @@ tee, worse than a poke because the movie records a session in which those
 presses never happened), `set_dip_option`, `set_dip_bank_value`,
 `set_dip_by_name` (DIP flips that never reach the recorder), `load_movie`
 (binds a different movie), and `take_hits`, `take_events` (consume queues
-the debugger UI also drains). The loop sets the flag from the derived mode
-each frame (`frontend/src/emulator.rs:1663-1667`); a locked call reports
-why into the console output. This touches `phosphor-script`, but the
-change is small and lands where the verbs already live.
+the debugger UI also drains). Each refusal carries its reason through the
+verb's own return shape, so a locked call reports why into the console
+output instead of silently doing nothing. The loop sets the flag from the
+derived mode each frame (`frontend/src/emulator.rs:1663-1667`).
+This touches `phosphor-script`, but the change is small and lands where the
+verbs already live.
 
 Three behavior changes in that section are deliberate: reset and load
 mid-take are allowed today and silently diverge the

@@ -58,6 +58,19 @@ pub struct DebugSession {
 /// Why a locked session refuses a call, reported to the caller.
 pub const LOCKED_REASON: &str = "session is locked while recording or replaying";
 
+/// Mutating access to a [`DebugSession`], granted only while unlocked.
+///
+/// The single choke point for the console lock: every verb that changes
+/// machine state lives here and is reachable only through
+/// [`DebugSession::mutate`], which refuses while locked. A verb added here
+/// is locked without its own check. Do not add state-changing methods
+/// directly on `DebugSession`: the loop's own
+/// [`machine_mut`](DebugSession::machine_mut) path is the one documented
+/// exception, and it is not a script verb.
+pub struct SessionMut<'a> {
+    session: &'a mut DebugSession,
+}
+
 impl DebugSession {
     /// Boot `machine_name` from the ROM set at `rom_path` (via the shared
     /// [`Harness`]) and index its input controls.
@@ -99,14 +112,13 @@ impl DebugSession {
     ///
     /// The frontend sets this from the derived movie mode each frame: while a
     /// movie records or replays, a console verb must not change machine state
-    /// outside the recorded input stream. While locked, every mutating method
-    /// takes the early refusal below and only the pure reads stay available
+    /// outside the recorded input stream. While locked, [`mutate`](Self::mutate)
+    /// refuses with [`LOCKED_REASON`] and only the pure reads stay available
     /// (`read`, `pc`, `regs`, `disasm`, `cpu_count`, `device_names`,
-    /// `device_registers`, `trace_enabled`). That allowlist shape is a
-    /// per-method convention, not a gate: each mutating verb carries its own
-    /// `if self.locked` line, so a verb added without one is callable while
-    /// locked. Centralizing the enforcement is filed work (the silent
-    /// refusals issue). The easy-to-miss verbs that must keep their lines
+    /// `device_registers`, `trace_enabled`). The gate is structural rather
+    /// than conventional: the mutating verbs live on [`SessionMut`], which
+    /// exists only where `mutate` handed one out, so a verb added there is
+    /// locked without its own check. The easy-to-miss verbs this protects
     /// are `input` (game input past the recording tee), the DIP setters
     /// (flips the recorder never sees), `load_movie`, and
     /// `take_hits`/`take_events` (they consume queues the debugger UI also
@@ -114,6 +126,19 @@ impl DebugSession {
     /// is the loop's own path and is not gated.
     pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
+    }
+
+    /// Mutating access to the session, refused while
+    /// [locked](Self::set_locked).
+    ///
+    /// This is the only path to the state-changing verbs (which live on the
+    /// returned [`SessionMut`]); the pure reads stay directly on `self` and
+    /// are never gated.
+    pub fn mutate(&mut self) -> Result<SessionMut<'_>, String> {
+        if self.locked {
+            return Err(LOCKED_REASON.to_string());
+        }
+        Ok(SessionMut { session: self })
     }
 
     /// Whether the mutating surface is currently locked.
@@ -144,50 +169,6 @@ impl DebugSession {
         self.harness.machine_mut()
     }
 
-    /// Advance `n` whole frames through the harness, draining watchpoint hits
-    /// and trace events after each (so neither overflows the machine's finite
-    /// queues across the run) and sampling the hang detector once per frame.
-    pub fn run_frames(&mut self, n: u64) {
-        if self.locked {
-            return;
-        }
-        for _ in 0..n {
-            self.harness.run_frame();
-            self.drain_audio();
-            self.drain_watchpoint_hits();
-            self.drain_trace_events();
-            self.sample_hang();
-        }
-    }
-
-    /// Start accumulating audio, discarding anything captured so far.
-    ///
-    /// Scripts drive real input on a schedule, which is the only way to reach a
-    /// sound a game only makes during play — a Donkey Kong footstep needs a
-    /// coin, a start and a held joystick, none of which a device-level capture
-    /// can produce.
-    pub fn capture_audio(&mut self) {
-        if self.locked {
-            return;
-        }
-        self.audio = Some(Vec::new());
-    }
-
-    /// Stop accumulating and write what was captured as a 16-bit mono WAV.
-    pub fn write_audio(&mut self, path: &str) -> Result<usize, String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        let samples = self
-            .audio
-            .take()
-            .ok_or_else(|| "capture_audio() was never called".to_string())?;
-        let rate = self.harness.machine().audio_sample_rate();
-        let channels = self.harness.machine().audio_channels();
-        write_wav_16(path, &samples, rate, channels).map_err(|e| format!("writing {path}: {e}"))?;
-        Ok(samples.len())
-    }
-
     /// Drain the machine's audio into the capture buffer.
     ///
     /// The ring has to be drained every frame whether or not anyone asked for
@@ -205,79 +186,6 @@ impl DebugSession {
                 buf.extend_from_slice(&chunk[..n]);
             }
         }
-    }
-
-    /// Load a recorded input movie and replay it from power-on.
-    ///
-    /// The machine is reset first: a movie carries no save state, so it is only
-    /// meaningful from there. Subsequent `run_frames` deliver the recording —
-    /// no extra call is needed, because [`run_frames`](Self::run_frames) already
-    /// goes through the harness, which already applies a bound movie.
-    ///
-    /// This is the cheap way to sample a recorded session at several points: one
-    /// boot, then `run_frames` between screenshots, instead of `disasm replay
-    /// --frames N` re-running from frame 0 for every sample.
-    ///
-    /// Two checks before anything is reset. A movie for another machine would
-    /// bind against a control table it was never recorded against; a movie for
-    /// this machine but a different ROM dump would bind fine and then silently
-    /// diverge, which is the whole reason the digest exists. Both checks read
-    /// the harness's own record of what it booted; a session wrapping a box
-    /// someone else built has no such record, so the machine check falls back
-    /// to the machine id there and the digest check is skipped.
-    pub fn load_movie(&mut self, path: &str) -> Result<(), String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        let bytes = std::fs::read(path).map_err(|e| format!("reading movie {path}: {e}"))?;
-        let movie = Movie::decode(&bytes).map_err(|e| format!("reading movie {path}: {e}"))?;
-
-        // The session's own registry name, not `machine_id()`: those are two
-        // different namespaces, and the movie records the former.
-        let id = match self.harness.rom_source() {
-            Some(source) => source.entry.name.to_string(),
-            None => self.harness.machine().machine_id().to_string(),
-        };
-        if movie.header.machine != id {
-            return Err(format!(
-                "movie {path} was recorded for '{}', but this session is running '{id}'",
-                movie.header.machine
-            ));
-        }
-        if let Some(source) = self.harness.rom_source()
-            && source.digest != movie.header.rom_digest
-        {
-            return Err(format!(
-                "movie {path} was recorded against a different ROM set than this session booted"
-            ));
-        }
-
-        self.harness.reset();
-        self.harness
-            .bind_movie(movie)
-            .map_err(|e| format!("binding movie {path}: {e}"))?;
-        // Observations collected before the reset describe a run that no longer
-        // exists; keeping them would silently mix two timelines.
-        self.hits.clear();
-        self.events.clear();
-        self.hang_reports.clear();
-        Ok(())
-    }
-
-    /// Advance a single clock cycle via `debug_tick()`, returning the bitmask of
-    /// CPUs that reached an instruction boundary (bit 0 = CPU 0, …). Machines
-    /// without debug support (`cycles_per_frame == 0`) return `0`.
-    ///
-    /// Drains watchpoint hits and trace events, but does not sample the hang
-    /// detector — hang detection is frame-granular (one PC sample per frame).
-    pub fn step(&mut self) -> u32 {
-        if self.locked {
-            return 0;
-        }
-        let mask = self.harness.machine_mut().debug_tick();
-        self.drain_watchpoint_hits();
-        self.drain_trace_events();
-        mask
     }
 
     /// Move any queued watchpoint hits out of the machine and into `self.hits`.
@@ -382,27 +290,6 @@ impl DebugSession {
         Some(format!("{}", c.debug_disassemble(addr, &bytes)))
     }
 
-    /// Poke `data` into `cpu`'s address space (a debugger write). Returns
-    /// `false` for a machine without debug support (nothing written). Backed
-    /// RAM takes the value; I/O and unmapped addresses are ignored by the
-    /// board's write, exactly as a memory-viewer poke would be.
-    ///
-    /// This is the one write in the otherwise read-first surface: a poke is an
-    /// explicit debug operation, distinct from the legitimate machine inputs
-    /// [`input`](Self::input) drives.
-    pub fn poke(&mut self, cpu: usize, addr: u32, data: u8) -> bool {
-        if self.locked {
-            return false;
-        }
-        match self.harness.machine_mut().debug_bus_mut() {
-            Some(bus) => {
-                bus.poke(cpu, addr, data);
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Number of CPUs exposed by the machine's debug bus (0 if none).
     pub fn cpu_count(&mut self) -> usize {
         self.harness
@@ -449,111 +336,9 @@ impl DebugSession {
             })
     }
 
-    /// Set a watchpoint at `addr` on **every** CPU, returning the number of CPUs
-    /// watched.
-    ///
-    /// Watching all CPUs is the deliberate default: watchpoints are scoped per
-    /// CPU, and on multi-CPU boards a video/scroll register is often written by
-    /// a sub-CPU, not the main one — so a single-CPU watch silently catches
-    /// nothing. Each [`WatchpointHit`] carries its `cpu_index` so a script can
-    /// still tell which CPU fired. Use [`watch_cpu`](Self::watch_cpu) to target
-    /// one CPU deliberately.
-    pub fn watch(&mut self, addr: u32, kind: WatchpointKind, cond: WatchpointCondition) -> usize {
-        if self.locked {
-            return 0;
-        }
-        let n = self.cpu_count();
-        for cpu in 0..n {
-            self.harness
-                .machine_mut()
-                .set_watchpoint_cond(cpu, addr, kind, cond);
-        }
-        n
-    }
-
-    /// Set a watchpoint at `addr` on a single CPU's address space.
-    pub fn watch_cpu(
-        &mut self,
-        cpu: usize,
-        addr: u32,
-        kind: WatchpointKind,
-        cond: WatchpointCondition,
-    ) {
-        if self.locked {
-            return;
-        }
-        self.harness
-            .machine_mut()
-            .set_watchpoint_cond(cpu, addr, kind, cond);
-    }
-
-    /// Clear every watchpoint across all CPUs. Already-collected hits are kept.
-    pub fn clear_watchpoints(&mut self) {
-        if self.locked {
-            return;
-        }
-        self.harness.machine_mut().clear_all_watchpoints();
-    }
-
-    /// Drain and return every watchpoint hit collected so far (also sweeps any
-    /// still queued in the machine). Leaves the accumulator empty.
-    pub fn take_hits(&mut self) -> Vec<WatchpointHit> {
-        if self.locked {
-            return Vec::new();
-        }
-        self.drain_watchpoint_hits();
-        std::mem::take(&mut self.hits)
-    }
-
-    /// Enable or disable bus-event recording. Enabling starts from a clean
-    /// slate (any stale ring contents and the accumulator are dropped).
-    ///
-    /// Event trace is CPU-agnostic and region-tagged, and resolves mirrors —
-    /// making it a better instrument than watchpoints for "which registers are
-    /// written, and when within a frame". Note: bus-event tracing is wired for
-    /// `AddressSpace16/32` boards; a machine without it records nothing.
-    pub fn set_trace(&mut self, enabled: bool) {
-        if self.locked {
-            return;
-        }
-        let machine = self.harness.machine_mut();
-        machine.set_trace_enabled(enabled);
-        machine.clear_trace_events();
-        self.events.clear();
-    }
-
     /// Whether bus-event recording is enabled.
     pub fn trace_enabled(&mut self) -> bool {
         self.harness.machine_mut().trace_enabled()
-    }
-
-    /// Drain and return every trace event collected so far (also sweeps the
-    /// machine's current ring). Leaves the accumulator empty.
-    pub fn take_events(&mut self) -> Vec<DebugEvent> {
-        if self.locked {
-            return Vec::new();
-        }
-        self.drain_trace_events();
-        std::mem::take(&mut self.events)
-    }
-
-    /// Enable per-frame hang detection with the given PC `window` (bytes) and
-    /// frame `threshold`. `run_frames` then samples each CPU's PC per frame; a
-    /// CPU stuck within `window` for `threshold` frames produces a report.
-    pub fn detect_hangs(&mut self, window: u32, threshold: u32) {
-        if self.locked {
-            return;
-        }
-        self.hang = Some(HangDetector::with_params(window, threshold));
-        self.hang_reports.clear();
-    }
-
-    /// Drain and return every hang report collected so far.
-    pub fn take_hangs(&mut self) -> Vec<HangReport> {
-        if self.locked {
-            return Vec::new();
-        }
-        std::mem::take(&mut self.hang_reports)
     }
 
     /// Snapshot complete machine state, or `None` if unsupported. Pair with
@@ -562,33 +347,7 @@ impl DebugSession {
         self.harness.machine().save_state()
     }
 
-    /// Restore a snapshot taken by [`save_state`](Self::save_state).
-    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        self.harness
-            .machine_mut()
-            .load_state(data)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Reset the machine to power-on and zero the frame counter, clearing the
-    /// watchpoint/event/hang accumulators (stale after a reset).
-    pub fn reset(&mut self) {
-        if self.locked {
-            return;
-        }
-        self.harness.reset();
-        self.hits.clear();
-        self.events.clear();
-        self.hang_reports.clear();
-        if let Some(detector) = self.hang.as_mut() {
-            detector.reset();
-        }
-    }
-
-    /// Static DIP-switch bank metadata (names, options, choices) — how a script
+    /// Static DIP-switch bank metadata (names, options, choices): how a script
     /// discovers what it can set. Empty for a machine without DIP switches.
     pub fn dip_banks(&self) -> &'static [DipSwitchBank] {
         self.harness.machine().dip_banks()
@@ -597,47 +356,6 @@ impl DebugSession {
     /// Live byte value of DIP bank `bank` (0 if out of range).
     pub fn dip_bank_value(&self, bank: usize) -> u8 {
         self.harness.machine().dip_bank_value(bank)
-    }
-
-    /// Replace the whole live byte of DIP bank `bank`.
-    pub fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if self.locked {
-            return;
-        }
-        self.harness.machine_mut().set_dip_bank_value(bank, value);
-    }
-
-    /// Set one option within a bank, masking `value` into the bank byte.
-    pub fn set_dip_option(&mut self, bank: usize, option: usize, value: u8) {
-        if self.locked {
-            return;
-        }
-        self.harness
-            .machine_mut()
-            .set_dip_option(bank, option, value);
-    }
-
-    /// Set a DIP option by its name to the choice with the given label. Returns
-    /// `false` if no such option/choice exists — the ergonomic path for sweeping
-    /// configs (`set_dip("Difficulty", "Hard")`). Note: an option whose `apply`
-    /// timing is `OnReset` only takes effect after [`reset`](Self::reset).
-    pub fn set_dip_by_name(&mut self, option: &str, choice: &str) -> bool {
-        if self.locked {
-            return false;
-        }
-        let banks = self.harness.machine().dip_banks();
-        for (bi, bank) in banks.iter().enumerate() {
-            for (oi, opt) in bank.options.iter().enumerate() {
-                if opt.name == option
-                    && let Some(ch) = opt.choices.iter().find(|c| c.label == choice)
-                {
-                    let value = ch.value;
-                    self.harness.machine_mut().set_dip_option(bi, oi, value);
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Resolve a control's stable name, or say what this machine does have.
@@ -662,16 +380,316 @@ impl DebugSession {
         ))
     }
 
+    /// Number of frames run so far via
+    /// [`run_frames`](SessionMut::run_frames).
+    pub fn frame_count(&self) -> u64 {
+        self.harness.frame_count() as u64
+    }
+
+    /// The machine's short identifier (`MachineCore::machine_id`).
+    pub fn machine_id(&self) -> String {
+        self.harness.machine().machine_id().to_string()
+    }
+
+    /// Native display size `(width, height)` in pixels.
+    pub fn display_size(&self) -> (u32, u32) {
+        self.harness.machine().display_size()
+    }
+}
+
+impl SessionMut<'_> {
+    /// Advance `n` whole frames through the harness, draining watchpoint hits
+    /// and trace events after each (so neither overflows the machine's finite
+    /// queues across the run) and sampling the hang detector once per frame.
+    pub fn run_frames(&mut self, n: u64) -> Result<(), String> {
+        let session = &mut *self.session;
+        for _ in 0..n {
+            session.harness.run_frame();
+            session.drain_audio();
+            session.drain_watchpoint_hits();
+            session.drain_trace_events();
+            session.sample_hang();
+        }
+        Ok(())
+    }
+
+    /// Start accumulating audio, discarding anything captured so far.
+    ///
+    /// Scripts drive real input on a schedule, which is the only way to reach a
+    /// sound a game only makes during play: a Donkey Kong footstep needs a
+    /// coin, a start and a held joystick, none of which a device-level capture
+    /// can produce.
+    pub fn capture_audio(&mut self) -> Result<(), String> {
+        self.session.audio = Some(Vec::new());
+        Ok(())
+    }
+
+    /// Stop accumulating and write what was captured as a 16-bit mono WAV.
+    pub fn write_audio(&mut self, path: &str) -> Result<usize, String> {
+        let samples = self
+            .session
+            .audio
+            .take()
+            .ok_or_else(|| "capture_audio() was never called".to_string())?;
+        let rate = self.session.harness.machine().audio_sample_rate();
+        let channels = self.session.harness.machine().audio_channels();
+        write_wav_16(path, &samples, rate, channels).map_err(|e| format!("writing {path}: {e}"))?;
+        Ok(samples.len())
+    }
+
+    /// Load a recorded input movie and replay it from power-on.
+    ///
+    /// The machine is reset first: a movie carries no save state, so it is only
+    /// meaningful from there. Subsequent [`run_frames`](Self::run_frames)
+    /// deliver the recording: no extra call is needed, because `run_frames`
+    /// already goes through the harness, which already applies a bound movie.
+    ///
+    /// This is the cheap way to sample a recorded session at several points: one
+    /// boot, then `run_frames` between screenshots, instead of `disasm replay
+    /// --frames N` re-running from frame 0 for every sample.
+    ///
+    /// Two checks before anything is reset. A movie for another machine would
+    /// bind against a control table it was never recorded against; a movie for
+    /// this machine but a different ROM dump would bind fine and then silently
+    /// diverge, which is the whole reason the digest exists. Both checks read
+    /// the harness's own record of what it booted; a session wrapping a box
+    /// someone else built has no such record, so the machine check falls back
+    /// to the machine id there and the digest check is skipped.
+    pub fn load_movie(&mut self, path: &str) -> Result<(), String> {
+        let session = &mut *self.session;
+        let bytes = std::fs::read(path).map_err(|e| format!("reading movie {path}: {e}"))?;
+        let movie = Movie::decode(&bytes).map_err(|e| format!("reading movie {path}: {e}"))?;
+
+        // The session's own registry name, not `machine_id()`: those are two
+        // different namespaces, and the movie records the former.
+        let id = match session.harness.rom_source() {
+            Some(source) => source.entry.name.to_string(),
+            None => session.harness.machine().machine_id().to_string(),
+        };
+        if movie.header.machine != id {
+            return Err(format!(
+                "movie {path} was recorded for '{}', but this session is running '{id}'",
+                movie.header.machine
+            ));
+        }
+        if let Some(source) = session.harness.rom_source()
+            && source.digest != movie.header.rom_digest
+        {
+            return Err(format!(
+                "movie {path} was recorded against a different ROM set than this session booted"
+            ));
+        }
+
+        session.harness.reset();
+        session
+            .harness
+            .bind_movie(movie)
+            .map_err(|e| format!("binding movie {path}: {e}"))?;
+        // Observations collected before the reset describe a run that no longer
+        // exists; keeping them would silently mix two timelines.
+        session.hits.clear();
+        session.events.clear();
+        session.hang_reports.clear();
+        Ok(())
+    }
+
+    /// Advance a single clock cycle via `debug_tick()`, returning the bitmask of
+    /// CPUs that reached an instruction boundary (bit 0 = CPU 0, …). Machines
+    /// without debug support (`cycles_per_frame == 0`) return `0`.
+    ///
+    /// Drains watchpoint hits and trace events, but does not sample the hang
+    /// detector: hang detection is frame-granular (one PC sample per frame).
+    pub fn step(&mut self) -> Result<u32, String> {
+        let session = &mut *self.session;
+        let mask = session.harness.machine_mut().debug_tick();
+        session.drain_watchpoint_hits();
+        session.drain_trace_events();
+        Ok(mask)
+    }
+
+    /// Poke `data` into `cpu`'s address space (a debugger write). Returns
+    /// `false` for a machine without debug support (nothing written). Backed
+    /// RAM takes the value; I/O and unmapped addresses are ignored by the
+    /// board's write, exactly as a memory-viewer poke would be.
+    ///
+    /// This is the one write in the otherwise read-first surface: a poke is an
+    /// explicit debug operation, distinct from the legitimate machine inputs
+    /// [`input`](Self::input) drives.
+    pub fn poke(&mut self, cpu: usize, addr: u32, data: u8) -> Result<bool, String> {
+        match self.session.harness.machine_mut().debug_bus_mut() {
+            Some(bus) => {
+                bus.poke(cpu, addr, data);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Set a watchpoint at `addr` on **every** CPU, returning the number of CPUs
+    /// watched.
+    ///
+    /// Watching all CPUs is the deliberate default: watchpoints are scoped per
+    /// CPU, and on multi-CPU boards a video/scroll register is often written by
+    /// a sub-CPU, not the main one — so a single-CPU watch silently catches
+    /// nothing. Each [`WatchpointHit`] carries its `cpu_index` so a script can
+    /// still tell which CPU fired. Use [`watch_cpu`](Self::watch_cpu) to target
+    /// one CPU deliberately.
+    pub fn watch(
+        &mut self,
+        addr: u32,
+        kind: WatchpointKind,
+        cond: WatchpointCondition,
+    ) -> Result<usize, String> {
+        let n = self.session.cpu_count();
+        for cpu in 0..n {
+            self.session
+                .harness
+                .machine_mut()
+                .set_watchpoint_cond(cpu, addr, kind, cond);
+        }
+        Ok(n)
+    }
+
+    /// Set a watchpoint at `addr` on a single CPU's address space.
+    pub fn watch_cpu(
+        &mut self,
+        cpu: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        cond: WatchpointCondition,
+    ) -> Result<(), String> {
+        self.session
+            .harness
+            .machine_mut()
+            .set_watchpoint_cond(cpu, addr, kind, cond);
+        Ok(())
+    }
+
+    /// Clear every watchpoint across all CPUs. Already-collected hits are kept.
+    pub fn clear_watchpoints(&mut self) -> Result<(), String> {
+        self.session.harness.machine_mut().clear_all_watchpoints();
+        Ok(())
+    }
+
+    /// Drain and return every watchpoint hit collected so far (also sweeps any
+    /// still queued in the machine). Leaves the accumulator empty.
+    pub fn take_hits(&mut self) -> Result<Vec<WatchpointHit>, String> {
+        let session = &mut *self.session;
+        session.drain_watchpoint_hits();
+        Ok(std::mem::take(&mut session.hits))
+    }
+
+    /// Enable or disable bus-event recording. Enabling starts from a clean
+    /// slate (any stale ring contents and the accumulator are dropped).
+    ///
+    /// Event trace is CPU-agnostic and region-tagged, and resolves mirrors —
+    /// making it a better instrument than watchpoints for "which registers are
+    /// written, and when within a frame". Note: bus-event tracing is wired for
+    /// `AddressSpace16/32` boards; a machine without it records nothing.
+    pub fn set_trace(&mut self, enabled: bool) -> Result<(), String> {
+        let session = &mut *self.session;
+        let machine = session.harness.machine_mut();
+        machine.set_trace_enabled(enabled);
+        machine.clear_trace_events();
+        session.events.clear();
+        Ok(())
+    }
+
+    /// Drain and return every trace event collected so far (also sweeps the
+    /// machine's current ring). Leaves the accumulator empty.
+    pub fn take_events(&mut self) -> Result<Vec<DebugEvent>, String> {
+        let session = &mut *self.session;
+        session.drain_trace_events();
+        Ok(std::mem::take(&mut session.events))
+    }
+
+    /// Enable per-frame hang detection with the given PC `window` (bytes) and
+    /// frame `threshold`. `run_frames` then samples each CPU's PC per frame; a
+    /// CPU stuck within `window` for `threshold` frames produces a report.
+    pub fn detect_hangs(&mut self, window: u32, threshold: u32) -> Result<(), String> {
+        let session = &mut *self.session;
+        session.hang = Some(HangDetector::with_params(window, threshold));
+        session.hang_reports.clear();
+        Ok(())
+    }
+
+    /// Drain and return every hang report collected so far.
+    pub fn take_hangs(&mut self) -> Result<Vec<HangReport>, String> {
+        Ok(std::mem::take(&mut self.session.hang_reports))
+    }
+
+    /// Restore a snapshot taken by
+    /// [`save_state`](DebugSession::save_state).
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        self.session
+            .harness
+            .machine_mut()
+            .load_state(data)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Reset the machine to power-on and zero the frame counter, clearing the
+    /// watchpoint/event/hang accumulators (stale after a reset).
+    pub fn reset(&mut self) -> Result<(), String> {
+        let session = &mut *self.session;
+        session.harness.reset();
+        session.hits.clear();
+        session.events.clear();
+        session.hang_reports.clear();
+        if let Some(detector) = session.hang.as_mut() {
+            detector.reset();
+        }
+        Ok(())
+    }
+
+    /// Replace the whole live byte of DIP bank `bank`.
+    pub fn set_dip_bank_value(&mut self, bank: usize, value: u8) -> Result<(), String> {
+        self.session
+            .harness
+            .machine_mut()
+            .set_dip_bank_value(bank, value);
+        Ok(())
+    }
+
+    /// Set one option within a bank, masking `value` into the bank byte.
+    pub fn set_dip_option(&mut self, bank: usize, option: usize, value: u8) -> Result<(), String> {
+        self.session
+            .harness
+            .machine_mut()
+            .set_dip_option(bank, option, value);
+        Ok(())
+    }
+
+    /// Set a DIP option by its name to the choice with the given label. Returns
+    /// `false` if no such option/choice exists — the ergonomic path for sweeping
+    /// configs (`set_dip("Difficulty", "Hard")`). Note: an option whose `apply`
+    /// timing is `OnReset` only takes effect after [`reset`](Self::reset).
+    pub fn set_dip_by_name(&mut self, option: &str, choice: &str) -> Result<bool, String> {
+        let session = &mut *self.session;
+        let banks = session.harness.machine().dip_banks();
+        for (bi, bank) in banks.iter().enumerate() {
+            for (oi, opt) in bank.options.iter().enumerate() {
+                if opt.name == option
+                    && let Some(ch) = opt.choices.iter().find(|c| c.label == choice)
+                {
+                    let value = ch.value;
+                    session.harness.machine_mut().set_dip_option(bi, oi, value);
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Apply an *immediate* button edge to the control named `name`. Distinct
     /// from the harness's *scheduled* presses: this fires now, letting a script
     /// drive a timeline imperatively
     /// (`input("coin", true); run_frames(8); input("coin", false)`).
     pub fn input(&mut self, name: &str, pressed: bool) -> Result<(), String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        let id = self.control_id(name)?;
-        self.harness
+        let session = &mut *self.session;
+        let id = session.control_id(name)?;
+        session
+            .harness
             .machine_mut()
             .handle_input(InputEvent::Button { id, pressed });
         Ok(())
@@ -680,11 +698,10 @@ impl DebugSession {
     /// Apply an *immediate* absolute analog value (`-1.0..=1.0`) to the control
     /// named `name`.
     pub fn input_axis(&mut self, name: &str, value: f32) -> Result<(), String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        let id = self.control_id(name)?;
-        self.harness
+        let session = &mut *self.session;
+        let id = session.control_id(name)?;
+        session
+            .harness
             .machine_mut()
             .handle_input(InputEvent::Absolute { id, value });
         Ok(())
@@ -700,11 +717,10 @@ impl DebugSession {
     /// silently does nothing. Deltas accumulate until the machine drains them,
     /// so sustained motion means one call per frame, not one large call.
     pub fn input_relative(&mut self, name: &str, delta: f32) -> Result<(), String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        let id = self.control_id(name)?;
-        self.harness
+        let session = &mut *self.session;
+        let id = session.control_id(name)?;
+        session
+            .harness
             .machine_mut()
             .handle_input(InputEvent::Relative { id, delta });
         Ok(())
@@ -717,18 +733,20 @@ impl DebugSession {
     /// cabinet shows). Raster-only — vector machines render through
     /// `vector_display_list`, the same limitation frameshot has.
     pub fn screenshot(&mut self, path: &str) -> Result<(), String> {
-        if self.locked {
-            return Err(LOCKED_REASON.to_string());
-        }
-        let (nw, nh) = self.harness.machine().display_size();
-        self.fb.resize(nw as usize * nh as usize * 3, 0);
+        let session = &mut *self.session;
+        let (nw, nh) = session.harness.machine().display_size();
+        session.fb.resize(nw as usize * nh as usize * 3, 0);
 
-        let machine = self.harness.machine_mut();
-        machine.render_frame(&mut self.fb);
-        let orient = machine.orientation();
+        // Disjoint field borrows: the render target and the machine.
+        let orient = {
+            let fb = &mut session.fb;
+            let machine = session.harness.machine_mut();
+            machine.render_frame(fb);
+            machine.orientation()
+        };
 
         if orient == Orientation::NORMAL {
-            write_png(Path::new(path), &self.fb, nw, nh)
+            write_png(Path::new(path), &session.fb, nw, nh)
         } else {
             let (dw, dh) = if orient.swaps_axes() {
                 (nh, nw)
@@ -737,7 +755,7 @@ impl DebugSession {
             };
             let mut oriented = vec![0u8; dw as usize * dh as usize * 3];
             phosphor_core::gfx::apply_orientation(
-                &self.fb,
+                &session.fb,
                 &mut oriented,
                 nw as usize,
                 nh as usize,
@@ -746,21 +764,6 @@ impl DebugSession {
             write_png(Path::new(path), &oriented, dw, dh)
         }
         .map_err(|e| format!("writing {path}: {e}"))
-    }
-
-    /// Number of frames run so far via [`run_frames`](Self::run_frames).
-    pub fn frame_count(&self) -> u64 {
-        self.harness.frame_count() as u64
-    }
-
-    /// The machine's short identifier (`MachineCore::machine_id`).
-    pub fn machine_id(&self) -> String {
-        self.harness.machine().machine_id().to_string()
-    }
-
-    /// Native display size `(width, height)` in pixels.
-    pub fn display_size(&self) -> (u32, u32) {
-        self.harness.machine().display_size()
     }
 }
 
@@ -882,8 +885,11 @@ mod tests {
         std::fs::write(&path, movie.encode()).expect("write movie");
 
         let mut s = DebugSession::from_machine(machine);
-        s.load_movie(path.to_str().unwrap()).expect("load_movie");
-        s.run_frames(6);
+        s.mutate()
+            .unwrap()
+            .load_movie(path.to_str().unwrap())
+            .expect("load_movie");
+        s.mutate().unwrap().run_frames(6).unwrap();
 
         let buttons = rec
             .borrow()
@@ -917,8 +923,10 @@ mod tests {
         std::fs::write(&path, r.finish().encode()).expect("write movie");
 
         let mut s = DebugSession::from_machine(machine);
-        s.run_frames(3);
+        s.mutate().unwrap().run_frames(3).unwrap();
         let err = s
+            .mutate()
+            .unwrap()
             .load_movie(path.to_str().unwrap())
             .expect_err("must refuse");
         assert!(err.contains("not_the_stub"), "unhelpful error: {err}");
@@ -930,7 +938,7 @@ mod tests {
     fn run_frames_advances_machine_and_frame_count() {
         let (mut s, rec) = session(true);
         assert_eq!(s.frame_count(), 0);
-        s.run_frames(3);
+        s.mutate().unwrap().run_frames(3).unwrap();
         assert_eq!(s.frame_count(), 3);
         assert_eq!(rec.borrow().frames, 3);
     }
@@ -946,39 +954,46 @@ mod tests {
     fn poke_writes_back_and_read_reflects_it() {
         let (mut s, _) = session(true);
         assert_eq!(s.read(0, 0x20), Some(0x21)); // seed before poke
-        assert!(s.poke(0, 0x20, 0xEE));
+        assert!(s.mutate().unwrap().poke(0, 0x20, 0xEE).unwrap());
         assert_eq!(s.read(0, 0x20), Some(0xEE)); // poked value overrides seed
     }
 
     #[test]
     fn poke_without_debug_support_returns_false() {
         let (mut s, _) = session(false);
-        assert!(!s.poke(0, 0x20, 0xEE));
+        assert!(!s.mutate().unwrap().poke(0, 0x20, 0xEE).unwrap());
     }
 
     #[test]
     fn watchpoint_hit_collected_on_write() {
         let (mut s, _) = session(true);
-        let n = s.watch(0x40, WatchpointKind::Write, WatchpointCondition::Always);
+        let n = s
+            .mutate()
+            .unwrap()
+            .watch(0x40, WatchpointKind::Write, WatchpointCondition::Always)
+            .unwrap();
         assert_eq!(n, 1); // the stub exposes one CPU
-        s.poke(0, 0x40, 0x99); // write to the watched address queues a hit
-        let hits = s.take_hits();
+        s.mutate().unwrap().poke(0, 0x40, 0x99).unwrap(); // write to the watched address queues a hit
+        let hits = s.mutate().unwrap().take_hits().unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].addr, 0x40);
         assert_eq!(hits[0].value, 0x99);
         assert_eq!(hits[0].cpu_index, 0);
         assert_eq!(hits[0].kind, WatchpointKind::Write);
         // Draining leaves the accumulator empty.
-        assert!(s.take_hits().is_empty());
+        assert!(s.mutate().unwrap().take_hits().unwrap().is_empty());
     }
 
     #[test]
     fn clear_watchpoints_stops_hits() {
         let (mut s, _) = session(true);
-        s.watch(0x40, WatchpointKind::Write, WatchpointCondition::Always);
-        s.clear_watchpoints();
-        s.poke(0, 0x40, 0x99);
-        assert!(s.take_hits().is_empty());
+        s.mutate()
+            .unwrap()
+            .watch(0x40, WatchpointKind::Write, WatchpointCondition::Always)
+            .unwrap();
+        s.mutate().unwrap().clear_watchpoints().unwrap();
+        s.mutate().unwrap().poke(0, 0x40, 0x99).unwrap();
+        assert!(s.mutate().unwrap().take_hits().unwrap().is_empty());
     }
 
     #[test]
@@ -992,67 +1007,67 @@ mod tests {
     #[test]
     fn trace_events_collected_across_frames() {
         let (mut s, _) = session(true);
-        s.set_trace(true);
+        s.mutate().unwrap().set_trace(true).unwrap();
         assert!(s.trace_enabled());
-        s.run_frames(3); // the stub records one bus event per frame while tracing
-        let events = s.take_events();
+        s.mutate().unwrap().run_frames(3).unwrap(); // the stub records one bus event per frame while tracing
+        let events = s.mutate().unwrap().take_events().unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].addr, Some(0x1234));
         assert_eq!(events[0].value, Some(0x99));
         assert_eq!(events[0].region, Some("test-ram"));
         // Draining leaves the accumulator empty.
-        assert!(s.take_events().is_empty());
+        assert!(s.mutate().unwrap().take_events().unwrap().is_empty());
     }
 
     #[test]
     fn trace_disabled_records_nothing() {
         let (mut s, _) = session(true);
-        s.run_frames(3);
+        s.mutate().unwrap().run_frames(3).unwrap();
         assert!(!s.trace_enabled());
-        assert!(s.take_events().is_empty());
+        assert!(s.mutate().unwrap().take_events().unwrap().is_empty());
     }
 
     #[test]
     fn hang_detector_reports_stuck_cpu() {
         // The stub CPU's PC is fixed at 0x1234 → a perpetual hang.
         let (mut s, _) = session(true);
-        s.detect_hangs(8, 3);
-        s.run_frames(5);
-        let hangs = s.take_hangs();
+        s.mutate().unwrap().detect_hangs(8, 3).unwrap();
+        s.mutate().unwrap().run_frames(5).unwrap();
+        let hangs = s.mutate().unwrap().take_hangs().unwrap();
         assert_eq!(hangs.len(), 1); // reports once at threshold, then stays quiet
         assert_eq!(hangs[0].cpu_index, 0);
         assert_eq!(hangs[0].pc, 0x1234);
         assert!(hangs[0].frames_stuck >= 3);
-        assert!(s.take_hangs().is_empty());
+        assert!(s.mutate().unwrap().take_hangs().unwrap().is_empty());
     }
 
     #[test]
     fn save_and_load_state_round_trip() {
         let (mut s, _) = session(true);
-        s.poke(0, 0x50, 0xAA);
+        s.mutate().unwrap().poke(0, 0x50, 0xAA).unwrap();
         assert_eq!(s.read(0, 0x50), Some(0xAA));
         let snap = s.save_state().expect("stub supports save state");
-        s.poke(0, 0x50, 0xBB);
+        s.mutate().unwrap().poke(0, 0x50, 0xBB).unwrap();
         assert_eq!(s.read(0, 0x50), Some(0xBB));
-        s.load_state(&snap).unwrap();
+        s.mutate().unwrap().load_state(&snap).unwrap();
         assert_eq!(s.read(0, 0x50), Some(0xAA)); // restored to the snapshot
     }
 
     #[test]
     fn load_state_rejects_bad_data() {
         let (mut s, _) = session(true);
-        assert!(s.load_state(&[1, 2, 3]).is_err()); // not a whole number of records
+        assert!(s.mutate().unwrap().load_state(&[1, 2, 3]).is_err()); // not a whole number of records
     }
 
     #[test]
     fn reset_zeroes_frames_and_clears_accumulators() {
         let (mut s, _) = session(true);
-        s.set_trace(true);
-        s.run_frames(3);
+        s.mutate().unwrap().set_trace(true).unwrap();
+        s.mutate().unwrap().run_frames(3).unwrap();
         assert_eq!(s.frame_count(), 3);
-        s.reset();
+        s.mutate().unwrap().reset().unwrap();
         assert_eq!(s.frame_count(), 0);
-        assert!(s.take_events().is_empty());
+        assert!(s.mutate().unwrap().take_events().unwrap().is_empty());
     }
 
     #[test]
@@ -1064,19 +1079,24 @@ mod tests {
         assert_eq!(banks[0].name, "TEST");
         assert_eq!(banks[0].options[0].name, "Lives");
 
-        s.set_dip_bank_value(0, 0x05);
+        s.mutate().unwrap().set_dip_bank_value(0, 0x05).unwrap();
         assert_eq!(s.dip_bank_value(0), 0x05);
 
         // Masked option write: Bonus (mask 0x0C) := 0x04 leaves the Lives bits.
-        s.set_dip_option(0, 1, 0x04);
+        s.mutate().unwrap().set_dip_option(0, 1, 0x04).unwrap();
         assert_eq!(s.dip_bank_value(0) & 0x0C, 0x04);
         assert_eq!(s.dip_bank_value(0) & 0x03, 0x01);
 
         // By-name setter.
-        assert!(s.set_dip_by_name("Lives", "5"));
+        assert!(s.mutate().unwrap().set_dip_by_name("Lives", "5").unwrap());
         assert_eq!(s.dip_bank_value(0) & 0x03, 0x01);
-        assert!(!s.set_dip_by_name("Nonexistent", "x"));
-        assert!(!s.set_dip_by_name("Lives", "99")); // unknown choice label
+        assert!(
+            !s.mutate()
+                .unwrap()
+                .set_dip_by_name("Nonexistent", "x")
+                .unwrap()
+        );
+        assert!(!s.mutate().unwrap().set_dip_by_name("Lives", "99").unwrap()); // unknown choice label
     }
 
     #[test]
@@ -1093,10 +1113,10 @@ mod tests {
     #[test]
     fn input_reaches_handle_input_by_stable_name() {
         let (mut s, rec) = session(true);
-        s.input("coin", true).unwrap();
-        s.input("coin", false).unwrap();
-        s.input_axis("coin", 0.5).unwrap();
-        s.input_relative("coin", -3.0).unwrap();
+        s.mutate().unwrap().input("coin", true).unwrap();
+        s.mutate().unwrap().input("coin", false).unwrap();
+        s.mutate().unwrap().input_axis("coin", 0.5).unwrap();
+        s.mutate().unwrap().input_relative("coin", -3.0).unwrap();
         assert_eq!(
             rec.borrow().inputs,
             vec![
@@ -1127,11 +1147,16 @@ mod tests {
     #[test]
     fn an_unknown_control_is_an_error_not_a_silent_no_op() {
         let (mut s, rec) = session(true);
-        let err = s.input("nonexistent", true).unwrap_err();
+        let err = s.mutate().unwrap().input("nonexistent", true).unwrap_err();
         assert!(err.contains("nonexistent"), "{err}");
         assert!(err.contains("coin"), "should list what it does have: {err}");
-        assert!(s.input_axis("nonexistent", 0.5).is_err());
-        assert!(s.input_relative("nonexistent", 1.0).is_err());
+        assert!(s.mutate().unwrap().input_axis("nonexistent", 0.5).is_err());
+        assert!(
+            s.mutate()
+                .unwrap()
+                .input_relative("nonexistent", 1.0)
+                .is_err()
+        );
         assert!(
             rec.borrow().inputs.is_empty(),
             "a rejected control must reach the machine as nothing at all"
@@ -1164,7 +1189,7 @@ mod tests {
     #[test]
     fn step_returns_boundary_mask() {
         let (mut s, _) = session(true);
-        assert_eq!(s.step(), 0b1);
+        assert_eq!(s.mutate().unwrap().step().unwrap(), 0b1);
     }
 
     #[test]
@@ -1174,7 +1199,7 @@ mod tests {
         assert_eq!(s.pc(0), None);
         assert!(s.regs(0).is_empty());
         assert_eq!(s.disasm(0, 0x1000), None);
-        assert_eq!(s.step(), 0);
+        assert_eq!(s.mutate().unwrap().step().unwrap(), 0);
     }
 
     #[test]
@@ -1197,7 +1222,10 @@ mod tests {
         let (mut s, _) = session(true);
         let path = std::env::temp_dir().join("phosphor_script_session_shot.png");
         let _ = std::fs::remove_file(&path);
-        s.screenshot(path.to_str().unwrap()).unwrap();
+        s.mutate()
+            .unwrap()
+            .screenshot(path.to_str().unwrap())
+            .unwrap();
 
         let data = std::fs::read(&path).unwrap();
         assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "PNG magic");
@@ -1208,25 +1236,64 @@ mod tests {
     /// the pure reads keep working. The frontend locks the console surface
     /// while a movie records or replays, so a scripted poke, reset, or input
     /// cannot silently diverge the take.
+    ///
+    /// Every mutating verb lives on `SessionMut` behind `mutate`, so each
+    /// line below pins both halves at once: the verb is reachable only
+    /// through the lock, and its locked refusal is an `Err` naming the
+    /// reason rather than a silent default. A verb that ever stops
+    /// reporting fails to compile here.
     #[test]
-    fn locked_session_refuses_mutation_but_allows_reads() {
+    fn locked_session_refuses_every_mutating_verb() {
         use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointKind};
+
+        fn assert_locked<T>(r: Result<T, String>) {
+            assert!(
+                matches!(r, Err(e) if e.contains("locked")),
+                "a locked verb must report the refusal"
+            );
+        }
 
         let (mut s, rec) = session(true);
         assert!(!s.is_locked());
         s.set_locked(true);
         assert!(s.is_locked());
 
-        assert!(!s.poke(0, 0x20, 0xEE));
-        assert_eq!(s.step(), 0);
-        assert_eq!(
-            s.watch(0x20, WatchpointKind::Write, WatchpointCondition::Always),
-            0
+        assert_locked(s.mutate().map(|mut m| m.run_frames(1)));
+        assert_locked(s.mutate().map(|mut m| m.capture_audio()));
+        assert_locked(
+            s.mutate()
+                .map(|mut m| m.write_audio("/tmp/phosphor-locked-test.wav")),
         );
-        assert!(s.input("coin", true).is_err());
-        assert!(s.load_state(&[]).is_err());
-        assert!(s.take_hits().is_empty());
-        s.reset();
+        assert_locked(s.mutate().map(|mut m| m.load_movie("nope.phmi")));
+        assert_locked(s.mutate().map(|mut m| m.step()));
+        assert_locked(s.mutate().map(|mut m| m.poke(0, 0x20, 0xEE)));
+        assert_locked(
+            s.mutate()
+                .map(|mut m| m.watch(0x20, WatchpointKind::Write, WatchpointCondition::Always)),
+        );
+        assert_locked(
+            s.mutate().map(|mut m| {
+                m.watch_cpu(0, 0x20, WatchpointKind::Write, WatchpointCondition::Always)
+            }),
+        );
+        assert_locked(s.mutate().map(|mut m| m.clear_watchpoints()));
+        assert_locked(s.mutate().map(|mut m| m.take_hits()));
+        assert_locked(s.mutate().map(|mut m| m.set_trace(true)));
+        assert_locked(s.mutate().map(|mut m| m.take_events()));
+        assert_locked(s.mutate().map(|mut m| m.detect_hangs(8, 120)));
+        assert_locked(s.mutate().map(|mut m| m.take_hangs()));
+        assert_locked(s.mutate().map(|mut m| m.load_state(&[])));
+        assert_locked(s.mutate().map(|mut m| m.reset()));
+        assert_locked(s.mutate().map(|mut m| m.set_dip_bank_value(0, 0x01)));
+        assert_locked(s.mutate().map(|mut m| m.set_dip_option(0, 0, 0x01)));
+        assert_locked(s.mutate().map(|mut m| m.set_dip_by_name("Lives", "5")));
+        assert_locked(s.mutate().map(|mut m| m.input("coin", true)));
+        assert_locked(s.mutate().map(|mut m| m.input_axis("coin", 0.5)));
+        assert_locked(s.mutate().map(|mut m| m.input_relative("coin", 1.0)));
+        assert_locked(
+            s.mutate()
+                .map(|mut m| m.screenshot("/tmp/phosphor-locked-test.png")),
+        );
         assert!(
             rec.borrow().inputs.is_empty(),
             "locked input must reach the machine as nothing at all"
@@ -1241,7 +1308,7 @@ mod tests {
         assert!(!s.trace_enabled());
 
         s.set_locked(false);
-        assert!(s.poke(0, 0x20, 0xEE));
-        assert!(s.input("coin", true).is_ok());
+        assert!(s.mutate().unwrap().poke(0, 0x20, 0xEE).unwrap());
+        assert!(s.mutate().unwrap().input("coin", true).is_ok());
     }
 }

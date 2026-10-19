@@ -96,19 +96,37 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn(
         "load_movie",
         |m: &mut Machine, path: &str| -> Result<(), Box<EvalAltResult>> {
-            m.borrow_mut().load_movie(path).map_err(|e| e.into())
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.load_movie(path).map_err(|e| e.into()))
         },
     );
-    engine.register_fn("run_frames", |m: &mut Machine, n: i64| {
-        m.borrow_mut().run_frames(n.max(0) as u64);
-    });
-    engine.register_fn("step", |m: &mut Machine| -> i64 {
-        i64::from(m.borrow_mut().step())
-    });
+    engine.register_fn(
+        "run_frames",
+        |m: &mut Machine, n: i64| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.run_frames(n.max(0) as u64).map_err(lock_err))
+        },
+    );
+    engine.register_fn(
+        "step",
+        |m: &mut Machine| -> Result<i64, Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.step().map(i64::from).map_err(lock_err))
+        },
+    );
     engine.register_fn(
         "poke",
-        |m: &mut Machine, cpu: i64, addr: i64, data: i64| -> bool {
-            m.borrow_mut().poke(cpu as usize, addr as u32, data as u8)
+        |m: &mut Machine, cpu: i64, addr: i64, data: i64| -> Result<bool, Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.poke(cpu as usize, addr as u32, data as u8)
+                    .map_err(lock_err)
+            })
         },
     );
     // A control name that names nothing is an error, not a quiet no-op: see
@@ -116,23 +134,28 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn(
         "input",
         |m: &mut Machine, name: &str, on: bool| -> Result<(), Box<EvalAltResult>> {
-            m.borrow_mut().input(name, on).map_err(|e| e.into())
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.input(name, on).map_err(|e| e.into()))
         },
     );
     engine.register_fn(
         "input_axis",
         |m: &mut Machine, name: &str, v: f64| -> Result<(), Box<EvalAltResult>> {
             m.borrow_mut()
-                .input_axis(name, v as f32)
-                .map_err(|e| e.into())
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.input_axis(name, v as f32).map_err(|e| e.into()))
         },
     );
     engine.register_fn(
         "input_relative",
         |m: &mut Machine, name: &str, d: f64| -> Result<(), Box<EvalAltResult>> {
             m.borrow_mut()
-                .input_relative(name, d as f32)
-                .map_err(|e| e.into())
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.input_relative(name, d as f32).map_err(|e| e.into()))
         },
     );
 
@@ -184,16 +207,22 @@ fn register_machine(engine: &mut Engine) {
     // writes a 16-bit mono WAV. Driving real input on a schedule is the only way
     // to reach a sound a game only makes during play, which a device-level
     // capture cannot produce.
-    engine.register_fn("capture_audio", |m: &mut Machine| {
-        m.borrow_mut().capture_audio();
-    });
+    engine.register_fn(
+        "capture_audio",
+        |m: &mut Machine| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.capture_audio().map_err(lock_err))
+        },
+    );
     engine.register_fn(
         "write_audio",
         |m: &mut Machine, path: &str| -> Result<i64, Box<EvalAltResult>> {
             m.borrow_mut()
-                .write_audio(path)
-                .map(|n| n as i64)
-                .map_err(|e| e.into())
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.write_audio(path).map(|n| n as i64).map_err(|e| e.into()))
         },
     );
 
@@ -244,55 +273,89 @@ fn register_machine(engine: &mut Engine) {
         "watch_cpu",
         |m: &mut Machine, cpu: i64, addr: i64, kind: &str| -> Result<(), Box<EvalAltResult>> {
             let k = parse_kind(kind)?;
-            let mut s = m.borrow_mut();
-            for kind in k {
-                s.watch_cpu(cpu as usize, addr as u32, kind, WatchpointCondition::Always);
-            }
-            Ok(())
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                for kind in k {
+                    s.watch_cpu(cpu as usize, addr as u32, kind, WatchpointCondition::Always)
+                        .map_err(lock_err)?;
+                }
+                Ok(())
+            })
         },
     );
-    engine.register_fn("clear_watchpoints", |m: &mut Machine| {
-        m.borrow_mut().clear_watchpoints();
-    });
-    engine.register_fn("hits", |m: &mut Machine| -> Array {
-        m.borrow_mut().take_hits().iter().map(hit_to_map).collect()
-    });
+    engine.register_fn(
+        "clear_watchpoints",
+        |m: &mut Machine| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.clear_watchpoints().map_err(lock_err))
+        },
+    );
+    engine.register_fn(
+        "hits",
+        |m: &mut Machine| -> Result<Array, Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.take_hits()
+                    .map(|hits| hits.iter().map(hit_to_map).collect())
+                    .map_err(|e| e.into())
+            })
+        },
+    );
 
     // --- Event trace ---
     // CPU-agnostic, region-tagged, mirror-resolving bus events; `events()`
     // drains the collected events as an array of maps.
-    engine.register_fn("trace", |m: &mut Machine, on: bool| {
-        m.borrow_mut().set_trace(on);
-    });
+    engine.register_fn(
+        "trace",
+        |m: &mut Machine, on: bool| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.set_trace(on).map_err(lock_err))
+        },
+    );
     engine.register_fn("trace_enabled", |m: &mut Machine| -> bool {
         m.borrow_mut().trace_enabled()
     });
-    engine.register_fn("events", |m: &mut Machine| -> Array {
-        m.borrow_mut()
-            .take_events()
-            .iter()
-            .map(event_to_map)
-            .collect()
-    });
-
-    // --- Hang detection (per-frame PC sampling) ---
-    engine.register_fn("detect_hangs", |m: &mut Machine| {
-        m.borrow_mut().detect_hangs(8, 120); // Dig Dug defaults
-    });
     engine.register_fn(
-        "detect_hangs",
-        |m: &mut Machine, window: i64, threshold: i64| {
-            m.borrow_mut()
-                .detect_hangs(window.max(0) as u32, threshold.max(0) as u32);
+        "events",
+        |m: &mut Machine| -> Result<Array, Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.take_events()
+                    .map(|events| events.iter().map(event_to_map).collect())
+                    .map_err(|e| e.into())
+            })
         },
     );
-    engine.register_fn("hangs", |m: &mut Machine| -> Array {
-        m.borrow_mut()
-            .take_hangs()
-            .iter()
-            .map(hang_to_map)
-            .collect()
-    });
+
+    // --- Hang detection (per-frame PC sampling) ---
+    engine.register_fn(
+        "detect_hangs",
+        |m: &mut Machine| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.detect_hangs(8, 120).map_err(lock_err) // Dig Dug defaults
+            })
+        },
+    );
+    engine.register_fn(
+        "detect_hangs",
+        |m: &mut Machine, window: i64, threshold: i64| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.detect_hangs(window.max(0) as u32, threshold.max(0) as u32)
+                    .map_err(lock_err)
+            })
+        },
+    );
+    engine.register_fn(
+        "hangs",
+        |m: &mut Machine| -> Result<Array, Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.take_hangs()
+                    .map(|hangs| hangs.iter().map(hang_to_map).collect())
+                    .map_err(|e| e.into())
+            })
+        },
+    );
 
     // --- Save state / reset ---
     engine.register_fn(
@@ -306,12 +369,21 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn(
         "load_state",
         |m: &mut Machine, data: Blob| -> Result<(), Box<EvalAltResult>> {
-            m.borrow_mut().load_state(&data).map_err(|e| e.into())
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.load_state(&data).map_err(|e| e.into()))
         },
     );
-    engine.register_fn("reset", |m: &mut Machine| {
-        m.borrow_mut().reset();
-    });
+    engine.register_fn(
+        "reset",
+        |m: &mut Machine| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.reset().map_err(lock_err))
+        },
+    );
 
     // --- DIP switches ---
     // `dip_banks()` exposes the metadata a script needs to find an option;
@@ -322,21 +394,31 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn("dip_bank", |m: &mut Machine, bank: i64| -> i64 {
         i64::from(m.borrow().dip_bank_value(bank as usize))
     });
-    engine.register_fn("set_dip_bank", |m: &mut Machine, bank: i64, value: i64| {
-        m.borrow_mut()
-            .set_dip_bank_value(bank as usize, value as u8);
-    });
+    engine.register_fn(
+        "set_dip_bank",
+        |m: &mut Machine, bank: i64, value: i64| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.set_dip_bank_value(bank as usize, value as u8)
+                    .map_err(lock_err)
+            })
+        },
+    );
     engine.register_fn(
         "set_dip_option",
-        |m: &mut Machine, bank: i64, option: i64, value: i64| {
-            m.borrow_mut()
-                .set_dip_option(bank as usize, option as usize, value as u8);
+        |m: &mut Machine, bank: i64, option: i64, value: i64| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+                s.set_dip_option(bank as usize, option as usize, value as u8)
+                    .map_err(lock_err)
+            })
         },
     );
     engine.register_fn(
         "set_dip",
-        |m: &mut Machine, option: &str, choice: &str| -> bool {
-            m.borrow_mut().set_dip_by_name(option, choice)
+        |m: &mut Machine, option: &str, choice: &str| -> Result<bool, Box<EvalAltResult>> {
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.set_dip_by_name(option, choice).map_err(lock_err))
         },
     );
 
@@ -344,7 +426,10 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn(
         "screenshot",
         |m: &mut Machine, path: &str| -> Result<(), Box<EvalAltResult>> {
-            m.borrow_mut().screenshot(path).map_err(|e| e.into())
+            m.borrow_mut()
+                .mutate()
+                .map_err(lock_err)
+                .and_then(|mut s| s.screenshot(path).map_err(|e| e.into()))
         },
     );
 
@@ -375,6 +460,11 @@ fn parse_kind(s: &str) -> Result<Vec<WatchpointKind>, Box<EvalAltResult>> {
     }
 }
 
+/// A locked session reports the refusal as a script error, naming the reason.
+fn lock_err(e: String) -> Box<EvalAltResult> {
+    e.into()
+}
+
 /// Shared body for the `watch*` bindings: set the condition on every CPU for
 /// each requested kind, returning the CPU count.
 fn watch_all(
@@ -384,12 +474,13 @@ fn watch_all(
     cond: WatchpointCondition,
 ) -> Result<i64, Box<EvalAltResult>> {
     let kinds = parse_kind(kind)?;
-    let mut session = m.borrow_mut();
-    let mut count = 0;
-    for k in kinds {
-        count = session.watch(addr as u32, k, cond);
-    }
-    Ok(count as i64)
+    m.borrow_mut().mutate().map_err(lock_err).and_then(|mut s| {
+        let mut count = 0;
+        for k in kinds {
+            count = s.watch(addr as u32, k, cond).map_err(lock_err)?;
+        }
+        Ok(count as i64)
+    })
 }
 
 /// Human-readable form of a hit's access source.

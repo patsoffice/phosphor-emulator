@@ -24,13 +24,13 @@ fn event_trace_captures_region_tagged_writes() {
     let path = roms.to_str().unwrap();
 
     let mut session = DebugSession::open(MACHINE, path).expect("open shollow");
-    session.run_frames(400); // into attract
+    session.mutate().unwrap().run_frames(400).unwrap(); // into attract
 
     assert!(!session.trace_enabled());
-    session.set_trace(true);
+    session.mutate().unwrap().set_trace(true).unwrap();
     assert!(session.trace_enabled());
-    session.run_frames(1);
-    let events = session.take_events();
+    session.mutate().unwrap().run_frames(1).unwrap();
+    let events = session.mutate().unwrap().take_events().unwrap();
 
     assert!(!events.is_empty(), "expected trace events during attract");
     // Region-tagging: the event trace names the region an address falls in.
@@ -48,12 +48,12 @@ fn event_trace_captures_region_tagged_writes() {
     );
 
     // take_events drains.
-    assert!(session.take_events().is_empty());
+    assert!(session.mutate().unwrap().take_events().unwrap().is_empty());
 
     // Disabling trace stops recording.
-    session.set_trace(false);
-    session.run_frames(1);
-    assert!(session.take_events().is_empty());
+    session.mutate().unwrap().set_trace(false).unwrap();
+    session.mutate().unwrap().run_frames(1).unwrap();
+    assert!(session.mutate().unwrap().take_events().unwrap().is_empty());
 }
 
 #[test]
@@ -70,11 +70,14 @@ fn frontend_poke_is_tagged_in_the_trace() {
     // mrdo is a derived-BusDebug board; the poke routes through the address
     // space's tagged `poke`, which the derive now wires up for every board.
     let mut session = DebugSession::open("mrdo", path).expect("open mrdo");
-    session.run_frames(200);
+    session.mutate().unwrap().run_frames(200).unwrap();
 
-    session.set_trace(true);
-    assert!(session.poke(0, 0x8000, 0xAA), "mrdo has debug support");
-    let events = session.take_events();
+    session.mutate().unwrap().set_trace(true).unwrap();
+    assert!(
+        session.mutate().unwrap().poke(0, 0x8000, 0xAA).unwrap(),
+        "mrdo has debug support"
+    );
+    let events = session.mutate().unwrap().take_events().unwrap();
 
     let frontend: Vec<_> = events
         .iter()
