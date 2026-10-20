@@ -330,8 +330,11 @@ order above is the whole rule.
   preserving the rule that a recording carries every DIP flip.
 * `SaveState`/`LoadState` perform file IO inside the drain (replacing the
   inline arms) and surface `SaveError` text through the notice.
-* `SetDisplay` validates the struct ranges and applies it through
-  `set_display_settings` inside the drain. There is one command: no staging
+* `SetDisplay` applies the struct through `set_display_settings` inside
+  the drain, with no range check: the struct defines no valid range, only
+  the panel's sliders clamp (brightness 0.1 to 3.0, focus 0.5 to 4.0,
+  halation 0.0 to 0.4). An out-of-range value degrades the picture rather
+  than breaking anything. There is one command: no staging
   area, no commit event, no restore-on-close. The value lands one frame
   after the panel edit (today the panel applies it directly during the
   draw); persistence stays as today, a diff of the live value at exit
