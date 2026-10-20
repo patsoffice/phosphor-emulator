@@ -396,9 +396,11 @@ pub fn enable(ctx: &EnableCtx, cmd: &SessionCommand) -> Result<(), String> {
 #[derive(Debug, Default)]
 pub struct SessionState {
     queue: VecDeque<SessionCommand>,
-    /// Whether the machine was held before the debugger opened. Closing
-    /// restores this instead of forcing a resume.
-    debug_was_paused: bool,
+    /// Whether the open debugger paused a running machine itself. Closing
+    /// undoes only that automatic pause, and only if no pause or step
+    /// drained while the panel was open: any of those is the user's own
+    /// choice, and the close leaves it alone.
+    auto_paused: bool,
 }
 
 impl SessionState {
@@ -415,14 +417,17 @@ impl SessionState {
     }
 
     /// Record the debugger panel opening or closing against `debug`.
-    /// Opening pauses and remembers whether the machine was already held;
-    /// closing restores the remembered state instead of forcing a resume.
+    /// Opening pauses a running machine and remembers doing so; closing
+    /// resumes only in that case. A pause or step the user chose inside
+    /// the panel clears the flag through the drain, so the close leaves
+    /// the user's choice alone instead of overriding it.
     pub fn note_debug_panel(&mut self, open: bool, debug: &mut crate::debug_ui::DebugState) {
         use crate::debug_ui::RunMode;
         if open {
-            self.debug_was_paused = debug.run_mode != RunMode::Running;
+            self.auto_paused = debug.run_mode == RunMode::Running;
             debug.run_mode = RunMode::Paused;
-        } else if !self.debug_was_paused {
+        } else if self.auto_paused {
+            self.auto_paused = false;
             debug.run_mode = RunMode::Running;
         }
     }
@@ -474,7 +479,10 @@ impl SessionState {
                     use crate::debug_ui::RunMode;
                     // Resolved here, at the drain, so two toggles in one
                     // batch toggle twice rather than resolving to the same
-                    // value at submit time.
+                    // value at submit time. A drained toggle is the user's
+                    // own choice, so it clears the debugger's automatic
+                    // pause: closing the panel leaves this alone.
+                    self.auto_paused = false;
                     ctx.debug.run_mode = if ctx.debug.run_mode == RunMode::Running {
                         log::info!("Paused");
                         RunMode::Paused
@@ -487,7 +495,9 @@ impl SessionState {
                     // Auto-pause, preserved from the old global key: from
                     // Running the machine holds after the single frame, from
                     // Paused it just steps it. `StepFrame` always re-holds,
-                    // so no resume flag is needed.
+                    // so no resume flag is needed. A drained step is the
+                    // user's own choice: see `TogglePause` above.
+                    self.auto_paused = false;
                     ctx.debug.run_mode = crate::debug_ui::RunMode::StepFrame;
                 }
                 SessionCommand::SaveState => match ctx.machine.save_state() {
@@ -531,17 +541,26 @@ impl SessionState {
                     // next instruction boundary and re-holds. Arming rather
                     // than running keeps one definition of the step: the
                     // hotkey and the panel button share the `RunMode` path.
+                    // A drained step is the user's own choice: see
+                    // `TogglePause` above.
+                    self.auto_paused = false;
                     ctx.debug.run_mode = crate::debug_ui::RunMode::StepInstruction;
                 }
                 SessionCommand::StepCycle => {
                     // Same shape: one cycle in the next `execute_frame`,
                     // with its watchpoint drain, so a hit on that cycle
                     // stops there instead of surfacing at the next resume.
+                    // A drained step is the user's own choice: see
+                    // `TogglePause` above.
+                    self.auto_paused = false;
                     ctx.debug.run_mode = crate::debug_ui::RunMode::StepCycle;
                 }
                 SessionCommand::StepFrame => {
                     // Paused-only, enforced above. Arms the mode; the next
                     // `execute_frame` runs exactly one frame and re-holds.
+                    // A drained step is the user's own choice: see
+                    // `TogglePause` above.
+                    self.auto_paused = false;
                     ctx.debug.run_mode = crate::debug_ui::RunMode::StepFrame;
                 }
                 SessionCommand::SetDisplay { settings } => {
@@ -1350,6 +1369,66 @@ mod tests {
         );
         assert!(rejections.is_empty(), "{rejections:?}");
         assert_eq!(effects.rebuild, Some(Rebuild::MovieArm));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Closing the debugger undoes only its own automatic pause: a pause
+    /// the user chose inside the panel survives the close, while an
+    /// untouched open still resumes a machine that was running.
+    #[test]
+    fn debugger_close_keeps_a_pause_chosen_inside() {
+        use crate::debug_ui::{DebugState, RunMode};
+        use crate::movie::MovieCapture;
+        use crate::overlay::Notices;
+
+        let mut machine = (phosphor_machines::registry::all()
+            .first()
+            .expect("the registry is not empty")
+            .create_bare)();
+        let mut debug = DebugState::new();
+        let mut notices = Notices::default();
+        let dir = std::env::temp_dir().join(format!("phosphor_debug_close_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut movies = MovieCapture::new(&dir, "test", "test", [0u8; 32]);
+        let save_path = dir.join("quick.save");
+
+        let mut s = SessionState::default();
+        debug.run_mode = RunMode::Running;
+        s.note_debug_panel(true, &mut debug);
+        assert_eq!(debug.run_mode, RunMode::Paused);
+
+        // Two drained toggles: resume, then pause again. The pause is the
+        // user's choice, so the close must not override it.
+        s.submit(SessionCommand::TogglePause);
+        s.submit(SessionCommand::TogglePause);
+        {
+            let mut ctx = LoopCtx {
+                machine: machine.as_mut(),
+                debug: &mut debug,
+                save_path: &save_path,
+                screenshot_dir: &dir,
+                machine_name: "test",
+                movies: &mut movies,
+                overlay: None,
+                notices: &mut notices,
+            };
+            let (_, rejections) = s.drain(&mut ctx, false);
+            assert!(rejections.is_empty(), "{rejections:?}");
+        }
+        assert_eq!(debug.run_mode, RunMode::Paused);
+        s.note_debug_panel(false, &mut debug);
+        assert_eq!(
+            debug.run_mode,
+            RunMode::Paused,
+            "a pause chosen inside the panel survives closing it"
+        );
+
+        // Untouched open of a running machine still resumes on close.
+        debug.run_mode = RunMode::Running;
+        s.note_debug_panel(true, &mut debug);
+        s.note_debug_panel(false, &mut debug);
+        assert_eq!(debug.run_mode, RunMode::Running);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

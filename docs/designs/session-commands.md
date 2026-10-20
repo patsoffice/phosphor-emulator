@@ -369,9 +369,11 @@ outright:
   break the `HostAction`/`DEFAULTS` non-goal, so the modal gate stays.
   Today `ToggleDebugPanel` also forces pause on open and
   resume on close (`emulator.rs:804-812`). Migrated behavior: opening the
-  debugger pauses (unchanged) and records the prior pause state in
-  `debug_was_paused`; closing restores that stored state instead of forcing
-  running, so a machine paused before the panel opened stays paused.
+  debugger pauses a running machine (unchanged) and records having done so
+  in `auto_paused`; closing resumes only in that case. A pause or step the
+  user chose inside the panel clears the flag through the drain, so the
+  close leaves the user's choice alone instead of overriding it: closing
+  undoes only the automatic pause.
 
 ## Recording and replay guards
 
@@ -505,7 +507,7 @@ debugger-recording interaction itself.
    `Running` branch runs through `run_frame()` in both modes; breakpoints
    and watchpoints are suspended with a notice.
 4. Pause and frame advance gain meanings with the debugger open, and closing
-   the debugger restores the prior pause state, as defined above.
+   the debugger undoes only its own automatic pause, as defined above.
 5. Display changes land one frame after the panel edit; today the panel
    applies them directly during the draw.
 6. Breakpoints and watchpoints stay suspended for the rest of a replay,
