@@ -1,11 +1,10 @@
 # Design: Session Commands for the Native Frontend
 
-> **Status: accepted, implementation underway on the `session-command`
-> branch.** A small typed command layer inside the frontend: one
-> `SessionCommand` enum, one `drain` acting through `LoopCtx` and returning
-> a small exhaustive `Effects` struct, one queue drained after the event
-> poll, and one merged pause state. No new crate, no serialization, no
-> journal.
+> **Status: landed on `main`; the epic is closed.** A small typed command
+> layer inside the frontend: one `SessionCommand` enum, one `drain`
+> acting through `LoopCtx` and returning a small exhaustive `Effects`
+> struct, one queue drained after the event poll, and one merged pause
+> state. No new crate, no serialization, no journal.
 >
 > An earlier draft of this doc proposed a `phosphor-session` crate owning a
 > second `Harness`, plus a journal. That design was withdrawn on review: the
@@ -21,31 +20,28 @@
 
 ## Context
 
-The frontend drives a `Box<dyn FrontendMachine>` through one loop in
-`frontend/src/emulator.rs`. Session-level actions reach the machine through
-two unconnected paths today.
+Before this design the frontend drove a `Box<dyn FrontendMachine>`
+through one loop in `frontend/src/emulator.rs`, and session-level actions
+reached the machine through two unconnected paths.
 
 First, one-shot hotkeys: `HostAction` plus the `DEFAULTS` table in
 `frontend/src/host_keys.rs`, matched once per SDL press and dispatched by
-twenty-two inline match arms (reset, hard reset, quick save/load, screenshot,
+inline match arms (reset, hard reset, quick save/load, screenshot,
 pause, frame advance, panel toggles, throttle, FPS, mouse grab, step keys,
 movie record).
 
 Second, deferred panel edits: egui panels never hold `&mut machine`, so they
-record `pending_*` queues in `DebugState` and `SettingsState`
-(`pending_dip_changes`, `pending_tuning`, `pending_host_rebind`,
-`pending_device_actions`, `pending_memory_writes`) that `emulator.rs` drains
-after the frame. Whole-machine rebuilds use a third shape, boolean flags
-(`hard_reset_requested`, `arm_requested`, `pending_resync`).
+recorded `pending_*` queues in `DebugState` and `SettingsState`
+that `emulator.rs` drained after the frame. Whole-machine rebuilds used a
+third shape, boolean flags (`hard_reset_requested`, `arm_requested`,
+`pending_resync`); only the resync flag survives, carried into the drain's
+`Effects`.
 
-There are also two pause models: `DebugState::global_paused` when panels are
-closed and `RunMode::Paused` when the debugger governs, with `global_step`
-consumed unconditionally so a stale step cannot fire late
-(`frontend/src/debug_ui.rs:460-474`). The split is user-visible as a bug:
-with the debugger open, `global_paused` is never consulted, so Pause shows
-PAUSED and idles the loop (`emulator.rs:1625`) while frames keep running, and
-`FrameAdvance` is a silent no-op (its `global_step` is discarded on the
-debugger path).
+There were also two pause models: a panel-closed paused flag and
+`RunMode::Paused` when the debugger governed. The split was user-visible
+as a bug: with the debugger open the panel-closed flag was never
+consulted, so Pause showed PAUSED and idled the loop while frames kept
+running, and `FrameAdvance` was a silent no-op.
 
 Two distinctions shape the whole design:
 
@@ -190,7 +186,7 @@ pub struct EnableCtx {
     pub has_debug_bus: bool,
     pub mode: MovieMode,          // derived, see Recording and replay guards
     pub save_file_exists: bool,
-    pub dip_banks: usize,         // 0 means no DIP commands
+    pub dip_option_counts: Vec<usize>, // per-bank option counts
     pub paused: bool,
     pub debug_open: bool,         // sub-frame steps are debugger-modal
 }
@@ -200,8 +196,10 @@ pub struct EnableCtx {
 inside `drain`. The snapshot is rebuilt before each command in
 the batch, not once per drain: commands earlier in the batch change the
 state it describes. `[TogglePause, StepInstruction]` must see the paused
-state the first command just set, and `[MovieRecordToggle (stop),
-PokeMemory]` must see `Live` once the recording has ended. A failure
+state the first command just set (both keys landing in one poll while
+paused stages exactly this batch, as do the panel buttons in that order),
+and `[MovieRecordToggle (stop), PokeMemory]` must see `Live` once the
+recording has ended. A failure
 mutates nothing. `submit` itself only
 enqueues and makes no availability claim. Example reasons: stepping
 requires pause (`"Stepping needs the emulator paused"`); `LoadState`
@@ -212,7 +210,7 @@ a debug bus (`"This machine has no debug bus"`). Render-time UI hints
 No call site keeps its own copy of the rules in the meantime.
 
 `AdvanceFrame` is exempt from the paused-only stepping rule by definition:
-today it pauses a running machine first (`emulator.rs:1099`), and the
+today it pauses a running machine first (`emulator.rs:1109`), and the
 migrated command preserves that auto-pause semantic.
 
 `StepInstruction` and `StepCycle` additionally require the debugger open.
@@ -314,17 +312,19 @@ draining after delivery would reorder commands against recorded input. The
 order above is the whole rule.
 
 * `ResetSoft` and `LoadState` set `resync_input` (the dead-held-key bug
-  `emulator.rs:880` guards against) and zero the frame counter through
-  `LoopCtx::frame_count`. A set `resync_input` feeds that same iteration's
+  the resync step guards against, `emulator.rs:1271`) and zero the frame
+  counter through `ctx.debug.frame_count`. A set `resync_input` feeds that same iteration's
   resync step, immediately after the drain; a one-iteration-late resync
   reopens the dead-key bug. User feedback (the log line plus
   `notices.info`/`error` every current arm emits) is emitted by the drain
   through `LoopCtx::notices`, stated once per command instead of per arm.
-* `ResetHard` and arming `MovieRecordToggle` return `rebuild`, serviced at
-  loop top exactly where `hard_reset_requested` and `arm_requested` are
-  serviced today. A rebuild ends the drain; commands behind it stay queued
-  for the new machine. Those flags dissolve into the queue rather than
-  sitting beside it. NVRAM and DIP carry-over keeps current semantics.
+* `ResetHard` and arming `MovieRecordToggle` return `rebuild` for the
+  loop top. The drain call site translates the effect into the
+  long-standing `hard_reset_requested` and `arm_requested` flags serviced
+  there. A rebuild
+  ends the drain; commands behind it stay queued for the new machine. The
+  request travels in the queue; the flags remain only as the loop-top
+  servicing mechanism. NVRAM and DIP carry-over keeps current semantics.
 * `SetDipOption` validates against `dip_banks()` metadata and pushes the
   byte to the recorder through `LoopCtx::movies` inside the drain,
   preserving the rule that a recording carries every DIP flip.
@@ -640,7 +640,7 @@ replay it, and check it by eye. No automated test covers that path.
 * Main loop and all current call sites: `frontend/src/emulator.rs`
 * Execution gate and step paths: `frontend/src/debug_ui.rs:460-474`,
   `531-601`, `602-653`
-* Pause idling: `frontend/src/emulator.rs:1625`
+* Pause idling (the loop keeps rendering the UI while paused): `frontend/src/emulator.rs:1428`
 * Movie counter gating: `frontend/src/emulator.rs:1246-1254`
 * Display knobs: `core/src/core/display.rs`
 * Machine contract: `core/src/core/machine.rs`
