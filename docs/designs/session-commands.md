@@ -34,8 +34,10 @@ Second, deferred panel edits: egui panels never hold `&mut machine`, so they
 recorded `pending_*` queues in `DebugState` and `SettingsState`
 that `emulator.rs` drained after the frame. Whole-machine rebuilds used a
 third shape, boolean flags (`hard_reset_requested`, `arm_requested`,
-`pending_resync`); only the resync flag survives, carried into the drain's
-`Effects`.
+`pending_resync`); all three survive. The first two are still serviced at
+loop top, now fed by the drain's `Rebuild` effect instead of hotkey arms;
+`pending_resync` is still its own variable, reconciled into `needs_resync`
+alongside the drain's `resync_input` effect rather than through it.
 
 There were also two pause models: a panel-closed paused flag and
 `RunMode::Paused` when the debugger governed. The split was user-visible
@@ -195,11 +197,13 @@ pub struct EnableCtx {
 `enable(&EnableCtx, &SessionCommand) -> Result<(), String>` is enforced
 inside `drain`. The snapshot is rebuilt before each command in
 the batch, not once per drain: commands earlier in the batch change the
-state it describes. `[TogglePause, StepInstruction]` must see the paused
-state the first command just set (both keys landing in one poll while
-paused stages exactly this batch, as do the panel buttons in that order),
-and `[MovieRecordToggle (stop), PokeMemory]` must see `Live` once the
-recording has ended. A failure
+state it describes. `[TogglePause, StepInstruction]` starting paused must
+see Running for the second command: the toggle resumed, so the step is
+refused. That refusal is the proof the snapshot rebuilt; with a
+once-per-drain snapshot the step would arm against the stale pause. (Both
+keys landing in one poll while paused stages exactly this batch, as do the
+panel's Continue then Instr buttons.) `[MovieRecordToggle (stop),
+PokeMemory]` must see `Live` once the recording has ended. A failure
 mutates nothing. `submit` itself only
 enqueues and makes no availability claim. Example reasons: stepping
 requires pause (`"Stepping needs the emulator paused"`); `LoadState`
@@ -470,7 +474,7 @@ presses never happened), `set_dip_option`, `set_dip_bank_value`,
 the debugger UI also drains). Each refusal carries its reason through the
 verb's own return shape, so a locked call reports why into the console
 output instead of silently doing nothing. The loop sets the flag from the
-derived mode each frame (`frontend/src/emulator.rs:1663-1667`).
+derived mode each frame (`frontend/src/emulator.rs:1741`).
 This touches `phosphor-script`, but the change is small and lands where the
 verbs already live.
 
@@ -644,10 +648,11 @@ replay it, and check it by eye. No automated test covers that path.
 
 * Hotkeys and defaults: `frontend/src/host_keys.rs`
 * Main loop and all current call sites: `frontend/src/emulator.rs`
-* Execution gate and step paths: `frontend/src/debug_ui.rs:460-474`,
-  `531-601`, `602-653`
+* Execution gate and step paths: `frontend/src/debug_ui.rs` `execute_frame`
+  (gate at :476, take and breakpoint checks at :556-640, sub-frame step
+  arms at :646-702)
 * Pause idling (the loop keeps rendering the UI while paused): `frontend/src/emulator.rs:1428`
-* Movie counter gating: `frontend/src/emulator.rs:1246-1254`
+* Movie counter gating (only whole frames advance a take): `frontend/src/emulator.rs:1302-1307`
 * Display knobs: `core/src/core/display.rs`
 * Machine contract: `core/src/core/machine.rs`
 * Existing session owner: `tools/script/src/session.rs`, `rhai_api.rs:109`

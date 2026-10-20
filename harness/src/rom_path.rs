@@ -47,12 +47,36 @@ fn load_from_zip(path: &Path) -> Result<RomSet, RomLoadError> {
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().map_err(zip_err)?.to_string();
+        // Zip 9 reports an undecodable entry name as an error instead of
+        // lossy-converting it. MAME sets are ASCII, so a bad name means a
+        // stranger archive: skip that entry with a warning rather than
+        // failing the whole load on one filename.
+        let Some(name) = entry_name(i, path, entry.name()) else {
+            continue;
+        };
         let mut data = Vec::with_capacity(entry.size() as usize);
         std::io::Read::read_to_end(&mut entry, &mut data)?;
         entries.push((name, data));
     }
     Ok(RomSet::from_entries(entries))
+}
+
+/// Decide what to do with one archive entry's name: `Some` loads it, `None`
+/// skips it with a warning. Zip 9 surfaces undecodable names as an error;
+/// those entries are strangers in the archive, not missing ROMs, so the
+/// load carries on without them.
+fn entry_name(
+    index: usize,
+    archive: &Path,
+    raw: Result<std::borrow::Cow<'_, str>, zip::result::ZipError>,
+) -> Option<String> {
+    match raw {
+        Ok(name) => Some(name.into_owned()),
+        Err(e) => {
+            log::warn!("skipping entry {index} in {}: {e}", archive.display());
+            None
+        }
+    }
 }
 
 fn zip_err(e: zip::result::ZipError) -> RomLoadError {
@@ -108,6 +132,27 @@ mod tests {
         assert_eq!(rom_set.get("rom.bin"), Some(&[0xBB; 8][..]));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An undecodable entry name skips that entry instead of failing the
+    /// whole archive. Zip 9's own writer lossy-converts exotic names on the
+    /// way in, so no public writer API produces the error case; this pins
+    /// the decision directly.
+    #[test]
+    fn undecodable_entry_names_are_skipped() {
+        let bad = zip::result::ZipError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Cannot translate path from cp437",
+        ));
+        assert_eq!(
+            entry_name(3, Path::new("mame.zip"), Err(bad)),
+            None,
+            "a bad name skips the entry, it does not fail the load"
+        );
+        assert_eq!(
+            entry_name(3, Path::new("mame.zip"), Ok("a.bin".into())),
+            Some("a.bin".to_string())
+        );
     }
 
     #[test]

@@ -2242,6 +2242,35 @@ mod tests {
             RunMode::Paused,
             "the same breakpoint pauses outside a take"
         );
+
+        // PC-only control: no cycle breakpoint set, PC breakpoint on an
+        // address the live frame reaches. A broken PC check would sail
+        // past; the cycle check cannot fire here to hide it.
+        s.cycle_breakpoint = None;
+        s.breakpoints.clear();
+        let pc = m
+            .debug_bus()
+            .and_then(|bus| bus.cpus().first().map(|(_, cpu)| cpu.debug_pc()))
+            .expect("a CPU to break on");
+        s.breakpoints.push(std::collections::HashSet::from([pc]));
+        s.run_mode = RunMode::Running;
+        let mut paused_at = None;
+        for frame in 1..=5 {
+            if !execute_frame(&mut *m, &mut s, false) {
+                paused_at = Some(frame);
+                break;
+            }
+            s.run_mode = RunMode::Running;
+        }
+        assert_eq!(
+            s.run_mode,
+            RunMode::Paused,
+            "PC breakpoint {pc:#X} never paused a live frame"
+        );
+        assert!(
+            paused_at.is_some(),
+            "live frames ran past PC breakpoint {pc:#X}"
+        );
     }
 
     /// While suspension holds, the dirty sync does nothing and leaves the

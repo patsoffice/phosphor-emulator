@@ -421,6 +421,11 @@ impl SessionState {
     /// resumes only in that case. A pause or step the user chose inside
     /// the panel clears the flag through the drain, so the close leaves
     /// the user's choice alone instead of overriding it.
+    ///
+    /// Edge case, documented not fixed: F8 and the panel close landing in
+    /// the same poll. The close is handled inline and resumes (the flag is
+    /// still set), then the queued toggle drains and pauses. Net effect is
+    /// paused, which matches the last action the user took.
     pub fn note_debug_panel(&mut self, open: bool, debug: &mut crate::debug_ui::DebugState) {
         use crate::debug_ui::RunMode;
         if open {
@@ -950,12 +955,15 @@ mod tests {
             .create_bare)();
         let mut debug = DebugState::new();
         let mut notices = Notices::default();
-        let mut movies = MovieCapture::new(
-            std::path::Path::new("/nonexistent-dir"),
-            "test",
-            "test",
-            [0u8; 32],
-        );
+        // Save and screenshot paths stay uncreatable on purpose (their
+        // failure paths are asserted below), but the movies directory must
+        // be real: the Replaying section stops a live recording, and as
+        // root `create_dir_all("/nonexistent-dir")` would succeed and drop
+        // a movie into `/`.
+        let movie_dir =
+            std::env::temp_dir().join(format!("phosphor_drain_commands_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&movie_dir);
+        let mut movies = MovieCapture::new(&movie_dir, "test", "test", [0u8; 32]);
         let save_path = std::path::Path::new("/nonexistent-dir/quick.save");
 
         let run = |s: &mut SessionState,
@@ -1145,8 +1153,8 @@ mod tests {
         // In Replaying, the DIP flip and arming a recording join the
         // refused set; pausing stays available. The previous section left
         // a live recording, so stop it first: the mode derives from the
-        // capture, and a stop writes nothing here (the movies directory
-        // does not exist, which the stop reports instead of failing).
+        // capture, and the stop writes a real movie file into the temp
+        // directory.
         s.submit(SessionCommand::MovieRecordToggle);
         run(
             &mut s,
@@ -1294,11 +1302,12 @@ mod tests {
             "save file plus screenshot, or screenshot alone"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&movie_dir);
     }
 
-    /// Closing the debugger restores the remembered pause state instead of
-    /// forcing a resume: a machine paused before the panel opened stays
-    /// paused, and one that was running resumes.
+    /// Closing the debugger undoes only its own automatic pause: a machine
+    /// paused before the panel opened stays paused, and one that was
+    /// running resumes when nothing was chosen inside.
     #[test]
     fn debug_panel_close_restores_prior_pause_state() {
         use crate::debug_ui::{DebugState, RunMode};

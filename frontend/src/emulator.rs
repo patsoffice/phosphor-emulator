@@ -1198,10 +1198,11 @@ pub fn run(
         // reorder commands against recorded input. Queue order is hotkeys
         // in poll order, then panel-staged edits in one fixed order:
         // display, debugger commands, device actions, memory writes, DIP
-        // changes. The vectors below serialize the panel edits into that
-        // order; panels cannot reach the queue themselves, so submitting
-        // `SessionCommand`s from the draw functions would only scatter
-        // this order across panel draw order.
+        // changes. The staging vectors below serialize the panel edits
+        // into that order, independent of panel draw order: panels show,
+        // hide, and float freely, so tying execution order to draw order
+        // would make the queue depend on UI layout. Click order within
+        // each panel is preserved by append order.
         if let Some(display) = settings_state.pending_display.take() {
             commands.submit(crate::session::SessionCommand::SetDisplay { settings: display });
         }
