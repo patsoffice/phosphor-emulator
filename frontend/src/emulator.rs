@@ -640,8 +640,12 @@ pub fn run(
             machine.clear_all_watchpoints();
             while machine.take_watchpoint_hit().is_some() {}
             debug_state.watchpoints_suspended = true;
-            log::info!("Breakpoints and watchpoints are suspended while recording or replaying");
-            notices.info("Breakpoints and watchpoints suspended for this take");
+            log::info!(
+                "PC, cycle, and watchpoint breaks are suspended while recording or replaying; the frame breakpoint still applies"
+            );
+            notices.info(
+                "PC, cycle, and watchpoint breaks suspended (frame breakpoint still applies)",
+            );
         } else if !now_suspended && was_suspended {
             debug_state.watchpoints_suspended = false;
             debug_state.watchpoints_dirty = true;
