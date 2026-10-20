@@ -1195,15 +1195,16 @@ pub fn run(
         // hotkey actions execute, after the poll and before resync, movie
         // delivery, and the frame. Draining before the poll would add a
         // frame of latency to every hotkey; draining after delivery would
-        // reorder commands against recorded input. Panel-staged display
-        // edits join the queue here, ahead of the drain, so they pass
-        // through the same enablement and ordering.
+        // reorder commands against recorded input. Queue order is hotkeys
+        // in poll order, then panel-staged edits in one fixed order:
+        // display, debugger commands, device actions, memory writes, DIP
+        // changes. The vectors below serialize the panel edits into that
+        // order; panels cannot reach the queue themselves, so submitting
+        // `SessionCommand`s from the draw functions would only scatter
+        // this order across panel draw order.
         if let Some(display) = settings_state.pending_display.take() {
             commands.submit(crate::session::SessionCommand::SetDisplay { settings: display });
         }
-        // Panel-staged debugger and DIP edits join the queue here, ahead of
-        // the drain, so every edit passes through one enablement and
-        // ordering. Panels cannot reach the queue themselves.
         for cmd in debug_state.pending_commands.drain(..) {
             commands.submit(cmd);
         }
