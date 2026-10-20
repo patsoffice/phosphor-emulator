@@ -280,12 +280,15 @@ pub fn all() -> Vec<SessionCommand> {
 
 /// Read-only snapshot for enablement, rebuilt before each command in a
 /// batch so earlier commands cannot stale the answer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EnableCtx {
     pub has_debug_bus: bool,
     pub mode: MovieMode,
     pub save_file_exists: bool,
-    pub dip_banks: usize,
+    /// Option count per DIP bank, in bank order. `SetDipOption` validates
+    /// both indices against this; an out-of-range bank would otherwise
+    /// record a `(bank, 0)` DIP entry for a bank that does not exist.
+    pub dip_option_counts: Vec<usize>,
     pub paused: bool,
     pub debug_open: bool,
 }
@@ -373,9 +376,15 @@ pub fn enable(ctx: &EnableCtx, cmd: &SessionCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        SessionCommand::SetDipOption { .. } => {
-            if ctx.dip_banks == 0 {
-                return Err("This machine has no DIP switches".to_string());
+        SessionCommand::SetDipOption { bank, option, .. } => {
+            let Some(&options) = ctx.dip_option_counts.get(*bank) else {
+                if ctx.dip_option_counts.is_empty() {
+                    return Err("This machine has no DIP switches".to_string());
+                }
+                return Err(format!("DIP bank {bank} does not exist"));
+            };
+            if *option >= options {
+                return Err(format!("DIP bank {bank} has no option {option}"));
             }
             Ok(())
         }
@@ -438,7 +447,12 @@ impl SessionState {
                 has_debug_bus: ctx.machine.debug_bus().is_some(),
                 mode: movie_mode(ctx.movies.is_recording(), replaying),
                 save_file_exists: ctx.save_path.exists(),
-                dip_banks: ctx.machine.dip_banks().len(),
+                dip_option_counts: ctx
+                    .machine
+                    .dip_banks()
+                    .iter()
+                    .map(|b| b.options.len())
+                    .collect(),
                 paused: paused(ctx.debug),
                 debug_open: ctx.debug.active,
             };
@@ -744,7 +758,7 @@ mod tests {
             has_debug_bus: true,
             mode: MovieMode::Live,
             save_file_exists: true,
-            dip_banks: 1,
+            dip_option_counts: vec![1],
             paused: true,
             debug_open: true,
         }
@@ -826,6 +840,35 @@ mod tests {
         );
         assert!(enable(&ctx, &SessionCommand::MovieRecordToggle).is_err());
         assert!(enable(&ctx, &SessionCommand::StepFrame).is_ok());
+    }
+
+    /// Out-of-range DIP indices are refused with reasons before anything
+    /// mutates: an unchecked bank would otherwise record a `(bank, 0)` DIP
+    /// entry for a bank that does not exist.
+    #[test]
+    fn set_dip_option_validates_bank_and_option() {
+        let dip = |bank: usize, option: usize| SessionCommand::SetDipOption {
+            bank,
+            option,
+            value: 0,
+        };
+        let mut ctx = live();
+        ctx.dip_option_counts = vec![2];
+        assert!(enable(&ctx, &dip(0, 0)).is_ok());
+        assert!(enable(&ctx, &dip(0, 1)).is_ok());
+        assert_eq!(
+            enable(&ctx, &dip(0, 2)),
+            Err("DIP bank 0 has no option 2".to_string())
+        );
+        assert_eq!(
+            enable(&ctx, &dip(1, 0)),
+            Err("DIP bank 1 does not exist".to_string())
+        );
+        ctx.dip_option_counts = vec![];
+        assert_eq!(
+            enable(&ctx, &dip(0, 0)),
+            Err("This machine has no DIP switches".to_string())
+        );
     }
 
     /// `submit` enqueues without judging: the drain enforces.
