@@ -744,6 +744,37 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// Every hotkey-fed command carries its feeder's label, so the panels
+    /// and the key legend agree because they read the same text. If a
+    /// command is rewired to another action, or either side is reworded
+    /// alone, this pair table fails.
+    #[test]
+    fn command_labels_match_their_feeding_host_actions() {
+        use crate::host_keys::HostAction;
+
+        let fed: &[(SessionCommand, HostAction)] = &[
+            (SessionCommand::ResetSoft, HostAction::Reset),
+            (SessionCommand::ResetHard, HostAction::HardReset),
+            (SessionCommand::TogglePause, HostAction::TogglePause),
+            (SessionCommand::AdvanceFrame, HostAction::FrameAdvance),
+            (SessionCommand::StepInstruction, HostAction::StepInstruction),
+            (SessionCommand::StepCycle, HostAction::StepCycle),
+            (SessionCommand::StepFrame, HostAction::StepFrame),
+            (SessionCommand::SaveState, HostAction::QuickSave),
+            (SessionCommand::LoadState, HostAction::QuickLoad),
+            (SessionCommand::CaptureFrame, HostAction::Screenshot),
+            (SessionCommand::MovieRecordToggle, HostAction::MovieRecord),
+        ];
+        for (cmd, action) in fed {
+            assert_eq!(
+                meta(cmd).label,
+                action.label(),
+                "{} no longer matches its feeding action",
+                meta(cmd).id
+            );
+        }
+    }
+
     /// Every command has a stable id, and no two share one. The `meta()`
     /// match without a wildcard arm already forces an arm per variant at
     /// compile time; this pins the ids on top.

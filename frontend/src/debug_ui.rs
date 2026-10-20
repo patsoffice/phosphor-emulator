@@ -2164,6 +2164,20 @@ mod tests {
         assert_eq!(live.debug_ticks, 100, "live frames step every cycle");
         assert_eq!(live.run_frames, 0);
 
+        // Live single-step control: one frame is 100 stepped cycles and
+        // holds afterwards, with no `run_frame` call.
+        let mut step_live = FrameSpy {
+            run_frames: 0,
+            debug_ticks: 0,
+        };
+        let mut sl = DebugState::new();
+        sl.active = true;
+        sl.run_mode = RunMode::StepFrame;
+        assert!(execute_frame(&mut step_live, &mut sl, false));
+        assert_eq!(sl.run_mode, RunMode::Paused);
+        assert_eq!(step_live.debug_ticks, 100);
+        assert_eq!(step_live.run_frames, 0);
+
         // The single-step take path routes the same way: one whole frame
         // through `run_frame`, then hold.
         let mut step = FrameSpy {
@@ -2179,6 +2193,54 @@ mod tests {
         assert_eq!(
             step.debug_ticks, 0,
             "take steps must not step cycle-by-cycle either"
+        );
+    }
+
+    /// A set breakpoint does not pause a take frame, but pauses the same
+    /// frame outside a take. The take path runs the whole frame through
+    /// `run_frame` without consulting breakpoints; the live path steps
+    /// cycle-by-cycle and stops at the boundary.
+    #[test]
+    fn take_frame_with_a_set_breakpoint_does_not_pause() {
+        let mut m = bare_machine();
+        assert!(
+            m.cycles_per_frame() > 0,
+            "needs a machine that ticks cycles"
+        );
+        let mut s = DebugState::new();
+        s.active = true;
+
+        // A cycle breakpoint just ahead, plus a PC breakpoint on CPU 0's
+        // live PC when the bus exposes one.
+        s.cycle_breakpoint = Some(s.cycle_count + 10);
+        if let Some(bus) = m.debug_bus()
+            && let Some((_, cpu)) = bus.cpus().first()
+        {
+            s.breakpoints
+                .push(std::collections::HashSet::from([cpu.debug_pc()]));
+        }
+
+        // During a take the frame runs whole: no pause, both breakpoints
+        // still armed afterwards.
+        s.run_mode = RunMode::Running;
+        assert!(execute_frame(&mut *m, &mut s, true));
+        assert_eq!(
+            s.run_mode,
+            RunMode::Running,
+            "a take frame ignores set breakpoints"
+        );
+        assert!(
+            s.cycle_breakpoint.is_some(),
+            "the take consumed no breakpoint"
+        );
+
+        // Control case: the same breakpoints pause a live frame.
+        s.run_mode = RunMode::Running;
+        assert!(!execute_frame(&mut *m, &mut s, false));
+        assert_eq!(
+            s.run_mode,
+            RunMode::Paused,
+            "the same breakpoint pauses outside a take"
         );
     }
 
