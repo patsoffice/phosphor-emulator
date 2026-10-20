@@ -47,7 +47,7 @@ fn load_from_zip(path: &Path) -> Result<RomSet, RomLoadError> {
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(zip_err)?.to_string();
         let mut data = Vec::with_capacity(entry.size() as usize);
         std::io::Read::read_to_end(&mut entry, &mut data)?;
         entries.push((name, data));
