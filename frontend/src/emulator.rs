@@ -1231,7 +1231,10 @@ pub fn run(
                 overlay: screen_overlay.as_ref(),
                 notices: &mut notices,
             };
-            let (cmd_effects, rejections) = commands.drain(&mut drain_ctx, take_mode);
+            // Only `replaying` crosses the drain: the recording half is
+            // re-derived per command, so a stop in the batch unfreezes
+            // the mode for the commands behind it.
+            let (cmd_effects, rejections) = commands.drain(&mut drain_ctx, replaying);
             for r in &rejections {
                 log::error!(
                     "refused {}: {}",

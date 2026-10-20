@@ -284,8 +284,10 @@ pub fn movie_mode(recording: bool, replaying: bool) -> MovieMode {
 `SessionState` owns no execution state: `run_mode`, breakpoints,
 watchpoints (`watchpoints_suspended` included), trace flags, and the
 counters live on `DebugState`, and the drain reaches them through
-`LoopCtx::debug`. The loop derives the mode once per iteration from the
-live capture and playback state and passes it to the drain.
+`LoopCtx::debug`. The loop passes only whether a replay is bound (a replay
+cannot start or end mid-drain); the drain re-derives the mode per command
+from the live capture and that flag, so a stop earlier in the batch
+unfreezes the mode for the commands behind it.
 
 The drain acts through `LoopCtx`: it pushes DIPs to the recorder, renders
 and writes screenshots (overlay applied), performs file IO, and emits log

@@ -420,9 +420,13 @@ impl SessionState {
 
     /// Run every queued command against `ctx`, in order. Enablement is
     /// re-checked per command against a freshly built snapshot, so an
-    /// earlier command cannot stale a later answer. A rebuild ends the
-    /// drain; the rest stays queued for the new machine.
-    pub fn drain(&mut self, ctx: &mut LoopCtx<'_>, mode: MovieMode) -> (Effects, Vec<Rejection>) {
+    /// earlier command cannot stale a later answer. Only `replaying`
+    /// crosses the drain boundary (a replay cannot start or end
+    /// mid-drain); the recording half is re-derived from the live
+    /// capture per command, so a stop unfreezes the mode for the rest
+    /// of the batch. A rebuild ends the drain; the rest stays queued
+    /// for the new machine.
+    pub fn drain(&mut self, ctx: &mut LoopCtx<'_>, replaying: bool) -> (Effects, Vec<Rejection>) {
         let mut effects = Effects {
             resync_input: false,
             rebuild: None,
@@ -432,7 +436,7 @@ impl SessionState {
         while let Some(cmd) = self.queue.pop_front() {
             let snapshot = EnableCtx {
                 has_debug_bus: ctx.machine.debug_bus().is_some(),
-                mode,
+                mode: movie_mode(ctx.movies.is_recording(), replaying),
                 save_file_exists: ctx.save_path.exists(),
                 dip_banks: ctx.machine.dip_banks().len(),
                 paused: paused(ctx.debug),
@@ -594,7 +598,7 @@ impl SessionState {
                         .push_dip(bank as u8, ctx.machine.dip_bank_value(bank));
                 }
                 SessionCommand::MovieRecordToggle => {
-                    if mode == MovieMode::Recording {
+                    if ctx.movies.is_recording() {
                         // Stopping writes the file and stays enabled in
                         // every mode.
                         match ctx.movies.stop() {
@@ -866,7 +870,7 @@ mod tests {
                    machine: &mut dyn FrontendMachine,
                    notices: &mut Notices,
                    movies: &mut MovieCapture,
-                   mode: MovieMode| {
+                   replaying: bool| {
             let mut ctx = LoopCtx {
                 machine,
                 debug,
@@ -877,7 +881,7 @@ mod tests {
                 overlay: None,
                 notices,
             };
-            s.drain(&mut ctx, mode)
+            s.drain(&mut ctx, replaying)
         };
 
         let mut s = SessionState::default();
@@ -893,7 +897,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert_eq!(rejections.len(), 1);
         assert_eq!(meta(&rejections[0].cmd).id, "exec.step_instruction");
@@ -921,7 +925,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert!(rejections.is_empty());
         assert!(!effects.resync_input);
@@ -943,7 +947,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert_eq!(debug.run_mode, RunMode::Paused);
 
@@ -960,7 +964,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert!(debug.breakpoints.iter().any(|set| set.contains(&0x100)));
         assert!(rejections.is_empty());
@@ -974,7 +978,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert_eq!(rejections.len(), 2);
         assert!(
@@ -987,7 +991,10 @@ mod tests {
         // sub-frame step, and a poke are refused with reasons and the
         // machine is untouched; a whole-frame step and a DIP flip stay
         // enabled. The machine is Running here, so pause first: the step
-        // and the flip both need it.
+        // and the flip both need it. The mode derives from the live
+        // capture, so this section arms a real recording.
+        let (nvram, dip) = MovieCapture::starting_conditions(machine.as_mut());
+        movies.arm_fresh(machine.as_mut(), nvram, dip);
         let frames_before = debug.frame_count;
         let cycles_before = debug.cycle_count;
         let dip_ok = !machine.dip_banks().is_empty();
@@ -1011,7 +1018,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Recording,
+            false,
         );
         let refused: Vec<&str> = rejections.iter().map(|r| meta(&r.cmd).id).collect();
         for id in [
@@ -1043,7 +1050,20 @@ mod tests {
         assert_eq!(debug.run_mode, RunMode::StepFrame);
 
         // In Replaying, the DIP flip and arming a recording join the
-        // refused set; pausing stays available.
+        // refused set; pausing stays available. The previous section left
+        // a live recording, so stop it first: the mode derives from the
+        // capture, and a stop writes nothing here (the movies directory
+        // does not exist, which the stop reports instead of failing).
+        s.submit(SessionCommand::MovieRecordToggle);
+        run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            false,
+        );
+        assert!(!movies.is_recording());
         s.submit(SessionCommand::SetDipOption {
             bank: 0,
             option: 0,
@@ -1057,7 +1077,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Replaying,
+            true,
         );
         let refused: Vec<&str> = rejections.iter().map(|r| meta(&r.cmd).id).collect();
         assert!(refused.contains(&"dip.set_option"));
@@ -1084,7 +1104,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert!(rejections.is_empty());
         assert_eq!(debug.run_mode, RunMode::StepFrame);
@@ -1126,7 +1146,7 @@ mod tests {
             machine.as_mut(),
             &mut notices,
             &mut movies,
-            MovieMode::Live,
+            false,
         );
         assert!(rejections.is_empty());
         let after = machine
@@ -1163,7 +1183,7 @@ mod tests {
                 overlay: None,
                 notices: &mut notices,
             };
-            s.drain(&mut ctx, MovieMode::Live)
+            s.drain(&mut ctx, false)
         };
         assert_eq!(save_file.exists(), supports_save);
         if supports_save {
@@ -1203,5 +1223,91 @@ mod tests {
         s.note_debug_panel(true, &mut debug);
         s.note_debug_panel(false, &mut debug);
         assert_eq!(debug.run_mode, RunMode::Paused);
+    }
+
+    /// Stopping a recording unfreezes the mode for the rest of the batch: a
+    /// command behind the stop sees Live, not Recording. Only `replaying`
+    /// crosses the drain boundary; the recording half is re-derived from
+    /// the live capture per command.
+    #[test]
+    fn stop_unfreezes_the_mode_for_the_rest_of_the_batch() {
+        use crate::debug_ui::DebugState;
+        use crate::movie::MovieCapture;
+        use crate::overlay::Notices;
+
+        let mut machine = (phosphor_machines::registry::all()
+            .first()
+            .expect("the registry is not empty")
+            .create_bare)();
+        let mut debug = DebugState::new();
+        let mut notices = Notices::default();
+        let dir = std::env::temp_dir().join(format!("phosphor_drain_mode_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut movies = MovieCapture::new(&dir, "test", "test", [0u8; 32]);
+        let save_path = dir.join("quick.save");
+
+        // Arm a real recording so the mode derives Recording.
+        let (nvram, dip) = MovieCapture::starting_conditions(machine.as_mut());
+        movies.arm_fresh(machine.as_mut(), nvram, dip);
+        assert!(movies.is_recording());
+
+        let run = |s: &mut SessionState,
+                   debug: &mut DebugState,
+                   machine: &mut dyn FrontendMachine,
+                   notices: &mut Notices,
+                   movies: &mut MovieCapture,
+                   replaying: bool| {
+            let mut ctx = LoopCtx {
+                machine,
+                debug,
+                save_path: &save_path,
+                screenshot_dir: &dir,
+                machine_name: "test",
+                movies,
+                overlay: None,
+                notices,
+            };
+            s.drain(&mut ctx, replaying)
+        };
+
+        // [stop, poke]: the poke must not see Recording.
+        let mut s = SessionState::default();
+        s.submit(SessionCommand::MovieRecordToggle);
+        s.submit(SessionCommand::PokeMemory {
+            cpu: 0,
+            addr: 0x200,
+            value: 0xAA,
+        });
+        let (_, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            false,
+        );
+        assert!(
+            !rejections.iter().any(|r| r.reason.contains("recording")),
+            "the poke behind a stop must see Live: {rejections:?}"
+        );
+
+        // [stop, toggle]: the second toggle arms instead of stopping twice.
+        let (nvram, dip) = MovieCapture::starting_conditions(machine.as_mut());
+        movies.arm_fresh(machine.as_mut(), nvram, dip);
+        let mut s = SessionState::default();
+        s.submit(SessionCommand::MovieRecordToggle);
+        s.submit(SessionCommand::MovieRecordToggle);
+        let (effects, rejections) = run(
+            &mut s,
+            &mut debug,
+            machine.as_mut(),
+            &mut notices,
+            &mut movies,
+            false,
+        );
+        assert!(rejections.is_empty(), "{rejections:?}");
+        assert_eq!(effects.rebuild, Some(Rebuild::MovieArm));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
