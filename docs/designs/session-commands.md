@@ -599,14 +599,20 @@ No big-bang frontend rewrite. Call sites change shape one slice at a time.
   way: arm, one frame, hold.
 * Frame-path equivalence (separate beads issue): a registry-driven test in
   `phosphor-harness` runs N frames via `run_frame()` and N frames via
-  `cycles_per_frame() x debug_tick()` per machine and compares
-  `save_state()` bytes plus the drained audio. ROM-gated via
-  `PHOSPHOR_ROMS`: on blank ROMs the CPUs spin on filler opcodes and both
-  paths agree without exercising video, interrupts, or sound timing, so a
-  ROM-less version proves nothing. Sensitivity is proven by showing the
-  test fails against a deliberate divergence. Failures are classified
-  after diagnosis, not in advance: a divergence is not excused as a
-  renderer artifact until someone has shown it is one.
+  `cycles_per_frame() x debug_tick()` per machine from the same snapshot
+  (plus a second `run_frame` run as the determinism control). The gate
+  pins what the paths must share: the control agrees and every CPU ends
+  the window at the same program counter on both paths. `save_state()`
+  bytes and the drained audio are measured per machine as diagnostics, not
+  gates: frame housekeeping that stepping deliberately skips (sound
+  advance and mixing, watchdog accounting, NMI and sound-reset servicing)
+  legitimately differs between the paths. ROM-gated via `PHOSPHOR_ROMS`:
+  on blank ROMs the CPUs spin on filler opcodes and both paths agree
+  without exercising video, interrupts, or sound timing, so a ROM-less
+  version proves nothing. Sensitivity is proven by showing the test fails
+  against a deliberate divergence (`PHOSPHOR_FRAME_PATH_DIVERGE`). A CPU
+  divergence is not excused as scaffolding until the end PCs are shown
+  to agree.
 * The `HostAction` round trip lives in the frontend crate, since the mapping
   lives there.
 * Gameplay input preserved: existing `input` tests plus an unchanged
