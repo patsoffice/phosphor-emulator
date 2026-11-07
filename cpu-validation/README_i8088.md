@@ -2,8 +2,8 @@
 
 Validates phosphor-core's I8088 implementation against
 [SingleStepTests/8088](https://github.com/SingleStepTests/8088), a
-community-standard test suite with ~1000 randomized test vectors per opcode
-sequence, testing all registers, flags, and memory state.
+community-standard test suite with about 9,200 randomized test vectors per
+opcode file on average, testing all registers, flags, and memory state.
 
 ## Results
 

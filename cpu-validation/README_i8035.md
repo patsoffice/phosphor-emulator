@@ -23,22 +23,15 @@ make -C cross-validation bin/validate_i8035
 cargo run -p phosphor-cpu-validation --release --bin gen_i8035_tests -- all
 ```
 
-### Vendoring MAME MCS-48
+### MAME 0.148 source
 
-The cross-validation harness requires MAME's MCS-48 source vendored into
-`cross-validation/mcs48/` with a shim header (`mcs48/mame_shim.h`) exposing:
-
-```c
-void mcs48_reset();
-void mcs48_set_reg(int reg, unsigned val);
-unsigned mcs48_get_reg(int reg);
-int mcs48_execute(int cycles);
-uint8_t mcs48_internal_ram[256];
-uint8_t mcs48_program_memory[4096];
-```
-
-Until the MAME source is vendored, the harness compiles and runs but passes
-all tests trivially (placeholder mode).
+The cross-validation harness builds against MAME 0.148, shallow-cloned to
+`cross-validation/mame0148/` (gitignored, see
+[cross-validation/README.md](../../cross-validation/README.md)), with the
+local shim in `cross-validation/mcs48_0148/` (`emu.h`, `debugger.h`) plus
+`cross-validation/mame0148_shim.h`.
+`validate_i8035.cpp` links MAME's `mcs48.c` directly as the reference
+emulator; there is no placeholder mode.
 
 ## Usage
 
@@ -131,18 +124,18 @@ Output: `cpu-validation/test_data/i8035/<opcode>.json` (e.g., `68.json`,
 
 | Category | Count | Examples |
 |----------|-------|----------|
-| ALU (register) | 60 | ADD A,Rn, ADDC A,@Ri, ANL, ORL, XRL |
+| ALU (register) | 50 | ADD A,Rn, ADDC A,@Ri, ANL, ORL, XRL |
 | ALU (immediate) | 5 | ADD A,#data, ANL A,#data |
 | Accumulator unary | 10 | INC A, DEC A, CLR A, DA A, RL, RRC |
 | Register INC/DEC | 18 | INC Rn, INC @Ri, DEC Rn |
-| Data movement | 35 | MOV A,Rn, XCH, XCHD, MOV A,T, MOV PSW,A |
+| Data movement | 36 | MOV A,Rn, XCH, XCHD, MOV A,T, MOV PSW,A |
 | Immediate loads | 11 | MOV A,#data, MOV Rn,#data, MOV @Ri,#data |
 | External memory | 4 | MOVX A,@Ri, MOVX @Ri,A |
 | Program memory | 2 | MOVP A,@A, MOVP3 A,@A |
 | Port I/O | 6 | IN A,P1, INS A,BUS, OUTL P1,A |
 | Port RMW | 6 | ORL BUS,#data, ANL P1,#data |
 | Expander ports | 16 | MOVD A,Pp, MOVD Pp,A, ORLD, ANLD |
-| Jumps/calls | 17 | JMP, CALL, JMPP @A, RET, RETR |
+| Jumps/calls | 19 | JMP, CALL, JMPP @A, RET, RETR |
 | Conditional jumps | 20 | JC, JZ, JT0, JNI, JBb |
 | DJNZ | 8 | DJNZ Rn,addr |
 | Status flags | 6 | CLR C, CPL F0, CLR F1 |

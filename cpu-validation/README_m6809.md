@@ -220,21 +220,28 @@ Output: `cpu-validation/test_data/m6809/<opcode>.json` (e.g., `86.json`,
 
 ## Opcode Coverage
 
-266 opcodes across 3 pages:
+266 opcodes validated across 3 pages (the core implements 285: 238 + 38 + 9):
 
 | Page | Prefix | Count | Examples |
 |------|--------|-------|----------|
-| Page 1 | (none) | 238 | LDA, ADDA, BRA, JSR, TFR, EXG |
-| Page 2 | 0x10 | 19 | CMPD, CMPY, LDY, STY, LDS, STS, long branches, SWI2 |
+| Page 1 | (none) | 219 | LDA, ADDA, BRA, JSR, TFR, EXG |
+| Page 2 | 0x10 | 38 | CMPD, CMPY, LDY, STY, LDS, STS, long branches, SWI2 |
 | Page 3 | 0x11 | 9 | CMPU, CMPS, SWI3 |
 
-## Excluded Opcodes (2)
+## Excluded Opcodes (19)
 
-These opcodes are excluded because they halt the CPU waiting for an interrupt,
-which cannot complete in single-step validation with no interrupt sources:
+285 implemented minus 266 validated. Three groups:
 
-- **SYNC (0x13)** — halts CPU until any interrupt
-- **CWAI (0x3C)** — pushes entire state, masks CC, halts until interrupt
+- **Halt (2).** Excluded because they wait for an interrupt, which cannot
+  complete in single-step validation with no interrupt sources:
+  **SYNC (0x13)** halts until any interrupt; **CWAI (0x3C)** pushes entire
+  state, masks CC, halts until interrupt.
+- **Page prefixes (2).** `0x10` and `0x11` switch opcode pages; they are not
+  instructions in their own right.
+- **Undocumented aliases (15).** The core implements these as the neighboring
+  documented operation, but no vectors cover them: direct `0x01`, `0x05`,
+  `0x0B`; A-side `0x41`, `0x45`, `0x4B`; B-side `0x51`, `0x55`, `0x5B`;
+  indexed `0x61`, `0x65`, `0x6B`; extended `0x71`, `0x75`, `0x7B`.
 
 ## Self-Validation
 

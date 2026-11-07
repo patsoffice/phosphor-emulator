@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-5258%20passing-brightgreen.svg)](core/tests/)
+[![Tests](https://img.shields.io/badge/tests-5610%20passing-brightgreen.svg)](core/tests/)
 
 A modular emulator framework for retro CPUs, designed for extensibility and educational purposes. Features a trait-based architecture that allows easy addition of new CPUs, peripherals, and complete systems.
 
@@ -15,14 +15,14 @@ This is purely a project for fun and experimentation as a cycle-accurate emulato
 ### Prerequisites
 
 - Rust 1.85+ and Cargo. 1.85 is the floor the 2024 edition sets. CI builds and
-  tests on **1.97.1** and again on current stable, so versions in between are
+  tests on **1.98.1** and again on current stable, so versions in between are
   untested rather than known-good.
 - SDL2, for the frontend only (`brew install sdl2` on macOS). The core and
   machines crates have no external C dependencies, so `cargo test -p
   phosphor-core` needs nothing installed.
 
 **Optional: a Nix dev shell.** `flake.nix` pins the toolchain, SDL2, clang,
-pkg-config, libGL and the other build tools, and provides the same 1.97.1 that
+pkg-config, libGL and the other build tools, and provides the same 1.98.1 that
 CI pins, so a clean local `clippy` and a clean CI `clippy` mean the same thing.
 It is a convenience rather than a requirement; a system Rust and SDL2 work fine.
 
@@ -230,7 +230,7 @@ Complete system implementations that wire core components together:
 - **AsteroidsDeluxeSystem**: Asteroids Deluxe on the Asteroids vector board (M6502 + DVG + the 4-bit bank-switched EAROM and its state machine)
 - **ZaxxonSystem**: Sega Zaxxon (Z80 + the shared `sega_zaxxon.rs` video engine + twelve discrete analog sound voices, see [docs/schematics/zaxxon-discrete-sound.md](docs/schematics/zaxxon-discrete-sound.md))
 - **CongoBongoSystem**: Congo Bongo on the same Sega video engine, with its own discrete percussion
-- Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, SimpleI8035System, Simple68000System (test harnesses; all are aliases of the generic `SimpleSystem<C>` in `simple_system.rs`)
+- Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, SimpleI8035System, Simple68000System (test harnesses; all are aliases of the generic `SimpleSystem<C>` in `simple_system.rs`, except Simple68000System, which is `SimpleSystem68k<M68000>` for the 16-bit bus)
 
 This list is curated and the registry is the authority. For the full set, which
 is what `--machine` accepts:
@@ -260,23 +260,25 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 
 [SingleStepTests](https://github.com/SingleStepTests/65x02)-style test infrastructure for validating CPU implementations against randomized test vectors with cycle-by-cycle bus traces. Cross-validates against independent reference emulators to catch flag, timing, and behavioral bugs.
 
-- **M6809**: 285 opcodes across 3 opcode pages, 266,000 test vectors, cross-validated against [elmerucr/MC6809](https://github.com/elmerucr/MC6809) and [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) M6809. See [cpu-validation/README_m6809.md](cpu-validation/README_m6809.md).
-- **M6800**: 197 opcodes, 192,000 test vectors over the 192 that are validated (5 are excluded, and the per-CPU README says which and why), cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) M6800. See [cpu-validation/README_m6800.md](cpu-validation/README_m6800.md).
+- **M6809**: 285 opcodes implemented across 3 opcode pages, 266,000 test vectors over the 266 validated (219/38/9 per page; 19 excluded, and the per-CPU README says which and why), cross-validated against MAME 0.148. See [cpu-validation/README_m6809.md](cpu-validation/README_m6809.md).
+- **M6800**: 197 opcodes, 192,000 test vectors over the 192 that are validated (5 are excluded, and the per-CPU README says which and why), cross-validated against MAME 0.148. See [cpu-validation/README_m6800.md](cpu-validation/README_m6800.md).
 - **M6502**: 151 opcodes, 1,510,000 test vectors, validated against [SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) with cycle-by-cycle bus traces. See [cpu-validation/README_m6502.md](cpu-validation/README_m6502.md).
 - **Z80** — 1604 opcodes, 1,604,000 test vectors, validated against [SingleStepTests/z80](https://github.com/SingleStepTests/z80) with full register/flag/timing verification. See [cpu-validation/README_z80.md](cpu-validation/README_z80.md).
-- **I8035** — 229 opcodes, 229,000 test vectors, cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) MCS-48. See [cpu-validation/README_i8035.md](cpu-validation/README_i8035.md).
+- **I8035** — 229 opcodes, 229,000 test vectors, cross-validated against MAME 0.148 MCS-48. See [cpu-validation/README_i8035.md](cpu-validation/README_i8035.md).
 - **I8088** — 279 opcodes, 2,577,000 test vectors, validated against [SingleStepTests/8088](https://github.com/SingleStepTests/8088) with full register/flag/memory verification. See [cpu-validation/README_i8088.md](cpu-validation/README_i8088.md).
-- **M68000**: complete instruction set (74 mnemonics), validated against two independently generated suites: [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) for state, 1,000,058 vectors (every file, every vector incl. address-error aborts), and [SingleStepTests/m68000](https://github.com/SingleStepTests/m68000) for the per-cycle bus trace, exact on instruction length across all 317,500 cases and 98.48% on transfer placement, with 126 of its 127 instructions exact on both. The 68010 variant's timing is datasheet-derived and has no oracle. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
+- **M68000**: complete instruction set (74 mnemonics), validated against two independently generated suites: [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) for state, 1,000,058 vectors (every file, every vector incl. address-error aborts), and [SingleStepTests/m68000](https://github.com/SingleStepTests/m68000) for the per-cycle bus trace, exact on instruction length across all 317,500 cases and 98.48% on transfer placement, with 126 of its 127 instructions exact on both (every vector compared except 2 known-bad ASL.b skips). The 68010 variant's timing is datasheet-derived and has no oracle. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
+- **MB88xx** — 256 opcodes, 256,000 test vectors, cross-validated against MAME 0.148 (256,000/256,000). See [cpu-validation/README_mb88xx.md](cpu-validation/README_mb88xx.md).
 
 ### Cross-Validation (`cross-validation/`)
 
 C++ harnesses that validate phosphor-core's test vectors against independent reference emulators. Compares registers, memory, and cycle counts.
 
-- **M6809** — 266,000/266,000 tests pass (100%) vs elmerucr/MC6809; 261,601/266,000 (98.3%) vs mame4all
-- **M6800** — 191,996/192,000 tests pass (99.998%) vs mame4all
+- **M6809** — 264,090/266,000 tests pass (99.28%) vs MAME 0.148 (DAA flag, EXG/TFR undefined-register, and indexed cycle-table divergences; the per-CPU README reports its own run)
+- **M6800** — 192,000/192,000 tests pass (100%) vs MAME 0.148 (CC bits 6-7 masked as undefined)
 - **M6502** — 1,510,000/1,510,000 tests pass (100%) — via SingleStepTests/65x02 reference vectors
 - **Z80** — 1,604,000/1,604,000 tests pass (100%) — via SingleStepTests/z80 reference vectors
-- **I8035** — 221,000/225,000 tests pass (98.2%) vs mame4all (4 ANLD opcodes excluded due to known MAME bug)
+- **I8035** — 228,966/229,000 tests pass (99.985%) vs MAME 0.148 (PSW bit 3 masked; 34 DA A failures from a MAME carry bug)
+- **MB88xx** — 256,000/256,000 tests pass (100%) vs MAME 0.148
 - **I8088** — 2,577,000/2,577,000 tests pass (100%) — via SingleStepTests/8088 reference vectors
 
 ### Golden Frames (`harness/tests/golden/`)
@@ -285,16 +287,18 @@ Frame-level regression testing: what each machine is supposed to *look like*.
 Every registered machine has a pinned frame — a machine name, a frame count, a
 prose description of the picture, a SHA-256 of the rendered RGB frame (plus the
 vector display list for the vector games), and a committed reference PNG.
+Where no frame can be captured at all, the entry is `[[unpinned]]` with
+a reason instead.
 
 ```bash
 # Compare every machine against its pinned frame (needs ROMs)
-cargo test -p phosphor-harness --test golden_frame_test -- --ignored
+cargo test -p phosphor-harness --test golden_frame_test
 
 # Recapture after an intended rendering change, then review the image diff
-PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness --test golden_frame_test -- --ignored
+PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness --test golden_frame_test
 
 # One machine at a time, for bisecting or a single refresh
-PHOSPHOR_GOLDEN_ONLY=galaga cargo test -p phosphor-harness --test golden_frame_test -- --ignored
+PHOSPHOR_GOLDEN_ONLY=galaga cargo test -p phosphor-harness --test golden_frame_test
 ```
 
 The machines are emulated on every core: one board's frame cannot affect
@@ -308,14 +312,10 @@ drawn one line high, a scroll latch read from the wrong register. On a mismatch
 the actual frame is written to `harness/tests/golden/actual/` for `disasm
 imgdiff`. See [docs/designs/frame-regression.md](docs/designs/frame-regression.md).
 
-> **The frame comparison is currently `#[ignore]`d** while the vector renderer is
-> being reworked, so it does not run unless asked for by name. The rest of the
-> file still runs: the pins are checked against the reference PNGs, every
-> registered machine is checked for having one, and a hand-edited hash still
-> fails without ROMs. Whether the comparison is re-enabled, narrowed to the
-> raster machines, or retired is tracked as `phosphor-emulator-gr27`; the vector
-> machines may be better served by the display-list hash alone, which is
-> renderer-independent.
+> Two machines are currently `[[unpinned]]`: donkeykongjunior, whose named
+> ROM revision is in neither ZIP the reference collection supplies, and
+> lunarba1, whose ROM set is not in the collection. Pin each once a matching
+> dump is available.
 
 ### Discrete Audio Coverage (`tools/sound-compare/targets.toml`)
 
@@ -403,8 +403,8 @@ phosphor-emulator/
 ├── frontend/                    # phosphor-frontend — SDL2 + egui windowed emulator
 │   └── src/                     #   Main loop, video, audio, input, debug panel, overlay
 ├── cpu-validation/              # phosphor-cpu-validation — test vector generation & validation
-│   ├── src/bin/                 #   Test generators (M6809, M6800, I8035)
-│   ├── tests/                   #   Single-step validators (M6809, M6800, M6502, Z80, I8088)
+│   ├── src/bin/                 #   Test generators (M6809, M6800, I8035, MB88xx)
+│   ├── tests/                   #   Single-step validators (all eight CPUs) + cycle/multiply/transfer-timing suites
 │   └── test_data/               #   Generated vectors + SingleStepTests submodules
 ├── harness/                     # phosphor-harness — headless boot + ROM-path resolver
 ├── tools/                       # standalone CLIs built on the core crates
