@@ -117,10 +117,13 @@ And one that must be struck from the list rather than carried along:
   Runner's image replaces the motherboard BIOS rather than the cartridge.
   Ordinary work for anyone with a programmer, and the largest practical barrier
   is simply owning the board.
-- **The Atari System 1 slapstic.** The conformance image sits in the motherboard
-  BIOS region and the program never touches `080000-087FFF`, so it should not
-  engage the slapstic at all. "Should" is doing work in that sentence and it
-  wants checking before anyone burns anything.
+- **The Atari System 1 slapstic.** Checked under `phosphor-emulator-9sr9.1`:
+  the image sits in the motherboard BIOS sockets (reset vectors at 0, per MAME's
+  `MOTHERBOARD_BIOS` and our manifest) and no instruction touches `080000-087FFF`
+  (audited address constants; MAME steps the slapstic only on accesses inside
+  that window, from idle at bank 3). An idle slapstic needs no sequencing. Burn
+  note: the BIOS sockets are 16 KB and the image is 8 KB, so duplicate the image
+  into both halves of each 27128 and A13 stops mattering.
 - **The display path is under test when the display is the output.** For the
   timing assertions that is fine, because they are measured into RAM before
   anything is drawn. For the picture questions it is not a problem but a
@@ -145,8 +148,12 @@ Filed under `phosphor-emulator-9sr9`:
 
 1. `9sr9.1` confirm the Road Runner image is slapstic-safe, because it gates the
    item with the highest value.
-2. `9sr9.2` Williams on-screen results and button paging, verified under our
-   emulator and MAME by screenshot before anyone burns a ROM.
+2. `9sr9.2` Williams on-screen results and button paging: **done**. One source
+   behind `-D HWBUILD=1`, drift guard covering all three images, display and
+   paging tests green, both pages screenshotted under our emulator and
+   reviewed. The MAME screenshot cross-check was not run (no `mame` binary in
+   this environment), so it stays open for whoever has one. Burn
+   `machines/tests/roms/williams_video_hw.bin`, linked at `$D000`.
 3. `9sr9.3` Road Runner the same, using the cartridge font.
 
 The order is deliberate: (1) is research and cheap, and (2) is the board we have

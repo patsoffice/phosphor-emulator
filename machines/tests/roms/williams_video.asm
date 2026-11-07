@@ -8,6 +8,16 @@
 ;   asl -q -D ROMBASE=0xE000 -o williams_video_e000.p williams_video.asm
 ;   p2bin williams_video_e000.p williams_video_e000.bin -r 0xE000-0xFFFF -l 0x00
 ;
+; Hardware build (phosphor-emulator-9sr9.2): the same program plus an on-screen
+; readout of the result block behind an assembly-time flag, so the tested build
+; and the hardware build stay one source:
+;   asl -q -D HWBUILD=1 -o williams_video_hw.p williams_video.asm
+;   p2bin williams_video_hw.p williams_video_hw.bin -r 0xD000-0xFFFF -l 0x00
+;
+; With the flag off every HW block assembles to nothing, and the default image
+; must stay byte-identical: assemble it and cmp against the committed binary
+; after any edit, HW or otherwise.
+;
 ; Both tools are in the Nix dev shell. p2bin's -r selects the program-ROM window
 ; and -l zero-fills the gap between the code and the vector table, which is what
 ; makes each image flat and copyable byte for byte.
@@ -133,6 +143,12 @@ RESLEN      equ 32
 ; below $C000, so relocating the code is the whole difference.
             ifndef  ROMBASE
 ROMBASE     equ     $D000
+            endif
+
+; Hardware display build: -D HWBUILD=1. Off by default, and every block it
+; guards assembles to nothing when off, so the default image cannot drift.
+            ifndef  HWBUILD
+HWBUILD     equ     0
             endif
 
             org     ROMBASE
@@ -534,6 +550,9 @@ Done
             sta     R_PHASE
             lda     #$5A
             sta     R_MAGIC
+            if      HWBUILD
+            jmp     HwShow              ; render results, poll the button
+            endif
 Spin
             jsr     PetDog
             bra     Spin
@@ -633,6 +652,289 @@ IrqFull
 ; happens to be at the vector.
 StrayIrq
             rti
+
+            if      HWBUILD
+; ===========================================================================
+; Hardware build: on-screen results and button paging (HWBUILD=1 only)
+;
+; After Done publishes the magic byte, this renders the 22 result bytes as hex
+; beside their expectations and polls a start button to page and re-run. It
+; only READS the result block, so the block stays byte-identical with the
+; tested build; re-run jumps to Reset, which re-clears the block, so a wedge
+; still reads as a wedge.
+;
+; Numbers, never PASS: every page shows raw hex, including magic and phase in
+; the header row, so a wedged run is legible as one on any page. One pen
+; throughout (pen 1 on pen 0): no meaning rides on colour.
+;
+; Williams is a bitmap board with no character generator, so the ROM carries
+; sixteen 8x8 one-bit glyphs (128 bytes), drawn at 2x through plain CPU stores.
+; VRAM is column-major (column*256 + row) and a byte holds two 4-bit pixels,
+; so one font pixel is one byte, and a glyph row is 8 bytes stepped one column
+; ($100) at a time; each row is drawn twice for the 2x height. The blitter is
+; left alone once the tests are done.
+;
+; Layout: 9 cells by 12 rows. A cell is 9 font columns (8 + 1 gap) by 18
+; screen rows (16 + 2 gap), so the page is 81 font columns (162 screen pixels)
+; by 216 rows, at VRAM columns $23-$73 and rows $13-$E9 (screen x 64-225,
+; rows 12-227). Row 0 is the header (magic, phase actuals); rows 1-11 are
+; index, expected, actual triplets for 11 of the 22 result bytes, page 0
+; covering indices 0-10 and page 1 indices 11-21. Pages identify themselves by
+; their index column; no page number is rendered.
+;
+; The dwell bytes (indices 5, 6) carry no exact expectation: the harness checks
+; their ratio, not their value, and the same holds on hardware, where the ratio
+; is the finding (about 2 where the counter aliases, about 1 where it
+; saturates). HwExact marks them and the renderer leaves those expected cells
+; blank rather than printing a number that could never match.
+;
+; Button: Widget PIA port A at $C804, bits 4-5, active high. Those are the two
+; start buttons on Joust (P1 = bit 5) and Robotron (P1 = bit 4), so either
+; cabinet's 1P start pages. The PIA comes out of reset with DDRAs as inputs;
+; only control bit 2 is set, selecting the data register with IRQs off. A press
+; advances the page, a press on the last page re-runs the program; press and
+; release are each settled over a frame boundary so contact bounce cannot skip.
+; ===========================================================================
+
+WIDGET_PRA  equ $C804           ; Widget PIA port A: player inputs, active high
+WIDGET_CRA  equ $C805           ; ... control A: bit 2 selects data register
+BTN_START   equ $30             ; either start button (bits 4-5)
+
+HWPAGE      equ $0B             ; displayed page (0/1); cleared in HwShow
+HWBIT       equ $0C             ; pixel counter for DxRun
+HWIDX       equ $0D             ; result index HwHasExp reads
+HWROW       equ $0E             ; text row counter for DrawPage
+
+TX_COL0     equ $23             ; first text column (screen x 64)
+TX_ROW0     equ $13             ; first text row (screen row 12)
+TX_CLEARW   equ 81              ; text region width in VRAM columns
+TX_CLEARH   equ 216             ; ... and height in rows (12 rows x 18)
+
+; Expected results, one byte per result-block index 0-21. Mirrors the harness
+; contract in williams_video_timing_test.rs; indices 5-6 are don't-cares (see
+; HwExact) and read $00.
+HwExpect    fcb $5A,$0A,$40,$01,$FC,$00,$00,$01,$F0,$04
+            fcb $20,$60,$A0,$E0,$03,$40,$80,$C0,$10,$20,$EE,$00
+
+; Bit i set = result byte i has an exact expectation. Bits 5,6 clear (dwell
+; ratio): byte 0 = $FF with $60 cleared = $9F.
+HwExact     fcb $9F,$FF,$3F
+
+; Sixteen 8x8 glyphs, bit 7 = leftmost pixel, seven ink rows + one blank.
+HwFont
+            fcb $3C,$66,$6E,$7E,$76,$66,$3C,$00     ; 0
+            fcb $18,$38,$18,$18,$18,$18,$7E,$00     ; 1
+            fcb $3C,$66,$06,$0C,$30,$60,$7E,$00     ; 2
+            fcb $7E,$0C,$18,$0C,$06,$66,$3C,$00     ; 3
+            fcb $0C,$1C,$3C,$6C,$7E,$0C,$0C,$00     ; 4
+            fcb $7E,$60,$7C,$06,$06,$66,$3C,$00     ; 5
+            fcb $3C,$66,$60,$7C,$66,$66,$3C,$00     ; 6
+            fcb $7E,$66,$0C,$18,$18,$18,$18,$00     ; 7
+            fcb $3C,$66,$66,$3C,$66,$66,$3C,$00     ; 8
+            fcb $3C,$66,$66,$3E,$06,$66,$3C,$00     ; 9
+            fcb $3C,$66,$66,$7E,$66,$66,$66,$00     ; A
+            fcb $7C,$66,$66,$7C,$66,$66,$7C,$00     ; B
+            fcb $3C,$66,$60,$60,$60,$66,$3C,$00     ; C
+            fcb $78,$6C,$66,$66,$66,$6C,$78,$00     ; D
+            fcb $7E,$60,$60,$7C,$60,$60,$7E,$00     ; E
+            fcb $7E,$60,$60,$7C,$60,$60,$60,$00     ; F
+
+HwShow
+            orcc    #$10                ; mask IRQ: the edge handler is done
+            clr     <HWPAGE              ; re-runs restart on page 0
+            lda     #$04
+            sta     WIDGET_CRA          ; port A reads inputs, IRQs stay off
+            jsr     HwClear
+            jsr     DrawPage
+HwBtn
+            jsr     PetDog
+            lda     WIDGET_PRA
+            anda    #BTN_START
+            beq     HwBtn               ; wait for a start button
+            jsr     WaitWrap            ; settle a frame: still held?
+            jsr     PetDog
+            lda     WIDGET_PRA
+            anda    #BTN_START
+            beq     HwBtn               ; bounce, ignore
+HwRel
+            jsr     PetDog
+            lda     WIDGET_PRA
+            anda    #BTN_START
+            bne     HwRel               ; wait for release
+            jsr     WaitWrap            ; settle a frame: still released?
+            jsr     PetDog
+            lda     WIDGET_PRA
+            anda    #BTN_START
+            bne     HwRel               ; bounce, keep waiting
+            lda     <HWPAGE
+            bne     HwRerun             ; last page: re-run the whole program
+            inc     <HWPAGE
+            jsr     HwClear
+            jsr     DrawPage
+            bra     HwBtn
+HwRerun
+            jmp     Reset               ; ClrRes runs again, wedge reads as wedge
+
+; Clear the text region to pen 0, one VRAM column per watchdog pet. VRAM is
+; column-major (column*256 + row), so a column is 216 consecutive stores.
+HwClear
+            pshs    a,y
+            clra
+            ldy     #TX_CLEARW
+            ldx     #TX_COL0*256+TX_ROW0
+HwClrCol
+            pshs    x
+            ldb     #TX_CLEARH
+HwClrRow
+            clr     ,x+
+            decb
+            bne     HwClrRow
+            puls    x
+            jsr     PetDog
+            leax    $100,x              ; next column, same first row
+            leay    -1,y
+            bne     HwClrCol
+            lda     #$BB                ; TMP MARKER: clear done
+            sta     RES+23
+            puls    a,y,pc
+
+; Render the current page: header (magic, phase) plus 11 index/expected/
+; actual triplets starting at index 0 (page 0) or 11 (page 1).
+DrawPage
+            pshs    a,b,x,y
+            lda     #$CC                ; TMP MARKER: draw started
+            sta     RES+24
+            ldx     #TX_COL0*256+TX_ROW0
+            lda     R_MAGIC
+            jsr     DrawByte            ; header cells 0-1
+            leax    $900,x              ; cell 3
+            lda     R_PHASE
+            jsr     DrawByte            ; header cells 3-4
+            lda     <HWPAGE
+            beq     HwPg0
+            lda     #11
+            bra     HwPgIdx
+HwPg0
+            clra
+HwPgIdx
+            sta     <HWIDX
+            lda     #1
+            sta     <HWROW
+HwRowLoop
+            lda     <HWROW
+            ldb     #18
+            mul                           ; D = row*18 (rows are 18 apart)
+            ldx     #TX_COL0*256+TX_ROW0
+            leax    d,x
+            stx     RES+27                ; TMP MARKER: row-start X
+            lda     <HWIDX
+            jsr     DrawByte            ; index digits, cells 0-1
+            leax    $900,x              ; cell 3
+            ldb     <HWIDX
+            jsr     HwHasExp            ; Z set = no exact expectation
+            beq     HwNoExp
+            ldy     #HwExpect
+            ldb     <HWIDX
+            lda     b,y
+            jsr     DrawByte            ; expected digits, cells 3-4
+            bra     HwGotExp
+HwNoExp
+            leax    $1200,x             ; blank cell pair, cells 3-4 stay clear
+HwGotExp
+            leax    $900,x              ; cell 6
+            ldy     #RES
+            ldb     <HWIDX
+            lda     b,y
+            jsr     DrawByte            ; actual digits, cells 6-7
+            inc     <HWIDX
+            inc     <HWROW
+            lda     <HWROW
+            cmpa    #12
+            bne     HwRowLoop
+            lda     #$DD                ; TMP MARKER: draw done
+            sta     RES+25
+            puls    a,b,x,y,pc
+
+; B = result index 0-21 (read from HWIDX so no register juggling). Z set on
+; return = no exact expectation (draw the expected cells blank). Preserves
+; A,B,X,Y; the Z flag survives the pulls (PULS leaves CC alone).
+HwHasExp
+            pshs    a,b,y
+            ldb     <HWIDX
+            lsrb
+            lsrb
+            lsrb                        ; B = mask byte offset 0-2
+            ldy     #HwExact
+            lda     b,y                 ; A = mask byte
+            ldb     <HWIDX
+            andb    #$07                 ; B = bit number
+            beq     HwHeOut
+HwHeSh
+            lsra
+            decb
+            bne     HwHeSh
+HwHeOut
+            anda    #$01
+            puls    a,b,y,pc
+
+; A = byte value. Draws hi,lo hex digits at X and X+$900; X advances $1200
+; (two cells). Clobbers A; preserves B,Y.
+DrawByte
+            pshs    a
+            lsra
+            lsra
+            lsra
+            lsra
+            jsr     DrawHex
+            leax    $900,x
+            puls    a
+            anda    #$0F
+            jsr     DrawHex
+            leax    $900,x
+            rts
+
+; A = hex digit 0-15. X = cell top-left VRAM address. Draws the 8x8 glyph at
+; 2x: 8 bytes across one screen row per font row, each row drawn twice (the
+; second pass is the row below, so the glyph is 16 rows tall). Preserves A,X;
+; clobbers B,Y,HWBIT.
+DrawHex
+            pshs    a,b,x,y
+            ldb     #8
+            mul                           ; D = digit*8
+            ldy     #HwFont
+            leay    d,y
+            ldb     #8                    ; 8 font rows
+DxRowLp
+            pshs    b                     ; row counter (B holds the font below)
+            ldb     ,y+
+            bsr     DxRowPair             ; rows R,R+1; X unchanged
+            leax    2,x                   ; next font row starts 2 rows down
+            puls    b
+            decb
+            bne     DxRowLp
+            puls    a,b,x,y,pc
+
+; B = font byte, bit 7 first. X = screen-row address. Writes 8 bytes across
+; the row (one per font pixel, both nibbles one pen) at columns X..X+$700,
+; then the same 8 bytes on the row below (2x tall). X is preserved for the
+; caller. Clobbers A,B,HWBIT.
+DxRowPair
+            pshs    x                     ; save the row origin
+            lda     #8
+            sta     <HWBIT
+DxRowPx
+            lslb                          ; pixel into carry, 0 into bit 0
+            lda     #$11                  ; pen 1, both nibbles
+            bcs     DxRowInk
+            clra                          ; pen 0
+DxRowInk
+            sta     ,x                    ; row R
+            sta     1,x                   ; row R+1
+            leax    $100,x                ; next column, same row
+            dec     <HWBIT
+            bne     DxRowPx
+            puls    x,pc
+            endif
 
 ; ===========================================================================
 ; Vectors

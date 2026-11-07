@@ -491,10 +491,14 @@ new phase in the ROM rather than a relocation of the existing one.
   binary than either alone. The port needed only three changes — a `cpu 6809`
   directive, `setdp $00` becoming `assume dpr:$00`, and `zmb $FFF0-*` giving way
   to `org $FFF0` with p2bin's `-r`/`-l` doing the zero fill.
-- **Committed artifacts:** `machines/tests/roms/williams_video.asm` (source) and
-  `machines/tests/roms/williams_video.bin` (12 KB image), both in git.
-- **Drift guard:** a test that re-assembles the source and byte-compares against
-  the committed binary. It reports the first differing address and the rebuild
+- **Committed artifacts:** `machines/tests/roms/williams_video.asm` (source),
+  `machines/tests/roms/williams_video.bin` (12 KB image at `$D000`),
+  `machines/tests/roms/williams_video_e000.bin` (8 KB image at `$E000`), and
+  `machines/tests/roms/williams_video_hw.bin` (hardware display build, below),
+  all in git.
+- **Drift guard:** a test that re-assembles the source three ways (default,
+  `-D ROMBASE=0xE000`, `-D HWBUILD=1`) and byte-compares each against its
+  committed binary. It reports the first differing address and the rebuild
   commands. **It must not be allowed to pass by doing nothing:** the dev shell
   exports `PHOSPHOR_ASM=1`, and with that set a missing assembler is a failure
   rather than a skip. CI has no dev shell, sets nothing, and skips with a
@@ -504,6 +508,50 @@ new phase in the ROM rather than a relocation of the existing one.
   the top, so `load_program` is a flat copy. `the_image_fills_the_program_rom_window`
   pins the length and the reset vector, so a bad `-r` window produces a failure
   rather than a short file nobody notices.
+
+## Hardware display build (`phosphor-emulator-9sr9.2`)
+
+The same source with `-D HWBUILD=1` adds an on-screen readout of the result
+block plus button paging, for the hardware trip. Every display block assembles
+to nothing when the flag is off, so the default image stays byte-identical;
+the drift guard above covers all three images.
+
+```
+asl -q -D HWBUILD=1 -o williams_video_hw.p williams_video.asm
+p2bin williams_video_hw.p williams_video_hw.bin -r 0xD000-0xFFFF -l 0x00
+```
+
+- **Layout:** a header row (magic byte plus phase, so a wedge is legible as a
+  wedge), then the 22 result bytes as 11 expected-beside-actual triplets per
+  page over two pages. The two dwell indices that carry no expected value
+  render blank. Numbers only, never a verdict glyph.
+- **Font:** sixteen 8x8 hex glyphs, about 128 bytes, drawn with plain stores
+  (single pen, no blitter, watchdog petted in every loop), because the board
+  has no character generator.
+- **Paging:** the Widget PIA at `$C804`, bits 4-5, active high. Joust's 1P
+  Start is bit 5 and Robotron's is bit 4, so either cabinet's 1P Start pages
+  to the next page and re-runs from the first. The PIA is set for input reads
+  with IRQs off.
+- **Tests:** `the_hardware_build_reports_identical_results_on_screen` reads
+  the drawn cells back out of VRAM and compares them against the result block
+  in RAM; `the_start_button_pages_and_reruns` presses Start through
+  `InputEvent::Button` and checks the page advances and the run repeats. Both
+  pages were also screenshotted under our emulator and reviewed as legible.
+  The MAME screenshot cross-check from the parent plan was not run: no `mame`
+  binary exists in this environment.
+- **Burn:** the file to burn is `williams_video_hw.bin`, linked at `$D000`
+  with the reset vector where the CPU looks for it; the EPROM geometry (three
+  2732s or one 27128) is in
+  [`hardware-conformance.md`](hardware-conformance.md).
+
+Debugging the first display failure surfaced a real core bug: `perform_clr`
+in `core/src/cpu/m68xx.rs` cleared Carry, but on the 6809 and 6800 CLR leaves
+C unaffected (only N, Z and V are defined). The existing tests asserted the
+buggy behavior, so they were corrected to preset Carry across four CLR forms
+(inherent and direct on the 6809, inherent and indexed on the 6800) and the
+helper was fixed. Unrelated to the drawing failure, which was a transposed
+raster in the first glyph routine, but a genuine conformance defect in its own
+right.
 
 ## Running the same binary in MAME
 

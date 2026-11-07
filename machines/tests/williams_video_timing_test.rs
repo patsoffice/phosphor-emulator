@@ -19,7 +19,8 @@
 //! holds `$5A` only once every phase completed, so a zero-filled result block
 //! cannot read as a pass.
 
-use phosphor_core::core::machine::FrontendMachine;
+use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
+use phosphor_machines::joust::INPUT_P1_START;
 use phosphor_machines::registry;
 
 mod common;
@@ -34,6 +35,11 @@ const PROGRAM_D000: &[u8] = include_bytes!("roms/williams_video.bin");
 /// The same program linked at `$E000`, for the board that shrinks program ROM to
 /// 8 KB and puts work RAM at `$D000` instead.
 const PROGRAM_E000: &[u8] = include_bytes!("roms/williams_video_e000.bin");
+/// The same program with `-D HWBUILD=1`: an on-screen readout of the result
+/// block plus button paging, for the hardware trip. The harness never runs it
+/// for results (that would answer questions about a different program); the
+/// display tests below run it for pixels and for the block it publishes.
+const PROGRAM_HW: &[u8] = include_bytes!("roms/williams_video_hw.bin");
 
 /// Every machine on `WilliamsBoard`, with the image its program-ROM window takes.
 ///
@@ -464,9 +470,9 @@ fn a_mid_frame_vram_write_only_affects_rows_the_beam_has_not_reached() {
 // The committed binary cannot drift from its source
 // ---------------------------------------------------------------------------
 
-/// Re-assemble `williams_video.asm` and compare against the committed binary.
+/// Re-assemble `williams_video.asm` and compare against the committed binaries.
 ///
-/// The committed image is the one artifact here that no reviewer can check by
+/// The committed images are the one artifact here that no reviewer can check by
 /// reading, so this is the only thing standing between an edited source and a
 /// stale binary. It therefore must not be allowed to pass by doing nothing:
 /// `PHOSPHOR_ASM` is exported by the Nix dev shell, and when it is set a missing
@@ -474,9 +480,10 @@ fn a_mid_frame_vram_write_only_affects_rows_the_beam_has_not_reached() {
 /// and skips with a printed note.
 #[test]
 fn the_committed_binary_matches_its_source() {
-    // Both link addresses, because a source edit that only breaks one of them is
-    // exactly what a single-image guard would miss. This board is the reason
-    // `assert_binary_matches_source` takes a list rather than one image.
+    // Both link addresses plus the hardware-display build, because a source
+    // edit that only breaks one of them is exactly what a single-image guard
+    // would miss. This board is the reason `assert_binary_matches_source`
+    // takes a list rather than one image.
     common::assert_binary_matches_source(
         "williams_video.asm",
         "williams_video",
@@ -496,6 +503,14 @@ fn the_committed_binary_matches_its_source() {
                 len: PROGRAM_E000.len(),
                 fill: 0x00,
                 define: Some("ROMBASE=0xE000"),
+            },
+            common::Image {
+                committed: PROGRAM_HW,
+                name: "williams_video_hw.bin",
+                base: 0xD000,
+                len: PROGRAM_HW.len(),
+                fill: 0x00,
+                define: Some("HWBUILD=1"),
             },
         ],
     );
@@ -524,6 +539,157 @@ fn the_image_fills_the_program_rom_window() {
             "the reset vector should point at the start of the image"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The hardware-display build: the same results, drawn on screen
+// ---------------------------------------------------------------------------
+
+/// Text geometry, mirroring the equates in the assembly: 9 cells by 12 rows,
+/// each cell 9 VRAM columns by 18 rows starting at column `$23`, row `$13`.
+fn hw_cell(cell_col: u32, cell_row: u32) -> (u32, u32) {
+    (0x23 + 9 * cell_col, 0x13 + 18 * cell_row)
+}
+
+/// A VRAM byte address from column-major coordinates.
+fn hw_vram(col: u32, row: u32) -> u32 {
+    col * 256 + row
+}
+
+fn hw_peek(m: &dyn FrontendMachine, col: u32, row: u32) -> u8 {
+    peek(m, hw_vram(col, row))
+}
+
+/// Run the hardware-display build to completion, then keep running so the
+/// text-region clear and the page draw finish: about 13 frames of column
+/// clears and a dozen of glyph stores, all petting the watchdog.
+fn run_hw_display(machine: &str) -> (Box<dyn FrontendMachine>, Vec<u8>) {
+    let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
+    let mut m = (entry.create_bare)();
+    common::load_and_reset(&mut *m, machine, PROGRAM_HW, 0xD000);
+    for _ in 0..MAX_FRAMES {
+        m.run_frame();
+        if peek(&*m, R_MAGIC) == MAGIC {
+            break;
+        }
+    }
+    assert_eq!(
+        peek(&*m, R_MAGIC),
+        MAGIC,
+        "{machine}: the hardware build did not finish in {MAX_FRAMES} frames \
+         (phase {})",
+        peek(&*m, R_PHASE)
+    );
+    for _ in 0..40 {
+        m.run_frame();
+    }
+    let results = (0..22u32).map(|i| peek(&*m, RES + i)).collect();
+    (m, results)
+}
+
+/// The hardware build measures the same bytes and draws page 0.
+///
+/// The load-bearing assertion is the first one: the display build publishes a
+/// byte-identical result block, so the screen reports on the tested program
+/// rather than a fork of it. The pixel assertions pin the header ("5A 0A"),
+/// the first index row ("00" with its expectation), and the blank expected
+/// cells of the dwell row, whose ratio the harness checks instead of a value.
+#[test]
+fn the_hardware_build_reports_identical_results_on_screen() {
+    for machine in ["joust", "robotron"] {
+        let reference = run(machine);
+        reference.assert_completed(machine);
+        let (_, hw) = run_hw_display(machine);
+        let expected: Vec<u8> = (0..22u32).map(|i| reference.at(RES + i)).collect();
+        assert_eq!(
+            hw, expected,
+            "{machine}: the display build's result block differs from the \
+             tested build's"
+        );
+    }
+
+    let (m, _) = run_hw_display("joust");
+    let m = &*m;
+
+    // Header magic "5A": '5' is $7E, so the first cell reads background, six
+    // ink bytes, background, down both of its rows.
+    let (c, r) = hw_cell(0, 0);
+    for row in [r, r + 1] {
+        assert_eq!(hw_peek(m, c, row), 0x00, "header '5' pixel 0");
+        for col in c + 1..=c + 6 {
+            assert_eq!(hw_peek(m, col, row), 0x11, "header '5' pixel {}", col - c);
+        }
+        assert_eq!(hw_peek(m, c + 7, row), 0x00, "header '5' pixel 7");
+    }
+
+    // First index row "00": '0' is $3C, background at pixels 0-1 and 6-7.
+    let (c, r) = hw_cell(0, 1);
+    for row in [r, r + 1] {
+        for col in [c, c + 1, c + 6, c + 7] {
+            assert_eq!(hw_peek(m, col, row), 0x00, "index '0' background");
+        }
+        for col in c + 2..=c + 5 {
+            assert_eq!(hw_peek(m, col, row), 0x11, "index '0' ink");
+        }
+    }
+
+    // Dwell row (index 5): the expected cells stay clear, never digits.
+    let (c, r) = hw_cell(3, 6);
+    for (col, row) in [(c, r), (c, r + 1), (c + 9, r), (c + 9, r + 1)] {
+        assert_eq!(
+            hw_peek(m, col, row),
+            0x00,
+            "dwell expected cells are blank (no exact expectation)"
+        );
+    }
+}
+
+fn press_start(m: &mut Box<dyn FrontendMachine>, pressed: bool) {
+    m.handle_input(InputEvent::Button {
+        id: InputId(INPUT_P1_START as u16),
+        pressed,
+    });
+}
+
+/// The start button pages and, on the last page, re-runs.
+///
+/// Press P1 Start (Joust Widget PIA port A bit 5) through release, and page 1
+/// replaces page 0: row 1 reads index "0B" rather than "00". A second press
+/// restarts the program, which re-publishes magic and redraws page 0.
+#[test]
+fn the_start_button_pages_and_reruns() {
+    let (mut m, _) = run_hw_display("joust");
+
+    // Page sentinel: pixel 1 of the row-1 index-lo digit. '0' ($3C) has
+    // background there, 'B' ($7C) has ink, so one byte tells the pages apart.
+    let sentinel = hw_vram(0x23 + 10, 0x13 + 18);
+    assert_eq!(peek(&*m, sentinel), 0x00, "page 0 shows index 00");
+    press_start(&mut m, true);
+    for _ in 0..4 {
+        m.run_frame();
+    }
+    press_start(&mut m, false);
+    for _ in 0..40 {
+        m.run_frame();
+    }
+    // Page 1, row 1 is index 11 = "0B": 'B' ($7C) has ink at pixel 1 where
+    // '0' ($3C) has background, so one byte distinguishes the pages.
+    assert_eq!(peek(&*m, sentinel), 0x11, "a press flips to page 1");
+
+    press_start(&mut m, true);
+    for _ in 0..4 {
+        m.run_frame();
+    }
+    press_start(&mut m, false);
+    for _ in 0..80 {
+        m.run_frame();
+    }
+    assert_eq!(
+        peek(&*m, R_MAGIC),
+        MAGIC,
+        "a press on the last page re-runs and republishes magic"
+    );
+    assert_eq!(peek(&*m, sentinel), 0x00, "the re-run restarts on page 0");
 }
 
 // ---------------------------------------------------------------------------
