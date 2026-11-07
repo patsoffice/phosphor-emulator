@@ -206,12 +206,13 @@ pub trait M68xxAlu {
         result
     }
 
-    /// CLR: result = 0. N=0, Z=1, V=0. C is unaffected.
+    /// CLR: result = 0. N=0, Z=1, V=0, C=0.
     #[inline]
     fn perform_clr(&mut self) -> u8 {
         self.set_flag(CcFlag::N, false);
         self.set_flag(CcFlag::Z, true);
         self.set_flag(CcFlag::V, false);
+        self.set_flag(CcFlag::C, false);
         0
     }
 

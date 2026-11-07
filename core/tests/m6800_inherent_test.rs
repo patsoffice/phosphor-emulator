@@ -139,8 +139,7 @@ fn test_clra() {
     assert_ne!(cpu.cc & (CcFlag::Z as u8), 0); // Z set
     assert_eq!(cpu.cc & (CcFlag::N as u8), 0); // N cleared
     assert_eq!(cpu.cc & (CcFlag::V as u8), 0); // V cleared
-    // C was preset above and CLR leaves it unaffected per the datasheet.
-    assert_ne!(cpu.cc & (CcFlag::C as u8), 0); // C preserved, not cleared
+    assert_eq!(cpu.cc & (CcFlag::C as u8), 0); // C cleared
 }
 
 #[test]

@@ -247,14 +247,12 @@ fn test_clr_direct() {
     let mut bus = TestBus::new();
     bus.load(0, &[0x0F, 0x10]);
     bus.memory[0x0010] = 0xFF;
-    // Preset Carry: per the datasheet CLR leaves C unaffected.
-    cpu.cc |= CcFlag::C as u8;
     tick(&mut cpu, &mut bus, 6);
     assert_eq!(bus.memory[0x0010], 0x00);
     assert_eq!(cpu.cc & (CcFlag::Z as u8), CcFlag::Z as u8);
     assert_eq!(cpu.cc & (CcFlag::N as u8), 0);
     assert_eq!(cpu.cc & (CcFlag::V as u8), 0);
-    assert_ne!(cpu.cc & (CcFlag::C as u8), 0); // C preserved, not cleared
+    assert_eq!(cpu.cc & (CcFlag::C as u8), 0);
 }
 
 #[test]

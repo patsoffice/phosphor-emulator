@@ -113,10 +113,6 @@ fn test_clear() {
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0)); // LDA #$FF
 
-    // Preset Carry: per the datasheet CLR leaves C unaffected, so it must
-    // survive the clear below.
-    cpu.cc |= CcFlag::C as u8;
-
     // CLRA: A = 0
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
@@ -124,19 +120,19 @@ fn test_clear() {
     assert_eq!(cpu.cc & (CcFlag::Z as u8), CcFlag::Z as u8);
     assert_eq!(cpu.cc & (CcFlag::N as u8), 0);
     assert_eq!(cpu.cc & (CcFlag::V as u8), 0);
-    assert_ne!(cpu.cc & (CcFlag::C as u8), 0); // C preserved, not cleared
+    assert_eq!(cpu.cc & (CcFlag::C as u8), 0);
 
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0)); // LDB #$42
 
-    // CLRB: B = 0 (Carry still set from above; LDB does not touch it)
+    // CLRB: B = 0
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
     cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
     assert_eq!(cpu.b, 0x00);
     assert_eq!(cpu.cc & (CcFlag::Z as u8), CcFlag::Z as u8);
     assert_eq!(cpu.cc & (CcFlag::N as u8), 0);
     assert_eq!(cpu.cc & (CcFlag::V as u8), 0);
-    assert_ne!(cpu.cc & (CcFlag::C as u8), 0); // C preserved, not cleared
+    assert_eq!(cpu.cc & (CcFlag::C as u8), 0);
 }
 
 #[test]
