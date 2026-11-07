@@ -544,14 +544,17 @@ p2bin williams_video_hw.p williams_video_hw.bin -r 0xD000-0xFFFF -l 0x00
   2732s or one 27128) is in
   [`hardware-conformance.md`](hardware-conformance.md).
 
-Debugging the first display failure surfaced a real core bug: `perform_clr`
-in `core/src/cpu/m68xx.rs` cleared Carry, but on the 6809 and 6800 CLR leaves
-C unaffected (only N, Z and V are defined). The existing tests asserted the
-buggy behavior, so they were corrected to preset Carry across four CLR forms
-(inherent and direct on the 6809, inherent and indexed on the 6800) and the
-helper was fixed. Unrelated to the drawing failure, which was a transposed
-raster in the first glyph routine, but a genuine conformance defect in its own
-right.
+Debugging the first display failure prompted a change to `perform_clr` in
+`core/src/cpu/m68xx.rs` so CLR would preserve Carry, on the theory that the
+datasheet leaves C unaffected. That theory was wrong and the change was
+reverted. Three lines agree that the 6809 clears Carry on CLR: Super Pac-Man
+is real game code that runs correctly on real hardware, and it plays wrong
+with preserved Carry; its golden pin (captured under cleared Carry)
+mismatched with the change and matched again once the revert landed; and
+MAME's own 6809 core does `m_cc &= ~CC_NZVC` in `CLR8`
+(`devices/cpu/m6809/base6x09.lst`). The tree therefore ships CLR clearing
+Carry. The drawing failure itself was a transposed raster in the first glyph
+routine, unrelated to flags.
 
 ## Running the same binary in MAME
 
