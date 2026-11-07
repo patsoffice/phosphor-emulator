@@ -8,3 +8,7 @@ cross-validation/mame0148/
 
 # The reference-comparison probe builds outside the workspace.
 /tools/marty-probe/target
+
+# beads (br) local runtime scratch; issues.jsonl stays tracked.
+.beads/.br_recovery/
+.beads/beads.db*
