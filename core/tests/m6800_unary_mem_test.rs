@@ -166,7 +166,7 @@ fn test_clr_idx() {
     let mut bus = TestBus::new();
     cpu.x = 0x0100;
     bus.memory[0x010A] = 0xFF;
-    // Set some flags that CLR should clear
+    // Set flags; CLR clears N and V but leaves C unaffected per the datasheet.
     cpu.cc |= CcFlag::N as u8 | CcFlag::V as u8 | CcFlag::C as u8;
     bus.load(0, &[0x6F, 0x0A]); // CLR $0A,X
     tick(&mut cpu, &mut bus, 7);
@@ -174,7 +174,7 @@ fn test_clr_idx() {
     assert_ne!(cpu.cc & (CcFlag::Z as u8), 0);
     assert_eq!(cpu.cc & (CcFlag::N as u8), 0);
     assert_eq!(cpu.cc & (CcFlag::V as u8), 0);
-    assert_eq!(cpu.cc & (CcFlag::C as u8), 0);
+    assert_ne!(cpu.cc & (CcFlag::C as u8), 0); // C preserved, not cleared
 }
 
 #[test]
